@@ -37,6 +37,10 @@ _LIST_OR_NUMBER_LITERAL = re.compile(
     r"^\s*(?P<sign>[+-]?)(?P<first>[1-9]\d{0,2}),(?P<second>\d{3}(?:\.\d+)?)\s*$"
 )
 _NUMBER_BASE_LITERAL = re.compile(r"^\s*(?P<digits>[01]{8,64})\s*$")
+_IMAGINARY_I_LITERAL = re.compile(r"(?<![A-Za-z0-9_])i(?![A-Za-z0-9_])")
+_IMAGINARY_I_COEFFICIENT = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<number>{_NUMBER_PATTERN})i(?![A-Za-z0-9_])"
+)
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -82,6 +86,7 @@ def query_with_interpretations(
     parse_timeout_seconds: float = 5.0,
     pod_timeout_seconds: float | None = None,
     deadline: float | None = None,
+    _allow_i_assumption: bool = True,
 ) -> dict[str, Any]:
     if not query or len(query) > 4000:
         raise InterpretationError("input must contain 1 to 4000 characters")
@@ -125,6 +130,21 @@ def query_with_interpretations(
         return _interpret_list_or_number(
             source_query,
             list_or_number,
+            selections,
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    if _allow_i_assumption and (
+        _IMAGINARY_I_LITERAL.search(source_query)
+        or _IMAGINARY_I_COEFFICIENT.search(source_query)
+    ):
+        return _interpret_imaginary_i(
+            source_query,
             selections,
             compute=compute,
             numeric_precision=numeric_precision,
@@ -975,6 +995,7 @@ def _interpret_list_or_times(
             parse_timeout_seconds=parse_timeout_seconds,
             pod_timeout_seconds=pod_timeout_seconds,
             deadline=deadline,
+            _allow_i_assumption=False,
         )
         resolved["input"] = source_query
         resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
@@ -1028,6 +1049,106 @@ def _interpret_list_or_times(
         },
         "qualification": "List construction follows the selected interpretation; it is not a formal proof.",
     }
+
+
+def _interpret_imaginary_i(
+    source_query: str,
+    selections: list[str],
+    *,
+    compute: bool,
+    numeric_precision: int,
+    time_limit_seconds: float,
+    parse_timeout_seconds: float,
+    pod_timeout_seconds: float | None,
+    deadline: float | None,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "I"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    if len(candidates) != 2:
+        raise RuntimeError("I registry must contain exactly two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    all_ids = {item["id"] for item in registry["assumptions"]}
+    for selection in selections:
+        if selection not in all_ids:
+            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+
+    i_selections = [selection for selection in selections if selection in candidate_ids]
+    if len(i_selections) > 1:
+        raise AssumptionSelectionError("select at most one I assumption value")
+    if i_selections:
+        chosen = by_id[i_selections[0]]
+        selection_source = "caller_override"
+    else:
+        defaults = [item for item in candidates if item.get("service_default")]
+        if len(defaults) != 1:
+            raise RuntimeError("I registry must have exactly one service default")
+        chosen = defaults[0]
+        selection_source = "service_default"
+    if chosen["meaning"] not in {"imaginary", "variable"}:
+        raise RuntimeError("I registry contains an unsupported meaning")
+
+    replacement = "I" if chosen["meaning"] == "imaginary" else "i"
+    resolved_expression = _IMAGINARY_I_LITERAL.sub(replacement, source_query)
+    resolved_expression = _IMAGINARY_I_COEFFICIENT.sub(
+        lambda match: f"{match.group('number')}*{replacement}", resolved_expression
+    )
+    remaining_selections = [selection for selection in selections if selection not in candidate_ids]
+    resolved = query_with_interpretations(
+        resolved_expression,
+        remaining_selections,
+        compute=compute,
+        numeric_precision=numeric_precision,
+        time_limit_seconds=time_limit_seconds,
+        parse_timeout_seconds=parse_timeout_seconds,
+        pod_timeout_seconds=pod_timeout_seconds,
+        deadline=deadline,
+        _allow_i_assumption=False,
+    )
+
+    assumption_payload = {
+        "type": "I",
+        "selected": chosen["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in candidates
+        ],
+    }
+    resolved["input"] = source_query
+    resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
+    resolved["assumptions"] = [*resolved.get("assumptions", []), assumption_payload]
+    original_interpretation = resolved["interpretation"]
+    original_ast = original_interpretation.get("typed_ast")
+    resolved["interpretation"] = {
+        **original_interpretation,
+        "typed_ast": {
+            "node": "i_interpretation",
+            "meaning": chosen["meaning"],
+            "symbol": replacement,
+            "resolved_expression": resolved_expression,
+            "expression": original_ast,
+        },
+    }
+    inner_classification = resolved.get("classification")
+    resolved["classification"] = {
+        "name": "deterministic_lexical_baseline",
+        "method": "neutral ranking for imaginary-unit and variable readings of lowercase i",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+        "nested_classification": inner_classification,
+    }
+    return resolved
 
 
 def _list_mathml(items: list[tuple[str, str]]) -> str:

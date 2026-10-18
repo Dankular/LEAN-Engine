@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.7.0",
+  "registry_version": "1.8.0",
   "assumptions": [
     {
       "id": "angle:radians",
@@ -143,6 +143,22 @@
       "type": "NumberBase",
       "description": "Interpret an integer string as base 10.",
       "meaning": "decimal",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "i:imaginary-unit",
+      "type": "I",
+      "description": "Interpret lowercase i as the imaginary unit.",
+      "meaning": "imaginary",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "i:variable",
+      "type": "I",
+      "description": "Interpret lowercase i as an ordinary variable.",
+      "meaning": "variable",
       "entry_version": 1,
       "service_default": false
     }

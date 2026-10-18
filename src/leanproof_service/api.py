@@ -102,6 +102,7 @@ def readyz() -> dict[str, object]:
 
 @app.get("/v1/capabilities")
 def capabilities() -> dict[str, object]:
+    registry = assumption_registry()
     return {
         "formalization": "caller_supplied_typed_specification",
         "sorts": ["Int", "Real"],
@@ -132,8 +133,8 @@ def capabilities() -> dict[str, object]:
         "interpretations": {
             "status": "implemented_initial_slice",
             "path": "/v1/interpret",
-            "assumption_registry_version": assumption_registry()["registry_version"],
-            "assumption_types": ["AngleUnit", "LogBase", "Unit"],
+            "assumption_registry_version": registry["registry_version"],
+            "assumption_types": sorted({item["type"] for item in registry["assumptions"]}),
             "multiple_compatible_selections": True,
             "same_type_selection_scope": "applies to every matching bare call in one formula",
             "unit_assumption_scope": "single ambiguous m unit in a standalone numeric quantity",
