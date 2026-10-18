@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
+    InterpretationTimeout,
     query_with_interpretations,
 )
 from .input_syntax import MathInputError, parse_math_input
@@ -186,6 +187,7 @@ def execute_query(
     pod_indexes: list[str] | None = None,
     scanners: list[str] | None = None,
     ignorecase: bool = False,
+    parse_timeout_seconds: float = 5.0,
     total_timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
     started = perf_counter()
@@ -236,10 +238,19 @@ def execute_query(
             validate_only=False,
             numeric_precision=numeric_precision,
             time_limit_seconds=remaining_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
             deadline=deadline,
         )
     except AssumptionSelectionError:
         raise
+    except InterpretationTimeout as exc:
+        if deadline - perf_counter() <= 0.001:
+            return _symbolic_timeout_response(
+                input_text, started, formats, parse_timing=exc.parse_timing_seconds
+            )
+        return _parse_timeout_response(
+            input_text, started, parse_timing=exc.parse_timing_seconds
+        )
     except InterpretationError as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
 
@@ -360,6 +371,7 @@ def validate_query(
     latlong: str | None = None,
     units: str | None = None,
     ignorecase: bool = False,
+    parse_timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
     started = perf_counter()
     planning_input = input_text.casefold() if ignorecase else input_text
@@ -390,7 +402,12 @@ def validate_query(
                     },
                 }
             }
-        interpreted, _ = _prepare_query(planning_input, assumptions or [], validate_only=True)
+        interpreted, _ = _prepare_query(
+            planning_input,
+            assumptions or [],
+            validate_only=True,
+            parse_timeout_seconds=parse_timeout_seconds,
+        )
     except ProviderContextNeeded as exc:
         elapsed = perf_counter() - started
         return {
@@ -408,6 +425,22 @@ def validate_query(
         }
     except AssumptionSelectionError:
         raise
+    except InterpretationTimeout as exc:
+        elapsed = perf_counter() - started
+        return {
+            "validatequeryresult": {
+                "success": False,
+                "error": False,
+                "timing": _seconds(elapsed),
+                "parsetiming": _seconds(exc.parse_timing_seconds),
+                "parsetimedout": True,
+                "version": _API_VERSION,
+                "service": "LEAN Engine",
+                "input": input_text,
+                "assumptions": [],
+                "tips": [{"text": str(exc)}],
+            }
+        }
     except InterpretationError as exc:
         elapsed = perf_counter() - started
         return {
@@ -776,6 +809,7 @@ def _prepare_query(
     validate_only: bool,
     numeric_precision: int = 50,
     time_limit_seconds: float = 5.0,
+    parse_timeout_seconds: float = 5.0,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     try:
@@ -789,6 +823,7 @@ def _prepare_query(
             compute=not validate_only,
             numeric_precision=numeric_precision,
             time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
             deadline=deadline,
         )
         expression = str(interpreted["interpretation"]["expression"])
@@ -832,11 +867,20 @@ def _prepare_query(
         ) if value is not None
     ]
     parse_timing = perf_counter() - parse_started
-    if validate_only and expressions:
+    if expressions:
         combined_expression = " + ".join(f"({value})" for value in expressions)
-        parsed = run_symbolic(SymbolicRequest(operation="validate", expression=combined_expression))
+        effective_parse_timeout = parse_timeout_seconds
+        if deadline is not None:
+            effective_parse_timeout = min(effective_parse_timeout, deadline - perf_counter())
+        if effective_parse_timeout <= 0.001:
+            raise InterpretationTimeout(perf_counter() - parse_started)
+        parsed = run_symbolic(SymbolicRequest(
+            operation="validate",
+            expression=combined_expression,
+            time_limit_seconds=effective_parse_timeout,
+        ))
         if parsed.get("timed_out"):
-            raise InterpretationError("input parsing exceeded its time limit")
+            raise InterpretationTimeout(perf_counter() - parse_started)
         if parsed.get("error"):
             raise InterpretationError(str(parsed.get("error", "input could not be parsed")))
         parse_timing += float(parsed.get("parse_timing_seconds", 0.0))
@@ -1091,6 +1135,29 @@ def _symbolic_timeout_response(
         qualification="A timeout contains no result and is not a proof.",
     )
     payload["queryresult"]["input"] = input_text
+    return payload
+
+
+def _parse_timeout_response(
+    input_text: str,
+    started: float,
+    *,
+    parse_timing: float,
+) -> dict[str, Any]:
+    payload = _query_envelope(
+        success=False,
+        error=False,
+        pods=[],
+        elapsed=perf_counter() - started,
+        parse_timing=parse_timing,
+        datatypes="",
+        warnings=[{"text": "The input exceeded its parsing time limit."}],
+        assumptions=[],
+        evidence={"kind": "symbolic_parse_timeout", "engine": "sympy", "verified": False},
+        qualification="No computation was run because the input parser timed out.",
+    )
+    payload["queryresult"]["input"] = input_text
+    payload["queryresult"]["parsetimedout"] = True
     return payload
 
 

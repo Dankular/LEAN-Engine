@@ -162,6 +162,13 @@ def capabilities() -> dict[str, object]:
                 "supported_weather_parameters": ["location", "latlong", "units"],
                 "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
                 "time_controls": {
+                    "parsetimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 5,
+                        "minimum_seconds": 0.1,
+                        "maximum_seconds": 30,
+                        "scope": "isolated SymPy parsing for mathematical inputs",
+                    },
                     "totaltimeout": {
                         "status": "implemented_initial_slice",
                         "default_seconds": 20,
@@ -169,9 +176,7 @@ def capabilities() -> dict[str, object]:
                         "maximum_seconds": 30,
                         "scope": "monotonic deadline for symbolic worker execution and provider request sequences",
                     },
-                    "unsupported_stage_controls": [
-                        "parsetimeout", "scantimeout", "podtimeout", "formattimeout"
-                    ],
+                    "unsupported_stage_controls": ["scantimeout", "podtimeout", "formattimeout"],
                     "async": {
                         "status": "implemented_initial_slice",
                         "modes": ["false", "true", "numeric seconds"],
@@ -274,6 +279,7 @@ def full_results_query(
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
+    parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
     async_mode: Annotated[
         str,
@@ -320,6 +326,7 @@ def full_results_query(
                 pod_indexes=podindex,
                 scanners=scanner,
                 ignorecase=ignorecase,
+                parse_timeout_seconds=parsetimeout,
                 total_timeout_seconds=totaltimeout,
             )
             if ignorecase:
@@ -507,6 +514,7 @@ def full_results_validatequery(
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
+    parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -525,7 +533,7 @@ def full_results_validatequery(
     try:
         payload = validate_query(
             input, assumption, location=location, latlong=latlong, units=units,
-            ignorecase=ignorecase,
+            ignorecase=ignorecase, parse_timeout_seconds=parsetimeout,
         )
     except AssumptionSelectionError as exc:
         response = render_response(validate_error(input, str(exc)), selected_output)

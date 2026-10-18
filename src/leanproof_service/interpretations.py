@@ -41,6 +41,12 @@ class AssumptionSelectionError(InterpretationError):
     pass
 
 
+class InterpretationTimeout(InterpretationError):
+    def __init__(self, parse_timing_seconds: float) -> None:
+        super().__init__("input parsing exceeded its time limit")
+        self.parse_timing_seconds = parse_timing_seconds
+
+
 def assumption_registry() -> dict[str, Any]:
     """Read the checked-in, versioned service-owned assumption catalog."""
     data = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -57,6 +63,7 @@ def query_with_interpretations(
     compute: bool = True,
     numeric_precision: int = 50,
     time_limit_seconds: float = 5.0,
+    parse_timeout_seconds: float = 5.0,
     deadline: float | None = None,
 ) -> dict[str, Any]:
     if not query or len(query) > 4000:
@@ -191,21 +198,24 @@ def query_with_interpretations(
             assumption_payload = []
 
     preparation_timing = perf_counter() - parsing_started
-    if compute:
-        parsed = None
-        parse_timing = preparation_timing
-    else:
-        parsed = run_symbolic(SymbolicRequest(
-            operation="validate", expression=expression, time_limit_seconds=time_limit_seconds
-        ))
-        if parsed.get("timed_out"):
-            raise InterpretationError("input parsing exceeded its time limit")
-        if parsed.get("error"):
-            raise InterpretationError(parsed.get("error", "input could not be parsed"))
-        parse_timing = preparation_timing + float(parsed.get("parse_timing_seconds", 0.0))
+    effective_parse_timeout = parse_timeout_seconds
+    if deadline is not None:
+        effective_parse_timeout = min(effective_parse_timeout, deadline - perf_counter())
+    if effective_parse_timeout <= 0.001:
+        raise InterpretationTimeout(perf_counter() - parsing_started)
+    parsed = run_symbolic(SymbolicRequest(
+        operation="validate",
+        expression=expression,
+        time_limit_seconds=effective_parse_timeout,
+    ))
+    if parsed.get("timed_out"):
+        raise InterpretationTimeout(perf_counter() - parsing_started)
+    if parsed.get("error"):
+        raise InterpretationError(parsed.get("error", "input could not be parsed"))
+    parse_timing = preparation_timing + float(parsed.get("parse_timing_seconds", 0.0))
 
     if not compute:
-        symbolic = parsed or {}
+        symbolic = parsed
         outcome = "validated"
         result = None
     else:
