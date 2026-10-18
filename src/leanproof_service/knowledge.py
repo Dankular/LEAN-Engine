@@ -17,7 +17,9 @@ from .models import StrictModel
 
 class KnowledgeRequest(StrictModel):
     provider: Literal["wikidata", "dbnomics", "nist_codata", "geonames", "open_meteo"]
-    operation: Literal["search", "entity", "series", "constant", "weather"]
+    operation: Literal[
+        "search", "entity", "series", "constant", "weather", "weather_forecast"
+    ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
@@ -39,7 +41,7 @@ class KnowledgeRequest(StrictModel):
             "dbnomics": {"series"},
             "nist_codata": {"constant"},
             "geonames": {"search"},
-            "open_meteo": {"weather"},
+            "open_meteo": {"weather", "weather_forecast"},
         }
         if self.operation not in expected[self.provider]:
             raise ValueError(f"{self.operation} is not supported by {self.provider}")
@@ -262,11 +264,19 @@ def _open_meteo(
         first = results[0]
         latitude, longitude = float(first["latitude"]), float(first["longitude"])
         location_source = {"name": "Open-Meteo geocoding API", "url": "https://open-meteo.com/"}
-    params = {
-        "latitude": str(latitude), "longitude": str(longitude),
-        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,showers,snowfall,weather_code,wind_speed_10m",
-        "timezone": "auto",
-    }
+    params = {"latitude": str(latitude), "longitude": str(longitude), "timezone": "auto"}
+    if request.operation == "weather_forecast":
+        params.update({
+            "daily": (
+                "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum"
+            ),
+            "forecast_days": "7",
+        })
+    else:
+        params["current"] = (
+            "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,"
+            "precipitation,rain,showers,snowfall,weather_code,wind_speed_10m"
+        )
     if request.units == "nonmetric":
         params.update({
             "temperature_unit": "fahrenheit",

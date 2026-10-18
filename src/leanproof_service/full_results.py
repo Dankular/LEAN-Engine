@@ -32,6 +32,7 @@ from .knowledge import (
 )
 from .math_svg import mathml_image
 from .symbolic import SymbolicRequest, run_symbolic
+from .weather_svg import forecast_chart_image, forecast_plaintext
 
 
 _API_VERSION = "2.0"
@@ -118,7 +119,11 @@ def async_pod_descriptor(
             return "Date", "Result", "Date"
         return "Result", "Result", "Mathematical"
     return {
-        "open_meteo": ("Current weather", "Weather", "Data"),
+        "open_meteo": (
+            ("Weather forecast", "WeatherForecast", "Data")
+            if request.operation == "weather_forecast"
+            else ("Current weather", "Weather", "Data")
+        ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "Data"),
         "wikidata": ("Entity matches", "EntitySearch", "Data"),
         "dbnomics": ("Economic time series", "EconomicSeries", "Data"),
@@ -239,6 +244,7 @@ def execute_query(
             scanners=scanners,
             deadline=deadline,
             pod_timeout_seconds=pod_timeout_seconds,
+            plot_width=plot_width,
         )
     remaining_seconds = deadline - perf_counter()
     if remaining_seconds <= 0:
@@ -592,14 +598,23 @@ def _provider_request(
     unit_system = units.strip().lower() if units is not None else None
     if unit_system is not None and unit_system not in {"metric", "nonmetric"}:
         raise FullResultsRequestError("units must be either 'metric' or 'nonmetric'")
+    forecast = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's)\s+)?(?:the\s+)?"
+        r"(?:(?:7[-\s]?day)\s+)?(?:weather\s+)?forecast"
+        r"(?:\s+(?:in|at|for)\s+(.+?))?\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
     weather = re.fullmatch(
         r"\s*(?:(?:what\s+is|what's)\s+)?(?:the\s+)?(?:current\s+)?weather"
         r"(?:\s+(?:in|at|for)\s+(.+?))?\s*[?.!]*\s*",
         input_text,
         re.IGNORECASE,
     )
-    if weather:
-        embedded_location = (weather.group(1) or "").strip()
+    weather_match = forecast or weather
+    if weather_match:
+        embedded_location = (weather_match.group(1) or "").strip()
+        operation = "weather_forecast" if forecast else "weather"
         if embedded_location and (location or latlong):
             raise FullResultsRequestError(
                 "specify weather location in either input, location, or latlong, not more than one"
@@ -608,12 +623,12 @@ def _provider_request(
             raise FullResultsRequestError("location and latlong cannot be combined")
         if embedded_location:
             return _knowledge_request(
-                provider="open_meteo", operation="weather", location=embedded_location,
+                provider="open_meteo", operation=operation, location=embedded_location,
                 units=unit_system,
             )
         if location:
             return _knowledge_request(
-                provider="open_meteo", operation="weather", location=location.strip(),
+                provider="open_meteo", operation=operation, location=location.strip(),
                 units=unit_system,
             )
         if latlong:
@@ -626,13 +641,14 @@ def _provider_request(
                 raise FullResultsRequestError("latlong must contain numeric coordinates") from exc
             return _knowledge_request(
                 provider="open_meteo",
-                operation="weather",
+                operation=operation,
                 latitude=latitude,
                 longitude=longitude,
                 units=unit_system,
             )
         raise ProviderContextNeeded(
-            "weather needs an explicit location; use input='weather in <place>', location, or latlong"
+            "weather needs an explicit location; use 'weather in <place>' or "
+            "'weather forecast in <place>', location, or latlong"
         )
 
     if location is not None or latlong is not None or unit_system is not None:
@@ -730,13 +746,18 @@ def _execute_provider_query(
     scanners: list[str] | None,
     deadline: float,
     pod_timeout_seconds: float,
+    plot_width: int,
 ) -> dict[str, Any]:
     provider_deadline = min(deadline, perf_counter() + pod_timeout_seconds)
     try:
         knowledge = query_knowledge(request, deadline=provider_deadline)
     except KnowledgeDeadlineExceeded:
         provider_titles = {
-            "open_meteo": "Current weather",
+            "open_meteo": (
+                "Weather forecast"
+                if request.operation == "weather_forecast"
+                else "Current weather"
+            ),
             "nist_codata": "Physical constant",
             "wikidata": "Entity matches",
             "dbnomics": "Economic time series",
@@ -785,17 +806,30 @@ def _execute_provider_query(
         ) from exc
 
     provider_presentation = {
-        "open_meteo": ("Current weather", "Weather", "Weather"),
+        "open_meteo": (
+            ("Weather forecast", "WeatherForecast", "Weather")
+            if request.operation == "weather_forecast"
+            else ("Current weather", "Weather", "Weather")
+        ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "ScientificConstant"),
         "wikidata": ("Entity matches", "EntitySearch", "Entity"),
         "dbnomics": ("Economic time series", "EconomicSeries", "Economics"),
         "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
     title, pod_id, datatype = provider_presentation[request.provider]
-    plaintext = _provider_plaintext(request.provider, knowledge["data"])
+    plaintext = (
+        forecast_plaintext(knowledge["data"])
+        if request.provider == "open_meteo" and request.operation == "weather_forecast"
+        else None
+    ) or _provider_plaintext(request.provider, knowledge["data"])
     selected_formats = formats or ["plaintext"]
     input_image = _svg_text_image(input_text) if "image" in selected_formats else None
-    result_image = _svg_text_image(plaintext) if "image" in selected_formats else None
+    result_image = None
+    if "image" in selected_formats:
+        if request.provider == "open_meteo" and request.operation == "weather_forecast":
+            result_image = forecast_chart_image(knowledge["data"], width=plot_width)
+        if result_image is None:
+            result_image = _svg_text_image(plaintext)
     input_subpod: dict[str, Any] = {"title": ""}
     result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
     if "plaintext" in selected_formats:

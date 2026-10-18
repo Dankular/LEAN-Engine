@@ -159,10 +159,10 @@ def capabilities() -> dict[str, object]:
             "proof_status": "sampled visualization, not a formal proof",
         },
         "symbolic_images": {
-            "ordinary_math": "escaped plaintext as inline SVG in Input, Result, and DecimalApproximation subpods",
+            "ordinary_math": "bounded structural presentation-MathML SVG in Input and Result, with escaped-text fallback; DecimalApproximation uses escaped text",
             "plots": "sampled graph SVG with bounded dimensions",
-            "provider_data": "escaped provider plaintext as SVG; no provider-specific chart or map rendering",
-            "typesetting": "ordinary mathematical images are not structurally typeset",
+            "provider_data": "escaped provider plaintext as SVG, except seven-day Open-Meteo forecasts which include a chart",
+            "typesetting": "bounded structural math rendering with escaped-text fallback for unsupported expressions",
         },
         "symbolic_series": {
             "order_range": [1, 32],
@@ -231,6 +231,7 @@ def capabilities() -> dict[str, object]:
                     "presentation LaTeX and MathML expressions",
                     "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
                     "weather location queries",
+                    "explicit seven-day weather forecast queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",
                     "explicit GeoNames place searches",
@@ -238,6 +239,8 @@ def capabilities() -> dict[str, object]:
                 ],
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
+                "weather_outputs": ["current conditions", "seven-day forecast", "daily forecast chart"],
+                "weather_chart_width": "controlled by plotwidth",
                 "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
                 "time_controls": {
                     "parsetimeout": {
