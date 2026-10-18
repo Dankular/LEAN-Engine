@@ -162,6 +162,12 @@ def capabilities() -> dict[str, object]:
             "ordinary_math": "bounded structural presentation-MathML SVG in Input and Result, with escaped-text fallback; DecimalApproximation uses escaped text",
             "plots": "sampled graph SVG with bounded dimensions",
             "provider_data": "escaped provider plaintext as SVG, except seven-day Open-Meteo forecasts which include a chart",
+            "text_width": {
+                "query_parameter": "width",
+                "default": 500,
+                "range": [100, 1600],
+                "scope": "text-oriented images; plots and graphics use plotwidth",
+            },
             "typesetting": "bounded structural math rendering with escaped-text fallback for unsupported expressions",
         },
         "symbolic_series": {
@@ -241,6 +247,7 @@ def capabilities() -> dict[str, object]:
                 "supported_weather_parameters": ["location", "latlong", "units"],
                 "weather_outputs": ["current conditions", "seven-day forecast", "daily forecast chart"],
                 "weather_chart_width": "controlled by plotwidth",
+                "text_width": {"query_parameter": "width", "default": 500, "range": [100, 1600]},
                 "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
                 "time_controls": {
                     "parsetimeout": {
@@ -442,6 +449,14 @@ def full_results_query(
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
     podtimeout: Annotated[float, Query(ge=0.1, le=30)] = 4.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
+    width: Annotated[
+        int,
+        Query(
+            ge=100,
+            le=1600,
+            description="Approximate width for text-oriented images; does not affect plots or graphics",
+        ),
+    ] = 500,
     plotwidth: Annotated[int, Query(ge=100, le=1600)] = 200,
     async_mode: Annotated[
         str,
@@ -491,6 +506,7 @@ def full_results_query(
                 parse_timeout_seconds=parsetimeout,
                 pod_timeout_seconds=podtimeout,
                 total_timeout_seconds=totaltimeout,
+                text_width=width,
                 plot_width=plotwidth,
             )
             if ignorecase:
@@ -509,6 +525,7 @@ def full_results_query(
                 async_url="/v2/asyncPod/pending",
                 formats=formats,
                 elapsed=0.0,
+                text_width=width,
             )
             probe = filter_response_pods(
                 probe, includepodid, excludepodid, podtitle, podindex, scanner
@@ -533,6 +550,7 @@ def full_results_query(
                     scanner=pod_scanner,
                     async_url=async_url,
                     formats=formats,
+                    text_width=width,
                     elapsed=monotonic() - job.created_at,
                 )
                 pending = filter_response_pods(

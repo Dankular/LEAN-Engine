@@ -140,8 +140,9 @@ def async_query_payload(
     async_url: str,
     formats: list[str],
     elapsed: float,
+    text_width: int = 500,
 ) -> dict[str, Any]:
-    input_image = _svg_text_image(input_text) if "image" in formats else None
+    input_image = _svg_text_image(input_text, width=text_width) if "image" in formats else None
     input_pod = _initial_pods(
         input_text, input_text, None, formats, input_image=input_image
     )[0]
@@ -206,6 +207,7 @@ def execute_query(
     parse_timeout_seconds: float = 5.0,
     pod_timeout_seconds: float = 4.0,
     total_timeout_seconds: float = 20.0,
+    text_width: int = 500,
     plot_width: int = 200,
 ) -> dict[str, Any]:
     started = perf_counter()
@@ -244,12 +246,14 @@ def execute_query(
             scanners=scanners,
             deadline=deadline,
             pod_timeout_seconds=pod_timeout_seconds,
+            text_width=text_width,
             plot_width=plot_width,
         )
     remaining_seconds = deadline - perf_counter()
     if remaining_seconds <= 0:
         return _symbolic_timeout_response(
-            input_text, started, formats, parse_timing=provider_parse_timing
+            input_text, started, formats, parse_timing=provider_parse_timing,
+            text_width=text_width,
         )
     try:
         interpreted, symbolic_request = _prepare_query(
@@ -267,7 +271,8 @@ def execute_query(
     except InterpretationTimeout as exc:
         if deadline - perf_counter() <= 0.001:
             return _symbolic_timeout_response(
-                input_text, started, formats, parse_timing=exc.parse_timing_seconds
+                input_text, started, formats, parse_timing=exc.parse_timing_seconds,
+                text_width=text_width,
             )
         return _parse_timeout_response(
             input_text, started, parse_timing=exc.parse_timing_seconds
@@ -415,14 +420,20 @@ def execute_query(
         }
     input_image = None
     if "image" in formats:
-        input_image = mathml_image(input_mathml, input_display) or _svg_text_image(input_display)
+        input_image = mathml_image(
+            input_mathml, input_display, max_width=text_width
+        ) or _svg_text_image(input_display, width=text_width)
     if "image" in formats and result_image is None:
-        result_image = mathml_image(symbolic.get("result_mathml"), result_text)
+        result_image = mathml_image(
+            symbolic.get("result_mathml"), result_text, max_width=text_width
+        )
         if result_image is None:
-            result_image = _svg_text_image(result_text)
+            result_image = _svg_text_image(result_text, width=text_width)
     approximation_image = None
     if "image" in formats and numeric_approximation is not None:
-        approximation_image = _svg_text_image(str(numeric_approximation["value"]))
+        approximation_image = _svg_text_image(
+            str(numeric_approximation["value"]), width=text_width
+        )
     has_image_output = any((input_image, result_image, approximation_image))
     warnings = _format_warnings(
         formats,
@@ -746,6 +757,7 @@ def _execute_provider_query(
     scanners: list[str] | None,
     deadline: float,
     pod_timeout_seconds: float,
+    text_width: int,
     plot_width: int,
 ) -> dict[str, Any]:
     provider_deadline = min(deadline, perf_counter() + pod_timeout_seconds)
@@ -763,7 +775,9 @@ def _execute_provider_query(
             "dbnomics": "Economic time series",
             "geonames": "Place matches",
         }
-        input_image = _svg_text_image(input_text) if "image" in formats else None
+        input_image = (
+            _svg_text_image(input_text, width=text_width) if "image" in formats else None
+        )
         pods = _initial_pods(
             input_text, input_text, None, formats, input_image=input_image
         )[:1]
@@ -823,13 +837,15 @@ def _execute_provider_query(
         else None
     ) or _provider_plaintext(request.provider, knowledge["data"])
     selected_formats = formats or ["plaintext"]
-    input_image = _svg_text_image(input_text) if "image" in selected_formats else None
+    input_image = (
+        _svg_text_image(input_text, width=text_width) if "image" in selected_formats else None
+    )
     result_image = None
     if "image" in selected_formats:
         if request.provider == "open_meteo" and request.operation == "weather_forecast":
             result_image = forecast_chart_image(knowledge["data"], width=plot_width)
         if result_image is None:
-            result_image = _svg_text_image(plaintext)
+            result_image = _svg_text_image(plaintext, width=text_width)
     input_subpod: dict[str, Any] = {"title": ""}
     result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
     if "plaintext" in selected_formats:
@@ -1395,8 +1411,9 @@ def _symbolic_timeout_response(
     formats: list[str],
     *,
     parse_timing: float,
+    text_width: int = 500,
 ) -> dict[str, Any]:
-    input_image = _svg_text_image(input_text) if "image" in formats else None
+    input_image = _svg_text_image(input_text, width=text_width) if "image" in formats else None
     payload = _query_envelope(
         success=False,
         error=False,
