@@ -32,6 +32,9 @@ _SUPPORTED_FORMATS = {"plaintext", "minput", "moutput", "mathml"}
 _KNOWN_FORMATS = {
     "image", "imagemap", "plaintext", "minput", "moutput", "cell", "mathml", "sound", "wav"
 }
+_DECIMAL_APPROXIMATION_PRECISIONS = (50, 100, 200, 400, 500)
+_DECIMAL_MORE_STATE = "DecimalApproximation__More digits"
+_DECIMAL_FEWER_STATE = "DecimalApproximation__Fewer digits"
 
 
 class FullResultsRequestError(ValueError):
@@ -83,6 +86,7 @@ def execute_query(
     location: str | None = None,
     latlong: str | None = None,
     units: str | None = None,
+    pod_states: list[str] | None = None,
     include_pod_ids: list[str] | None = None,
     exclude_pod_ids: list[str] | None = None,
     pod_titles: list[str] | None = None,
@@ -90,6 +94,11 @@ def execute_query(
     scanners: list[str] | None = None,
 ) -> dict[str, Any]:
     started = perf_counter()
+    requested_pod_states = _split_values(pod_states or [])
+    if pod_states is not None and not requested_pod_states:
+        raise FullResultsRequestError("podstate must contain a supported state input")
+    decimal_state_level = _decimal_state_level(requested_pod_states)
+    numeric_precision = _DECIMAL_APPROXIMATION_PRECISIONS[decimal_state_level]
     provider_parse_started = perf_counter()
     try:
         provider_request = _provider_request(input_text, location, latlong, units)
@@ -97,6 +106,10 @@ def execute_query(
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     provider_parse_timing = perf_counter() - provider_parse_started
     if provider_request is not None:
+        if requested_pod_states:
+            raise FullResultsRequestError(
+                "podstate is currently supported for mathematical decimal approximations"
+            )
         if assumptions:
             raise AssumptionSelectionError(
                 "mathematical assumption selections do not apply to this data query"
@@ -115,7 +128,10 @@ def execute_query(
         )
     try:
         interpreted, symbolic_request = _prepare_query(
-            input_text, assumptions or [], validate_only=False
+            input_text,
+            assumptions or [],
+            validate_only=False,
+            numeric_precision=numeric_precision,
         )
     except AssumptionSelectionError:
         raise
@@ -129,6 +145,7 @@ def execute_query(
             "result": interpreted.get("result"),
             "input_mathml": interpreted.get("input_mathml"),
             "result_mathml": interpreted.get("result_mathml"),
+            "numeric_approximation": interpreted.get("numeric_approximation"),
             "evidence": interpreted.get("evidence"),
         }
     elif interpreted.get("outcome") == "timeout":
@@ -180,6 +197,12 @@ def execute_query(
             raise FullResultsBackendError(str(symbolic.get("error")))
         return _unrecognized_query(input_text, str(symbolic.get("error")), elapsed)
 
+    numeric_approximation = symbolic.get("numeric_approximation")
+    if requested_pod_states and not numeric_approximation:
+        raise FullResultsRequestError(
+            "podstate is only available when the query has a non-integer numeric result"
+        )
+
     result_text = str(symbolic.get("result", ""))
     pods = _initial_pods(
         input_text,
@@ -190,6 +213,8 @@ def execute_query(
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
         result_moutput=_wolfram_value(symbolic.get("result")),
+        numeric_approximation=numeric_approximation,
+        decimal_state_level=decimal_state_level,
     )
     filtered = _select_pods(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
@@ -608,6 +633,7 @@ def _prepare_query(
     assumptions: list[str],
     *,
     validate_only: bool,
+    numeric_precision: int = 50,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     try:
         operation_request = _parse_operation_call(input_text)
@@ -615,18 +641,26 @@ def _prepare_query(
         raise InterpretationError("symbolic operation arguments are invalid") from exc
     if operation_request is None:
         interpreted = query_with_interpretations(
-            input_text, assumptions, compute=not validate_only
+            input_text,
+            assumptions,
+            compute=not validate_only,
+            numeric_precision=numeric_precision,
         )
         expression = str(interpreted["interpretation"]["expression"])
         symbolic_request = SymbolicRequest(
             operation="simplify",
             expression=expression,
             time_limit_seconds=5,
+            numeric_precision=numeric_precision,
         )
         return interpreted, symbolic_request
 
     if assumptions:
         raise AssumptionSelectionError("assumption selection is not applicable to this operation")
+
+    operation_request = operation_request.model_copy(
+        update={"numeric_precision": numeric_precision}
+    )
 
     parse_started = perf_counter()
     expressions = [
@@ -898,6 +932,8 @@ def _initial_pods(
     result_mathml: str | None = None,
     input_minput: str | None = None,
     result_moutput: str | None = None,
+    numeric_approximation: dict[str, Any] | None = None,
+    decimal_state_level: int = 0,
 ) -> list[dict[str, Any]]:
     selected_formats = formats or ["plaintext"]
     subpod_input: dict[str, Any] = {"title": ""}
@@ -914,7 +950,7 @@ def _initial_pods(
         subpod_input["minput"] = input_minput
     if "moutput" in selected_formats and result_moutput is not None:
         subpod_result["moutput"] = result_moutput
-    return [
+    pods = [
         {
             "title": "Input interpretation",
             "scanner": "Identity",
@@ -936,6 +972,26 @@ def _initial_pods(
             "subpods": [subpod_result] if result_text is not None else [],
         },
     ]
+    if numeric_approximation is not None:
+        approximation = str(numeric_approximation["value"])
+        approximation_subpod: dict[str, Any] = {"title": ""}
+        if "plaintext" in selected_formats:
+            approximation_subpod["plaintext"] = approximation
+        if "mathml" in selected_formats:
+            approximation_subpod["mathml"] = _mathml(approximation)
+        pods.append({
+            "title": "Decimal approximation",
+            "scanner": "Numeric",
+            "id": "DecimalApproximation",
+            "position": 300,
+            "error": False,
+            "numsubpods": 1,
+            "primary": False,
+            "subpods": [approximation_subpod],
+            "states": _decimal_states_for_level(decimal_state_level),
+            "precision": int(numeric_approximation.get("precision", 50)),
+        })
+    return pods
 
 
 def _format_warnings(
@@ -1159,6 +1215,45 @@ def _parse_indexes(values: list[str]) -> set[int]:
     return indexes
 
 
+def _decimal_state_level(values: list[str]) -> int:
+    level = 0
+    max_level = len(_DECIMAL_APPROXIMATION_PRECISIONS) - 1
+    for value in values:
+        repeat = 1
+        state = value
+        if "@" in value:
+            repeat_text, state = value.split("@", 1)
+            if not repeat_text.isdecimal() or int(repeat_text) < 1:
+                raise FullResultsRequestError("podstate repeat count must be a positive integer")
+            repeat = int(repeat_text)
+            if repeat > max_level:
+                raise FullResultsRequestError(
+                    f"podstate supports at most {max_level} decimal precision increases per request"
+                )
+        if state not in {_DECIMAL_MORE_STATE, _DECIMAL_FEWER_STATE}:
+            raise FullResultsRequestError(
+                "supported podstate values are DecimalApproximation__More digits and "
+                "DecimalApproximation__Fewer digits"
+            )
+        for _ in range(repeat):
+            if state == _DECIMAL_MORE_STATE:
+                if level == max_level:
+                    raise FullResultsRequestError("decimal approximation is already at maximum precision")
+                level += 1
+            else:
+                level = max(0, level - 1)
+    return level
+
+
+def _decimal_states_for_level(level: int) -> list[dict[str, str]]:
+    states: list[dict[str, str]] = []
+    if level > 0:
+        states.append({"name": "Fewer digits", "input": _DECIMAL_FEWER_STATE})
+    if level < len(_DECIMAL_APPROXIMATION_PRECISIONS) - 1:
+        states.append({"name": "More digits", "input": _DECIMAL_MORE_STATE})
+    return states
+
+
 def _split_values(values: list[str]) -> list[str]:
     return [part.strip() for value in values for part in value.split(",") if part.strip()]
 
@@ -1224,7 +1319,7 @@ def _payload_to_xml(payload: dict[str, Any]) -> str:
 
 def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
     attributes = {
-        key: value for key, value in pod.items() if key not in {"subpods", "evidence"}
+        key: value for key, value in pod.items() if key not in {"subpods", "states", "evidence"}
     }
     element = ET.SubElement(root, "pod", {key: _xml_value(value) for key, value in attributes.items()})
     for subpod in pod.get("subpods", []):
@@ -1241,9 +1336,23 @@ def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
             elif key == "data":
                 child = ET.SubElement(subpod_element, "data", {"encoding": "json"})
                 child.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            elif key == "states":
+                _append_states(subpod_element, value)
             else:
                 child = ET.SubElement(subpod_element, key)
                 child.text = str(value)
+    _append_states(element, pod.get("states", []))
+
+
+def _append_states(parent: ET.Element, states: list[dict[str, str]]) -> None:
+    if not states:
+        return
+    state_container = ET.SubElement(parent, "states", {"count": str(len(states))})
+    for state in states:
+        attributes = {
+            key: str(value) for key, value in state.items() if key in {"name", "input"}
+        }
+        ET.SubElement(state_container, "state", attributes)
 
 
 def _append_assumptions(root: ET.Element, assumptions: list[dict[str, Any]]) -> None:

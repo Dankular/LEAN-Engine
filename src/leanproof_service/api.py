@@ -99,6 +99,11 @@ def capabilities() -> dict[str, object]:
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
         "symbolic_operations": ["validate", "simplify", "differentiate", "integrate", "solve", "identity"],
+        "symbolic_numeric_approximation": {
+            "default_precision_digits": 50,
+            "maximum_precision_digits": 500,
+            "result_pod": "DecimalApproximation",
+        },
         "interpretations": {
             "status": "implemented_initial_slice",
             "path": "/v1/interpret",
@@ -134,6 +139,10 @@ def capabilities() -> dict[str, object]:
                 ],
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
+                "pod_states": [
+                    "DecimalApproximation__More digits",
+                    "DecimalApproximation__Fewer digits",
+                ],
                 "validation_path": "/v2/validatequery",
             },
             "wolfram_language_compute": {
@@ -212,6 +221,7 @@ def full_results_query(
     excludepodid: Annotated[list[str] | None, Query()] = None,
     podtitle: Annotated[list[str] | None, Query()] = None,
     podindex: Annotated[list[str] | None, Query()] = None,
+    podstate: Annotated[list[str] | None, Query()] = None,
     scanner: Annotated[list[str] | None, Query()] = None,
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
@@ -241,6 +251,7 @@ def full_results_query(
             location=location,
             latlong=latlong,
             units=units,
+            pod_states=podstate,
             include_pod_ids=includepodid,
             exclude_pod_ids=excludepodid,
             pod_titles=podtitle,

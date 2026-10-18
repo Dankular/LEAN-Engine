@@ -141,7 +141,9 @@ curl -G http://127.0.0.1:8000/v2/query \
   --data-urlencode "output=json"
 ```
 
-The first pod is the interpreted input and the `Result` pod contains the symbolic result. `includepodid`, `excludepodid`, `podtitle` (with `*` wildcard), `podindex`, and `scanner` can be repeated or comma-separated; positive selectors are combined as alternatives. `includepodid` and `excludepodid` cannot be combined. The service currently produces `Input` and `Result` pods with `Identity` and `Mathematical` scanners.
+The first pod is the interpreted input and the `Result` pod contains the symbolic result. `includepodid`, `excludepodid`, `podtitle` (with `*` wildcard), `podindex`, and `scanner` can be repeated or comma-separated; positive selectors are combined as alternatives. `includepodid` and `excludepodid` cannot be combined. Recognized mathematical queries produce `Input` and `Result` pods with `Identity` and `Mathematical` scanners.
+
+Finite non-integer numeric results also include a `DecimalApproximation` pod, with a default precision of 50 digits and discoverable `More digits` states. Resubmit the returned state input to `podstate`; repeated values or an `n@` prefix apply multiple precision steps, up to 500 digits. For example, `podstate=2@DecimalApproximation__More digits` requests 200 digits. These states apply to mathematical numeric results, not retrieved data or subpods.
 
 For example, `input=differentiate(x**2, x)` produces `2*x`, while `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
 

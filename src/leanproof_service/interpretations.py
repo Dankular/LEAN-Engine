@@ -54,6 +54,7 @@ def query_with_interpretations(
     selections: list[str],
     *,
     compute: bool = True,
+    numeric_precision: int = 50,
 ) -> dict[str, Any]:
     if not query or len(query) > 4000:
         raise InterpretationError("input must contain 1 to 4000 characters")
@@ -196,7 +197,11 @@ def query_with_interpretations(
         outcome = "validated"
         result = None
     else:
-        symbolic = run_symbolic(SymbolicRequest(operation="simplify", expression=expression))
+        symbolic = run_symbolic(SymbolicRequest(
+            operation="simplify",
+            expression=expression,
+            numeric_precision=numeric_precision,
+        ))
         parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
         if symbolic.get("timed_out"):
             outcome = "timeout"
@@ -220,6 +225,7 @@ def query_with_interpretations(
         },
         "classification": classifier,
         "result": result,
+        "numeric_approximation": symbolic.get("numeric_approximation"),
         "input_mathml": symbolic.get("input_mathml"),
         "result_mathml": symbolic.get("result_mathml"),
         "evidence": symbolic.get("evidence", {

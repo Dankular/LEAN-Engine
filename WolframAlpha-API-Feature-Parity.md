@@ -20,7 +20,7 @@ Wolfram documents the Full Results API as a GET service with `appid` and `input`
 
 | Project endpoint | Current scope | Parity implication |
 |---|---|---|
-| `GET /v2/query` | Local `queryresult` JSON/XML envelope, Input, Result, and selected Data pods, symbolic expression results, AngleUnit/LogBase assumptions (including both in a compound formula), pod filters, plaintext/MathML, and explicit routes to five factual providers | Partial protocol and query coverage; `/v1/interpret` retains the project-specific interpretation response |
+| `GET /v2/query` | Local `queryresult` JSON/XML envelope, Input, Result, DecimalApproximation, selected Data pods, symbolic expression results, AngleUnit/LogBase assumptions (including both in a compound formula), decimal pod states, pod filters, plaintext/MathML, and explicit routes to five factual providers | Partial protocol and query coverage; `/v1/interpret` retains the project-specific interpretation response |
 | `GET /v2/validatequery` | Safe parsing and candidate assumption discovery without the symbolic simplification step | Initial validatequery behavior; not a natural-language scanner |
 | `GET /v2/assumptions` | Service-owned, versioned angle-unit and logarithm-base IDs | Initial `AngleUnit` and `LogBase` slices; other WA assumption families remain |
 | `POST /v1/symbolic` | Bounded SymPy grammar and operations | Computation building block, not a general free-form query interpreter |
@@ -43,7 +43,7 @@ The documented parameter groups are:
 | Output representation | Per-pod `format`: `image`, `imagemap`, `plaintext`, `minput`, `moutput`, `cell`, `mathml`, `sound`, `wav`; multiple format values | Mathematical pods render plaintext, MathML, Wolfram Language input (`minput`), and Wolfram Language output (`moutput`); other known formats produce a warning and are omitted; data pods omit inapplicable Wolfram expressions | P2 |
 | Assumptions | Discover alternatives in result data and apply one or more exact values on a subsequent query | Versioned service IDs, ranked alternatives, and validated overrides cover angle units and bare-log bases; both types can be selected independently in one formula, while other assumption families remain limited | P0/P1 |
 | Location and units | `ip`, `latlong`, `location`; location can affect results; `units=metric/nonmetric` | `location`, `latlong`, and `units=metric/nonmetric` route explicit weather queries to Open-Meteo; units are not shared across other domains, and IP-derived location is not implemented | P2 |
-| Pod states | `podstate` changes a specific pod/subpod using state input returned by the result | Not implemented | P2 |
+| Pod states | `podstate` changes a specific pod/subpod using state input returned by the result; repeated changes and `n@` shorthand are supported | Initial `DecimalApproximation` pod slice: returned state inputs support repeated and `n@` More/Fewer digits changes, recomputed from the base query; other pod families and subpod states are not implemented | P2 |
 | Presentation sizing | `width`, `maxwidth`, `plotwidth`, `mag` | Not implemented | P2 |
 | Time controls | `scantimeout`, `podtimeout`, `formattimeout`, `parsetimeout`, `totaltimeout`; `async` partial results and recalculate URL | Local wall-clock caps exist; no scan/format stages, async pod delivery, or recalculate operation | P2 |
 | Query interpretation controls | `reinterpret`, `translation`, `ignorecase`; `validatequery` parses without full result computation | `/v2/validatequery` parses supported symbolic expressions and recognizes provider request patterns without retrieval; translation, spelling repair, and reinterpretation are not implemented | P1 |
@@ -80,7 +80,7 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 1. Add plaintext and MathML first; then image/plot URLs, image maps, Wolfram-input/output-like text, cell-like render payloads, and audio only where a local backend can produce them safely.
 2. Add location and preferred units as request context. Make IP-derived location opt-in and avoid retaining the caller's IP.
-3. Add pod states with stable state IDs and explicit follow-up requests.
+3. **Initial slice:** return and accept `DecimalApproximation__More digits` / `Fewer digits` state inputs, including repeated values and `n@` shorthand. Extend states to other mathematical and data pods, subpod states, and stateful paging.
 4. Add per-operation time budgets, partial asynchronous jobs, polling, and a recalculation/resume contract. A single request wall timeout is not equivalent to WA's scan/format stage controls.
 5. Add width and display scaling only for result types that support renderable output.
 
@@ -95,6 +95,7 @@ Build coverage around licensed and attributable providers, measuring query-class
 - JSON and XML encode the same query result and preserve unknown additive fields safely.
 - Pod IDs are stable within a query contract; filtering supports repeatable include/exclude and wildcard title options.
 - Assumption proposals list typed, versioned service IDs; caller overrides are validated before backend routing and never chosen from proof outcomes.
+- Decimal approximation state inputs are returned with the pod, can be resubmitted through `podstate`, and produce the requested precision within the documented cap.
 - Every pod reports its source and evidence kind; warnings, errors, and timeouts are distinguishable.
 - Timeouts, async jobs, and pod states have documented resource limits and deterministic follow-up behavior.
 - Compatibility tests cover request validation, all supported query parameters, response schemas, assumption round-trips, and error cases.

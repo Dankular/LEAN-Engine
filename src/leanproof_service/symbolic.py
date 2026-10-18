@@ -32,6 +32,7 @@ class SymbolicRequest(StrictModel):
     upper: str | None = Field(default=None, min_length=1, max_length=256)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     time_limit_seconds: int = Field(default=5, ge=1, le=10)
+    numeric_precision: int = Field(default=50, ge=10, le=500)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> SymbolicRequest:
@@ -151,9 +152,21 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             {str(key): sp.sstr(value) for key, value in solution.items()}
             for solution in result
         ]
+    numeric_approximation = None
+    if (
+        isinstance(result, sp.Basic)
+        and result.is_number
+        and result.is_finite is not False
+        and result.is_integer is not True
+    ):
+        numeric_approximation = {
+            "value": str(sp.N(result, request.numeric_precision)),
+            "precision": request.numeric_precision,
+        }
     return {
         "operation": request.operation,
         "result": result if isinstance(result, list) else sp.sstr(result),
+        "numeric_approximation": numeric_approximation,
         "parse_timing_seconds": parse_timing,
         "input_mathml": _mathml_output(sp, expression),
         "result_mathml": _mathml_output(sp, result) if isinstance(result, sp.Basic) else None,
