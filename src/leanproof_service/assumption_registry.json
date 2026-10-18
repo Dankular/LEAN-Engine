@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.6.0",
+  "registry_version": "1.7.0",
   "assumptions": [
     {
       "id": "angle:radians",
@@ -127,6 +127,22 @@
       "type": "ListOrNumber",
       "description": "Interpret the values separated by a thousands comma as a two-item list.",
       "meaning": "list",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "number-base:binary",
+      "type": "NumberBase",
+      "description": "Interpret a binary-looking integer string as base 2.",
+      "meaning": "binary",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "number-base:decimal",
+      "type": "NumberBase",
+      "description": "Interpret an integer string as base 10.",
+      "meaning": "decimal",
       "entry_version": 1,
       "service_default": false
     }

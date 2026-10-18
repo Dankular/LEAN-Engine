@@ -36,6 +36,7 @@ _LIST_OR_TIMES_LITERAL = re.compile(
 _LIST_OR_NUMBER_LITERAL = re.compile(
     r"^\s*(?P<sign>[+-]?)(?P<first>[1-9]\d{0,2}),(?P<second>\d{3}(?:\.\d+)?)\s*$"
 )
+_NUMBER_BASE_LITERAL = re.compile(r"^\s*(?P<digits>[01]{8,64})\s*$")
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -92,6 +93,15 @@ def query_with_interpretations(
         return _interpret_numeric_date(
             source_query,
             date_input,
+            selections,
+            compute=compute,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    number_base = _number_base_digits(source_query)
+    if number_base is not None:
+        return _interpret_number_base(
+            source_query,
+            number_base,
             selections,
             compute=compute,
             parse_timing=perf_counter() - parsing_started,
@@ -641,6 +651,115 @@ def _list_or_number_parts(query: str) -> dict[str, str] | None:
         "second": second,
         "normalized_number": f"{sign}{first}{second}",
     }
+
+
+def _number_base_digits(query: str) -> str | None:
+    match = _NUMBER_BASE_LITERAL.fullmatch(query)
+    return match.group("digits") if match is not None else None
+
+
+def _interpret_number_base(
+    source_query: str,
+    digits: str,
+    selections: list[str],
+    *,
+    compute: bool,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "NumberBase"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    if len(candidates) != 2:
+        raise RuntimeError("NumberBase registry must contain exactly two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    if len(selections) > 1:
+        raise AssumptionSelectionError("select at most one assumption value for NumberBase")
+    all_ids = {item["id"] for item in registry["assumptions"]}
+    for selection in selections:
+        if selection not in candidate_ids:
+            if selection not in all_ids:
+                raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+            raise AssumptionSelectionError(f"assumption {selection} is incompatible with this input")
+
+    if selections:
+        chosen = by_id[selections[0]]
+        selection_source = "caller_override"
+    else:
+        defaults = [item for item in candidates if item.get("service_default")]
+        if len(defaults) != 1:
+            raise RuntimeError("NumberBase registry must have exactly one service default")
+        chosen = defaults[0]
+        selection_source = "service_default"
+
+    base = 2 if chosen["meaning"] == "binary" else 10 if chosen["meaning"] == "decimal" else None
+    if base is None:
+        raise RuntimeError("NumberBase registry contains an unsupported meaning")
+    value = int(digits, base)
+    expression = f"FromDigits[{json.dumps(digits)}, {base}]"
+    display = f"{digits} (base {base})"
+    classification = {
+        "name": "deterministic_lexical_baseline",
+        "method": "neutral ranking for binary-looking and decimal integer readings",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+    }
+    assumption_payload = [{
+        "type": "NumberBase",
+        "selected": chosen["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in candidates
+        ],
+    }]
+    return {
+        "input": source_query,
+        "outcome": "computed" if compute else "validated",
+        "parse_timing": parse_timing,
+        "assumptions": assumption_payload,
+        "interpretation": {
+            "kind": "typed_number",
+            "typed_ast": {
+                "node": "number_base_conversion",
+                "digits": digits,
+                "base": base,
+                "value": str(value),
+                "display": display,
+            },
+            "expression": expression,
+            "solver_route": "integer_base_conversion",
+        },
+        "classification": classification,
+        "result": str(value) if compute else None,
+        "numeric_approximation": None,
+        "input_mathml": _integer_mathml(digits, base),
+        "result_mathml": _integer_mathml(str(value)) if compute else None,
+        "evidence": {
+            "kind": "deterministic_radix_conversion" if compute else "interpretation_only",
+            "engine": "python.int",
+            "verified": False,
+        },
+        "qualification": "Integer base conversion follows the selected NumberBase interpretation; it is not a formal proof.",
+    }
+
+
+def _integer_mathml(value: str, base: int | None = None) -> str:
+    rendered = f"<mn>{html.escape(value)}</mn>"
+    if base is not None:
+        rendered = f"<msub>{rendered}<mn>{base}</mn></msub>"
+    return (
+        '<math xmlns="http://www.w3.org/1998/Math/MathML">'
+        f"{rendered}</math>"
+    )
 
 
 def _interpret_list_or_number(
