@@ -206,6 +206,15 @@ def _prepare_definite_real_integral(
     lean_lower = _lean_rational(lower)
     lean_upper = _lean_rational(upper)
 
+    def interval_lemma_source(name: str, property_source: str) -> str:
+        return f"""  have {name} : ∀ {point_variable} : ℝ,
+      {point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → {property_source} := by
+    intro {point_variable} hpoint
+    rw [Set.mem_uIcc] at hpoint
+    rcases hpoint with hbound | hbound
+    · nlinarith [hbound.1, hbound.2]
+    · nlinarith [hbound.1, hbound.2]"""
+
     domain_expressions: list[ast.AST] = []
     seen_domain_expressions: set[str] = set()
     import sympy as _sympy
@@ -271,6 +280,7 @@ def _prepare_definite_real_integral(
     positive_hypotheses: dict[str, str] = {}
     interval_domain_binders: list[str] = []
     interval_domain_proofs: list[str] = []
+    interval_domain_lemmas: list[str] = []
     domain_conditions: list[str] = []
     domain_condition_sympy_expressions: list[object] = []
     for index, domain_expression in enumerate(domain_expressions):
@@ -285,8 +295,33 @@ def _prepare_definite_real_integral(
         )
         if rendered_domain is None:
             return None
+        affine_values = _affine_interval_values(
+            domain_expression, variable, lower, upper
+        )
+        if affine_values is not None:
+            affine_lower, affine_upper = affine_values
+            if (affine_lower > 0 and affine_upper > 0) or (
+                affine_lower < 0 and affine_upper < 0
+            ):
+                hypothesis_name = fresh_name(
+                    f"h_interval_auto_domain_{index}", used_names
+                )
+                domain_hypotheses[key] = (
+                    f"({hypothesis_name} {point_variable} hpoint)"
+                )
+                interval_domain_lemmas.append(
+                    interval_lemma_source(
+                        hypothesis_name, f"{rendered_domain} ≠ 0"
+                    )
+                )
+                interval_domain_proofs.append(
+                    f"{hypothesis_name} {point_variable} hpoint"
+                )
+                continue
         hypothesis_name = fresh_name(f"h_interval_domain_{index}", used_names)
-        domain_hypotheses[key] = f"{hypothesis_name} {point_variable} hpoint"
+        domain_hypotheses[key] = (
+            f"({hypothesis_name} {point_variable} hpoint)"
+        )
         interval_domain_binders.append(
             f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
             f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
@@ -336,39 +371,71 @@ def _prepare_definite_real_integral(
         )
         if rendered_argument is None:
             return None
-        lower_name = fresh_name(f"h_interval_inverse_lower_{index}", used_names)
-        upper_name = fresh_name(f"h_interval_inverse_upper_{index}", used_names)
         lower_key = _inverse_trig_hypothesis_key(argument, "lower")
         upper_key = _inverse_trig_hypothesis_key(argument, "upper")
-        domain_hypotheses[lower_key] = f"{lower_name} {point_variable} hpoint"
-        domain_hypotheses[upper_key] = f"{upper_name} {point_variable} hpoint"
-        interval_domain_binders.extend(
-            [
+        affine_values = _affine_interval_values(argument, variable, lower, upper)
+        source_expression = ast.unparse(argument).replace("**", "^")
+        if affine_values is not None:
+            affine_lower, affine_upper = affine_values
+            minimum, maximum = min(affine_lower, affine_upper), max(
+                affine_lower, affine_upper
+            )
+        else:
+            minimum = maximum = None
+
+        if minimum is not None and minimum > -1:
+            lower_name = fresh_name(
+                f"h_interval_auto_inverse_lower_{index}", used_names
+            )
+            domain_hypotheses[lower_key] = (
+                f"({lower_name} {point_variable} hpoint)"
+            )
+            interval_domain_lemmas.append(
+                interval_lemma_source(
+                    lower_name, f"-1 < {rendered_argument}"
+                )
+            )
+        else:
+            lower_name = fresh_name(f"h_interval_inverse_lower_{index}", used_names)
+            domain_hypotheses[lower_key] = (
+                f"({lower_name} {point_variable} hpoint)"
+            )
+            interval_domain_binders.append(
                 f"({lower_name} : ∀ {point_variable} : ℝ, "
                 f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
-                f"-1 < {rendered_argument})",
+                f"-1 < {rendered_argument})"
+            )
+            domain_conditions.append(
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, -1 < {source_expression}"
+            )
+
+        if maximum is not None and maximum < 1:
+            upper_name = fresh_name(
+                f"h_interval_auto_inverse_upper_{index}", used_names
+            )
+            domain_hypotheses[upper_key] = (
+                f"({upper_name} {point_variable} hpoint)"
+            )
+            interval_domain_lemmas.append(
+                interval_lemma_source(
+                    upper_name, f"{rendered_argument} < 1"
+                )
+            )
+        else:
+            upper_name = fresh_name(f"h_interval_inverse_upper_{index}", used_names)
+            domain_hypotheses[upper_key] = (
+                f"({upper_name} {point_variable} hpoint)"
+            )
+            interval_domain_binders.append(
                 f"({upper_name} : ∀ {point_variable} : ℝ, "
                 f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
-                f"{rendered_argument} < 1)",
-            ]
-        )
-        interval_domain_proofs.extend(
-            [
-                f"{lower_name} {point_variable} hpoint",
-                f"{upper_name} {point_variable} hpoint",
-            ]
-        )
-        source_expression = ast.unparse(argument).replace("**", "^")
-        domain_conditions.extend(
-            [
+                f"{rendered_argument} < 1)"
+            )
+            domain_conditions.append(
                 f"throughout the closed interval with endpoints {_fraction_text(lower)} "
-                f"and {_fraction_text(upper)}, "
-                f"-1 < {source_expression}",
-                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
-                f"and {_fraction_text(upper)}, "
-                f"{source_expression} < 1",
-            ]
-        )
+                f"and {_fraction_text(upper)}, {source_expression} < 1"
+            )
 
     for index, argument in enumerate(positive_sqrt_arguments):
         key = ast.dump(argument, include_attributes=False)
@@ -382,22 +449,42 @@ def _prepare_definite_real_integral(
         )
         if rendered_argument is None:
             return None
-        hypothesis_name = fresh_name(f"h_interval_positive_{index}", used_names)
-        positive_hypotheses[key] = f"{hypothesis_name} {point_variable} hpoint"
-        interval_domain_binders.append(
-            f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
-            f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
-            f"0 < {rendered_argument})"
-        )
-        interval_domain_proofs.append(
-            f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
-        )
         source_expression = ast.unparse(argument).replace("**", "^")
-        domain_conditions.append(
-            f"throughout the closed interval with endpoints {_fraction_text(lower)} "
-            f"and {_fraction_text(upper)}, "
-            f"{source_expression} > 0"
-        )
+        affine_values = _affine_interval_values(argument, variable, lower, upper)
+        if affine_values is not None and min(affine_values) > 0:
+            hypothesis_name = fresh_name(
+                f"h_interval_auto_positive_{index}", used_names
+            )
+            positive_hypotheses[key] = (
+                f"({hypothesis_name} {point_variable} hpoint)"
+            )
+            interval_domain_lemmas.append(
+                interval_lemma_source(
+                    hypothesis_name, f"0 < {rendered_argument}"
+                )
+            )
+            interval_domain_proofs.append(
+                f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+            )
+        else:
+            hypothesis_name = fresh_name(
+                f"h_interval_positive_{index}", used_names
+            )
+            positive_hypotheses[key] = (
+                f"({hypothesis_name} {point_variable} hpoint)"
+            )
+            interval_domain_binders.append(
+                f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
+                f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+                f"0 < {rendered_argument})"
+            )
+            interval_domain_proofs.append(
+                f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+            )
+            domain_conditions.append(
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, {source_expression} > 0"
+            )
 
     rendered_log_arguments: list[tuple[str, object]] = []
     log_sources = (
@@ -471,6 +558,9 @@ def _prepare_definite_real_integral(
         if log_lemma_names
         else ""
     )
+    interval_domain_lemma_source = "\n".join(interval_domain_lemmas)
+    if interval_domain_lemma_source:
+        interval_domain_lemma_source = "\n" + interval_domain_lemma_source
 
     binders = " ".join(
         [
@@ -492,12 +582,14 @@ import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.MeasureTheory.Integral.IntervalIntegral.FundThmCalculus
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.FunProp
+import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.NormNum
 import Mathlib.Tactic.Ring
 
 theorem wolfram_language_compute{theorem_binders} :
     (∫ {integration_variable} in {lean_lower}..{lean_upper}, {integrand_at_integral_var}) = {definite_result_lean} := by
   let F : ℝ → ℝ := fun {integration_variable} : ℝ => {antiderivative_at_integral_var}
+{interval_domain_lemma_source}
   have hderiv : ∀ {point_variable} ∈ Set.uIcc {lean_lower} {lean_upper},
       HasDerivAt F {integrand_at_point} {point_variable} := by
     intro {point_variable} hpoint
@@ -1313,6 +1405,43 @@ def _real_sympy_expression(
         }.get(node.func.id)
         return function(argument) if function is not None else None
     return None
+
+
+def _affine_interval_values(
+    node: ast.AST,
+    variable: str,
+    lower: Fraction,
+    upper: Fraction,
+) -> tuple[Fraction, Fraction] | None:
+    import sympy as _sympy
+
+    expression = _real_sympy_expression(node)
+    symbol = _sympy.Symbol(variable)
+    if expression is None or expression.free_symbols - {symbol}:
+        return None
+    try:
+        polynomial = _sympy.Poly(expression, symbol, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return None
+    if polynomial.degree() > 1:
+        return None
+
+    interval_lower = min(lower, upper)
+    interval_upper = max(lower, upper)
+    lower_value = polynomial.eval(
+        _sympy.Rational(interval_lower.numerator, interval_lower.denominator)
+    )
+    upper_value = polynomial.eval(
+        _sympy.Rational(interval_upper.numerator, interval_upper.denominator)
+    )
+    if not isinstance(lower_value, _sympy.Rational) or not isinstance(
+        upper_value, _sympy.Rational
+    ):
+        return None
+    return (
+        Fraction(int(lower_value.p), int(lower_value.q)),
+        Fraction(int(upper_value.p), int(upper_value.q)),
+    )
 
 
 def _cosine_call(argument: ast.AST) -> ast.Call:
