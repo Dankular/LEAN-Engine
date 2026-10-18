@@ -392,9 +392,9 @@ def capabilities() -> dict[str, object]:
                 "derivative": {
                     "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": ["Sin", "Cos", "Tan", "Exp", "Sinh", "Cosh", "Log"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
-                    "domain_conditions": "variable denominators require nonzero conditions and real Log arguments require positive conditions; returned in evidence.domain_conditions",
+                    "domain_conditions": "Tan differentiation requires the cosine of each argument to be nonzero; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
@@ -411,11 +411,11 @@ def capabilities() -> dict[str, object]:
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "division by nonzero rational constants for integration; variable denominators for D require explicit nonzero conditions", "^ with integer exponent 0–16"],
-                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
+                    "functions": ["Sin", "Cos", "Tan", "Exp", "Sinh", "Cosh", "Log"],
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["variable-denominator integration", "Tan", "logarithmic antiderivatives", "Sin[x^2] antiderivative"],
+                    "unsupported_examples": ["variable-denominator integration", "Tan antiderivatives", "logarithmic antiderivatives", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"

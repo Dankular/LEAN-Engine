@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>Sin|Cos|Tan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 
@@ -388,6 +388,9 @@ def _prepare_real_derivative(
     positive_log_arguments = _positive_log_arguments(tree.body)
     if positive_log_arguments is None:
         return None
+    tan_cosine_arguments = _tan_cosine_arguments(tree.body)
+    if tan_cosine_arguments is None:
+        return None
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="differentiate",
@@ -419,7 +422,12 @@ def _prepare_real_derivative(
     domain_binders: list[str] = []
     domain_condition_names: list[str] = []
     domain_conditions: list[str] = []
-    for index, denominator in enumerate(domain_denominators):
+    for index, denominator in enumerate(
+        [*domain_denominators, *tan_cosine_arguments]
+    ):
+        denominator_key = ast.dump(denominator, include_attributes=False)
+        if denominator_key in domain_hypotheses:
+            continue
         denominator_lean = _render_real_calculus_node(
             denominator,
             set(),
@@ -430,12 +438,18 @@ def _prepare_real_derivative(
         if denominator_lean is None:
             return None
         hypothesis_name = _fresh_identifier(f"h_domain_{index}", used_names)
-        domain_hypotheses[ast.dump(denominator, include_attributes=False)] = (
-            hypothesis_name
-        )
+        domain_hypotheses[denominator_key] = hypothesis_name
         domain_binders.append(f"({hypothesis_name} : {denominator_lean} ≠ 0)")
         domain_condition_names.append(hypothesis_name)
-        denominator_source = ast.unparse(denominator).replace("**", "^")
+        if (
+            isinstance(denominator, ast.Call)
+            and isinstance(denominator.func, ast.Name)
+            and denominator.func.id == "cos"
+        ):
+            argument_source = ast.unparse(denominator.args[0]).replace("**", "^")
+            denominator_source = f"Cos[{argument_source}]"
+        else:
+            denominator_source = ast.unparse(denominator).replace("**", "^")
         domain_conditions.append(f"{denominator_source} ≠ 0")
 
     for index, argument in enumerate(positive_log_arguments):
@@ -488,12 +502,37 @@ def _prepare_real_derivative(
     field_simp_arguments = (
         f" [{', '.join(domain_condition_names)}]" if domain_condition_names else ""
     )
+    has_tangent_derivative = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "tan"
+        and len(node.args) == 1
+        and any(
+            isinstance(child, ast.Name) and child.id == variable
+            for child in ast.walk(node.args[0])
+        )
+        for node in ast.walk(tree.body)
+    )
+    if has_tangent_derivative:
+        derivative_tactic = (
+            "simp [id_eq, Real.tan_eq_sin_div_cos] <;> "
+            f"field_simp{field_simp_arguments} <;> "
+            "simp [Real.sin_sq_add_cos_sq] <;> ring"
+        )
+    else:
+        derivative_tactic = (
+            f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring"
+        )
+    function_equality_tactic = (
+        f"ext {function_variable}; simp [id_eq] <;> ring"
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Tactic.FieldSimp
@@ -502,9 +541,10 @@ import Mathlib.Tactic.Ring
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {result_lean} {variable} := by
   convert ({proof}) using 1
-  · ext {function_variable}
-    simp [id_eq] <;> ring
-  · simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring
+  all_goals
+    first
+    | {function_equality_tactic}
+    | {derivative_tactic}
 
 #print axioms wolfram_language_compute
 """
@@ -629,6 +669,95 @@ def _positive_log_arguments(root: ast.AST) -> list[ast.AST] | None:
     return arguments
 
 
+def _tan_cosine_arguments(root: ast.AST) -> list[ast.AST] | None:
+    import sympy as _sympy
+
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "tan"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            constant_value = _constant_sympy_expression(argument)
+            if constant_value is None:
+                return None
+            cosine_value = _sympy.simplify(_sympy.cos(constant_value))
+            if cosine_value.is_zero is not False:
+                return None
+            continue
+        cosine = _cosine_call(argument)
+        key = ast.dump(cosine, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(cosine)
+    return arguments
+
+
+def _contains_calculus_variable(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Name) and child.id not in {"pi", "E"}
+        for child in ast.walk(node)
+    )
+
+
+def _constant_sympy_expression(node: ast.AST):
+    import sympy as _sympy
+
+    fraction = _constant_fraction(node)
+    if fraction is not None:
+        return _sympy.Rational(fraction.numerator, fraction.denominator)
+    if isinstance(node, ast.Name):
+        return {"pi": _sympy.pi, "E": _sympy.E}.get(node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _constant_sympy_expression(node.operand)
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else -inner
+    if isinstance(node, ast.BinOp):
+        left = _constant_sympy_expression(node.left)
+        right = _constant_sympy_expression(node.right)
+        if left is None or right is None:
+            return None
+        operation = {
+            ast.Add: lambda: left + right,
+            ast.Sub: lambda: left - right,
+            ast.Mult: lambda: left * right,
+            ast.Div: lambda: left / right if right != 0 else None,
+            ast.Pow: lambda: left ** right,
+        }.get(type(node.op))
+        return operation() if operation is not None else None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1:
+        argument = _constant_sympy_expression(node.args[0])
+        if argument is None or node.keywords:
+            return None
+        function = {
+            "sin": _sympy.sin,
+            "cos": _sympy.cos,
+            "tan": _sympy.tan,
+            "exp": _sympy.exp,
+            "sinh": _sympy.sinh,
+            "cosh": _sympy.cosh,
+            "log": _sympy.log,
+        }.get(node.func.id)
+        return function(argument) if function is not None else None
+    return None
+
+
+def _cosine_call(argument: ast.AST) -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id="cos", ctx=ast.Load()),
+        args=[argument],
+        keywords=[],
+    )
+
+
 def _render_real_calculus_lean(
     source: str,
     allow_variable_denominators: bool = False,
@@ -693,6 +822,7 @@ def _render_real_calculus_node(
         function_name = {
             "sin": "Real.sin",
             "cos": "Real.cos",
+            "tan": "Real.tan",
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
@@ -867,6 +997,43 @@ def _derivative_proof_term(
                 positive_hypotheses,
             )
             return f"({inner}).log ({domain_proof})" if inner is not None else None
+        if node.func.id == "tan":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(Real.tan {rendered_argument}))"
+                )
+            cosine_key = ast.dump(
+                _cosine_call(argument), include_attributes=False
+            )
+            hypothesis_name = (domain_hypotheses or {}).get(cosine_key)
+            if hypothesis_name is None:
+                return None
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if inner is None:
+                return None
+            return (
+                f"(Real.hasDerivAt_tan {hypothesis_name}).comp "
+                f"{point} ({inner})"
+            )
         derivative_method = {
             "sin": "sin",
             "cos": "cos",

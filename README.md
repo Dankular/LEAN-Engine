@@ -40,7 +40,7 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-The response includes the result and an `evidence` object with the Lean source and axiom audit. For real logarithms, domain requirements are returned explicitly: `D[Log[x], x]` yields `1/x` under `x > 0`. The route also accepts `line`, `maxChars`, and `timeConstraint`.
+The response includes the result and an `evidence` object with the Lean source and axiom audit. Domain requirements are explicit: `D[Log[x], x]` yields `1/x` under `x > 0`, and `D[Tan[x], x]` requires `Cos[x] ≠ 0`; tangent poles are rejected. The route also accepts `line`, `maxChars`, and `timeConstraint`.
 
 ## API routes
 
