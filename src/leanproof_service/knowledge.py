@@ -4,6 +4,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -72,21 +73,33 @@ class KnowledgeProviderError(RuntimeError):
         self.status_code = status_code
 
 
-def query_knowledge(request: KnowledgeRequest) -> dict[str, object]:
+class KnowledgeDeadlineExceeded(TimeoutError):
+    """The caller's absolute query deadline expired during provider retrieval."""
+
+
+def query_knowledge(
+    request: KnowledgeRequest, *, deadline: float | None = None
+) -> dict[str, object]:
     try:
+        _check_deadline(deadline)
         if request.provider == "wikidata":
-            data, source = _wikidata(request)
+            data, source = _wikidata(request, deadline)
         elif request.provider == "dbnomics":
-            data, source = _dbnomics(request)
+            data, source = _dbnomics(request, deadline)
         elif request.provider == "nist_codata":
             data, source = _nist(request)
         elif request.provider == "geonames":
-            data, source = _geonames(request)
+            data, source = _geonames(request, deadline)
         else:
-            data, source = _open_meteo(request)
+            data, source = _open_meteo(request, deadline)
+        _check_deadline(deadline)
+    except KnowledgeDeadlineExceeded:
+        raise
     except KnowledgeProviderError:
         raise
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        if deadline is not None and perf_counter() >= deadline:
+            raise KnowledgeDeadlineExceeded from exc
         if isinstance(exc, HTTPError):
             code = 502 if exc.code < 500 else 503
             raise KnowledgeProviderError(f"{request.provider} returned HTTP {exc.code}", code) from exc
@@ -103,7 +116,9 @@ def query_knowledge(request: KnowledgeRequest) -> dict[str, object]:
     }
 
 
-def _request_json(url: str, timeout: int) -> dict[str, object]:
+def _request_json(
+    url: str, timeout: int, deadline: float | None = None
+) -> dict[str, object]:
     request = Request(
         url,
         headers={
@@ -113,8 +128,20 @@ def _request_json(url: str, timeout: int) -> dict[str, object]:
             ),
         },
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = response.read(2_000_001)
+    _check_deadline(deadline)
+    effective_timeout = float(timeout)
+    if deadline is not None:
+        effective_timeout = min(effective_timeout, deadline - perf_counter())
+        if effective_timeout <= 0:
+            raise KnowledgeDeadlineExceeded
+    try:
+        with urlopen(request, timeout=effective_timeout) as response:
+            payload = response.read(2_000_001)
+    except (TimeoutError, OSError) as exc:
+        if deadline is not None and perf_counter() >= deadline:
+            raise KnowledgeDeadlineExceeded from exc
+        raise
+    _check_deadline(deadline)
     if len(payload) > 2_000_000:
         raise KnowledgeProviderError("Provider response exceeded the 2 MB limit", 502)
     value = json.loads(payload)
@@ -123,14 +150,16 @@ def _request_json(url: str, timeout: int) -> dict[str, object]:
     return value
 
 
-def _wikidata(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
+def _wikidata(
+    request: KnowledgeRequest, deadline: float | None
+) -> tuple[object, dict[str, str]]:
     base = "https://www.wikidata.org/w/api.php"
     if request.operation == "search":
         params = {
             "action": "wbsearchentities", "search": request.query or "", "language": request.language,
             "format": "json", "type": "item", "limit": str(request.max_results),
         }
-        data = _request_json(f"{base}?{urlencode(params)}", request.timeout_seconds)
+        data = _request_json(f"{base}?{urlencode(params)}", request.timeout_seconds, deadline)
         results = data.get("search", [])
         return results, {
             "name": "Wikidata entity search", "url": "https://www.wikidata.org/", "license": "CC0"
@@ -139,7 +168,7 @@ def _wikidata(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
         "action": "wbgetentities", "ids": request.entity_id or "", "props": "labels|descriptions|claims",
         "languages": request.language, "format": "json",
     }
-    data = _request_json(f"{base}?{urlencode(params)}", request.timeout_seconds)
+    data = _request_json(f"{base}?{urlencode(params)}", request.timeout_seconds, deadline)
     entities = data.get("entities", {})
     entity = entities.get(request.entity_id or "") if isinstance(entities, dict) else None
     return entity, {
@@ -147,12 +176,14 @@ def _wikidata(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
     }
 
 
-def _dbnomics(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
+def _dbnomics(
+    request: KnowledgeRequest, deadline: float | None
+) -> tuple[object, dict[str, str]]:
     provider = quote(request.provider_code or "", safe="")
     dataset = quote(request.dataset_code or "", safe="")
     series = quote(request.series_code or "", safe="")
     url = f"https://api.db.nomics.world/v22/series/{provider}/{dataset}/{series}?observations=1"
-    data = _request_json(url, request.timeout_seconds)
+    data = _request_json(url, request.timeout_seconds, deadline)
     return data.get("series", data), {
         "name": "DBnomics Web API",
         "url": f"https://db.nomics.world/{provider}/{dataset}/{series}",
@@ -190,7 +221,9 @@ def _nist(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
     }
 
 
-def _geonames(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
+def _geonames(
+    request: KnowledgeRequest, deadline: float | None
+) -> tuple[object, dict[str, str]]:
     username = os.environ.get("GEONAMES_USERNAME")
     if not username:
         raise KnowledgeProviderError("GEONAMES_USERNAME is not configured", 503)
@@ -198,7 +231,9 @@ def _geonames(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
         "q": request.query or "", "maxRows": str(request.max_results), "lang": request.language,
         "username": username, "type": "json",
     }
-    data = _request_json(f"https://api.geonames.org/searchJSON?{urlencode(params)}", request.timeout_seconds)
+    data = _request_json(
+        f"https://api.geonames.org/searchJSON?{urlencode(params)}", request.timeout_seconds, deadline
+    )
     if data.get("status"):
         raise KnowledgeProviderError("GeoNames rejected the request or username", 502)
     return data.get("geonames", []), {
@@ -209,13 +244,17 @@ def _geonames(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
     }
 
 
-def _open_meteo(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
+def _open_meteo(
+    request: KnowledgeRequest, deadline: float | None
+) -> tuple[object, dict[str, str]]:
     latitude, longitude = request.latitude, request.longitude
     location_source = None
     if request.location is not None and latitude is None:
         params = {"name": request.location, "count": "1", "language": request.language, "format": "json"}
         geocoded = _request_json(
-            f"https://geocoding-api.open-meteo.com/v1/search?{urlencode(params)}", request.timeout_seconds
+            f"https://geocoding-api.open-meteo.com/v1/search?{urlencode(params)}",
+            request.timeout_seconds,
+            deadline,
         )
         results = geocoded.get("results") or []
         if not results:
@@ -240,7 +279,11 @@ def _open_meteo(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
             "wind_speed_unit": "kmh",
             "precipitation_unit": "mm",
         })
-    data = _request_json(f"https://api.open-meteo.com/v1/forecast?{urlencode(params)}", request.timeout_seconds)
+    data = _request_json(
+        f"https://api.open-meteo.com/v1/forecast?{urlencode(params)}",
+        request.timeout_seconds,
+        deadline,
+    )
     source = {
         "name": "Open-Meteo Forecast API",
         "url": "https://open-meteo.com/en/docs",
@@ -251,3 +294,8 @@ def _open_meteo(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
         data["resolved_location"] = first
         return data, source | {"geocoding_source": location_source["url"]}
     return data, source
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and perf_counter() >= deadline:
+        raise KnowledgeDeadlineExceeded

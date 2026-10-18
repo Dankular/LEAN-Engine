@@ -148,6 +148,19 @@ def capabilities() -> dict[str, object]:
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
                 "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
+                "time_controls": {
+                    "totaltimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 20,
+                        "minimum_seconds": 0.1,
+                        "maximum_seconds": 30,
+                        "scope": "monotonic deadline for symbolic worker execution and provider request sequences",
+                    },
+                    "unsupported_stage_controls": [
+                        "parsetimeout", "scantimeout", "podtimeout", "formattimeout"
+                    ],
+                    "async": False,
+                },
                 "pod_states": [
                     "DecimalApproximation__More digits",
                     "DecimalApproximation__Fewer digits",
@@ -236,6 +249,7 @@ def full_results_query(
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
+    totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -268,6 +282,7 @@ def full_results_query(
             pod_indexes=podindex,
             scanners=scanner,
             ignorecase=ignorecase,
+            total_timeout_seconds=totaltimeout,
         )
     except (AssumptionSelectionError, FullResultsRequestError) as exc:
         response = render_response(query_error(input, str(exc)), selected_output)

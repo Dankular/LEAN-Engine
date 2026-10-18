@@ -56,6 +56,8 @@ def query_with_interpretations(
     *,
     compute: bool = True,
     numeric_precision: int = 50,
+    time_limit_seconds: float = 5.0,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     if not query or len(query) > 4000:
         raise InterpretationError("input must contain 1 to 4000 characters")
@@ -193,7 +195,9 @@ def query_with_interpretations(
         parsed = None
         parse_timing = preparation_timing
     else:
-        parsed = run_symbolic(SymbolicRequest(operation="validate", expression=expression))
+        parsed = run_symbolic(SymbolicRequest(
+            operation="validate", expression=expression, time_limit_seconds=time_limit_seconds
+        ))
         if parsed.get("timed_out"):
             raise InterpretationError("input parsing exceeded its time limit")
         if parsed.get("error"):
@@ -205,20 +209,30 @@ def query_with_interpretations(
         outcome = "validated"
         result = None
     else:
-        symbolic = run_symbolic(SymbolicRequest(
-            operation="simplify",
-            expression=expression,
-            numeric_precision=numeric_precision,
-        ))
-        parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
-        if symbolic.get("timed_out"):
+        remaining_seconds = (
+            min(time_limit_seconds, deadline - perf_counter()) if deadline is not None
+            else time_limit_seconds
+        )
+        if remaining_seconds <= 0.001:
+            symbolic = {"timed_out": True, "limit_seconds": max(0.0, remaining_seconds)}
             outcome = "timeout"
             result = None
-        elif symbolic.get("error"):
-            raise InterpretationError(symbolic.get("error", "symbolic evaluation failed"))
         else:
-            outcome = "computed"
-            result = symbolic.get("result")
+            symbolic = run_symbolic(SymbolicRequest(
+                operation="simplify",
+                expression=expression,
+                time_limit_seconds=remaining_seconds,
+                numeric_precision=numeric_precision,
+            ))
+            parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
+            if symbolic.get("timed_out"):
+                outcome = "timeout"
+                result = None
+            elif symbolic.get("error"):
+                raise InterpretationError(symbolic.get("error", "symbolic evaluation failed"))
+            else:
+                outcome = "computed"
+                result = symbolic.get("result")
 
     return {
         "input": source_query,

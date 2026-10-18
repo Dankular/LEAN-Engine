@@ -32,7 +32,7 @@ class SymbolicRequest(StrictModel):
     lower: str | None = Field(default=None, min_length=1, max_length=256)
     upper: str | None = Field(default=None, min_length=1, max_length=256)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
-    time_limit_seconds: int = Field(default=5, ge=1, le=10)
+    time_limit_seconds: float = Field(default=5.0, ge=0.001, le=30.0)
     numeric_precision: int = Field(default=50, ge=10, le=500)
 
     @model_validator(mode="after")

@@ -20,6 +20,7 @@ from .interpretations import (
 )
 from .input_syntax import MathInputError, parse_math_input
 from .knowledge import (
+    KnowledgeDeadlineExceeded,
     KnowledgeProviderError,
     KnowledgeRequest,
     query_knowledge,
@@ -94,8 +95,10 @@ def execute_query(
     pod_indexes: list[str] | None = None,
     scanners: list[str] | None = None,
     ignorecase: bool = False,
+    total_timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
     started = perf_counter()
+    deadline = started + total_timeout_seconds
     planning_input = input_text.casefold() if ignorecase else input_text
     requested_pod_states = _split_values(pod_states or [])
     if pod_states is not None and not requested_pod_states:
@@ -128,6 +131,12 @@ def execute_query(
             pod_titles=pod_titles,
             pod_indexes=pod_indexes,
             scanners=scanners,
+            deadline=deadline,
+        )
+    remaining_seconds = deadline - perf_counter()
+    if remaining_seconds <= 0:
+        return _symbolic_timeout_response(
+            input_text, started, formats, parse_timing=provider_parse_timing
         )
     try:
         interpreted, symbolic_request = _prepare_query(
@@ -135,6 +144,8 @@ def execute_query(
             assumptions or [],
             validate_only=False,
             numeric_precision=numeric_precision,
+            time_limit_seconds=remaining_seconds,
+            deadline=deadline,
         )
     except AssumptionSelectionError:
         raise
@@ -154,9 +165,17 @@ def execute_query(
     elif interpreted.get("outcome") == "timeout":
         symbolic = {"timed_out": True, "evidence": interpreted.get("evidence")}
     else:
-        symbolic = run_symbolic(symbolic_request)
+        remaining_seconds = deadline - perf_counter()
+        if remaining_seconds <= 0:
+            symbolic = {"timed_out": True}
+        else:
+            symbolic = run_symbolic(symbolic_request.model_copy(update={
+                "time_limit_seconds": remaining_seconds,
+            }))
         parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
     elapsed = perf_counter() - started
+    if elapsed > total_timeout_seconds and not symbolic.get("timed_out"):
+        symbolic = {"timed_out": True, "limit_seconds": total_timeout_seconds}
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
     input_minput = _wolfram_input_for_query(
@@ -475,9 +494,35 @@ def _execute_provider_query(
     pod_titles: list[str] | None,
     pod_indexes: list[str] | None,
     scanners: list[str] | None,
+    deadline: float,
 ) -> dict[str, Any]:
     try:
-        knowledge = query_knowledge(request)
+        knowledge = query_knowledge(request, deadline=deadline)
+    except KnowledgeDeadlineExceeded:
+        provider_titles = {
+            "open_meteo": "Current weather",
+            "nist_codata": "Physical constant",
+            "wikidata": "Entity matches",
+            "dbnomics": "Economic time series",
+            "geonames": "Place matches",
+        }
+        pods = _initial_pods(input_text, input_text, None, formats)[:1]
+        payload = _query_envelope(
+            success=False,
+            error=False,
+            pods=pods,
+            elapsed=perf_counter() - started,
+            parse_timing=parse_timing,
+            datatypes="Data",
+            warnings=[{"text": "The data retrieval exceeded the total query time limit."}],
+            assumptions=[],
+            timedout="Data",
+            timedoutpods=provider_titles[request.provider],
+            evidence={"kind": "provider_timeout", "provider": request.provider, "verified": False},
+            qualification="No data result was retrieved before the query deadline.",
+        )
+        payload["queryresult"]["input"] = input_text
+        return payload
     except KnowledgeProviderError as exc:
         raise FullResultsBackendError(
             str(exc), status_code=exc.status_code, error_code="PROVIDER_FAILURE"
@@ -639,6 +684,8 @@ def _prepare_query(
     *,
     validate_only: bool,
     numeric_precision: int = 50,
+    time_limit_seconds: float = 5.0,
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     try:
         operation_request = _parse_operation_call(input_text)
@@ -650,12 +697,14 @@ def _prepare_query(
             assumptions,
             compute=not validate_only,
             numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            deadline=deadline,
         )
         expression = str(interpreted["interpretation"]["expression"])
         symbolic_request = SymbolicRequest(
             operation="simplify",
             expression=expression,
-            time_limit_seconds=5,
+            time_limit_seconds=time_limit_seconds,
             numeric_precision=numeric_precision,
         )
         return interpreted, symbolic_request
@@ -679,6 +728,7 @@ def _prepare_query(
     operation_request = operation_request.model_copy(update={
         **normalized_fields,
         "numeric_precision": numeric_precision,
+        "time_limit_seconds": time_limit_seconds,
     })
 
     expressions = [
@@ -926,6 +976,31 @@ def _unrecognized_query(input_text: str, message: str, elapsed: float) -> dict[s
     )
     result["queryresult"]["input"] = input_text
     return result
+
+
+def _symbolic_timeout_response(
+    input_text: str,
+    started: float,
+    formats: list[str],
+    *,
+    parse_timing: float,
+) -> dict[str, Any]:
+    payload = _query_envelope(
+        success=False,
+        error=False,
+        pods=_initial_pods(input_text, input_text, None, formats),
+        elapsed=perf_counter() - started,
+        parse_timing=parse_timing,
+        datatypes="Mathematical",
+        warnings=[{"text": "The query exceeded its total execution time limit."}],
+        assumptions=[],
+        timedout="Mathematical",
+        timedoutpods="Result",
+        evidence={"kind": "symbolic_timeout", "engine": "sympy", "verified": False},
+        qualification="A timeout contains no result and is not a proof.",
+    )
+    payload["queryresult"]["input"] = input_text
+    return payload
 
 
 def _query_envelope(
