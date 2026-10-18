@@ -1,0 +1,21 @@
+{
+  "registry_version": "1.0.0",
+  "assumptions": [
+    {
+      "id": "angle:radians",
+      "type": "AngleUnit",
+      "description": "Interpret a bare numeric trigonometric argument as radians.",
+      "argument_unit": "radians",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "angle:degrees",
+      "type": "AngleUnit",
+      "description": "Interpret a bare numeric trigonometric argument as degrees.",
+      "argument_unit": "degrees",
+      "entry_version": 1,
+      "service_default": false
+    }
+  ]
+}

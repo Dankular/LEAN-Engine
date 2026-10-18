@@ -1,0 +1,15 @@
+{
+  "feature_matrix_version": 1,
+  "features": [
+    {"id": "native.prove", "state": "implemented", "scope": "typed linear arithmetic; Lean checking depends on local Mathlib setup"},
+    {"id": "native.counterexample", "state": "implemented", "scope": "Z3 witness independently replayed against the submitted AST"},
+    {"id": "native.symbolic", "state": "implemented", "scope": "SymPy 1.14; bounded safe expression grammar; outputs are not formal proofs"},
+    {"id": "interpretation.candidate_assumptions", "state": "implemented_initial_slice", "scope": "typed, versioned AngleUnit registry; sin/cos/tan bare numeric inputs; caller override and explicit-unit validation; rankings do not select assumptions"},
+    {"id": "interpretation.model_classifier", "state": "optional", "scope": "deterministic baseline included; optional Decima ranking; classifier scores are not calibrated for this service and do not establish truth"},
+    {"id": "native.knowledge_sources", "state": "implemented", "scope": "Wikidata, DBnomics, NIST CODATA subset, GeoNames, Open-Meteo; provenance returned"},
+    {"id": "compat.wolfram_language_compute", "state": "implemented", "scope": "local endpoint; three allowlisted expressions; Lean checked"},
+    {"id": "formalization.natural_language", "state": "planned", "scope": "callers currently submit a typed AST"},
+    {"id": "compat.wolfram_routes", "state": "planned", "scope": "only the WolframLanguageCompute compatibility route is implemented"},
+    {"id": "fixture_contracts", "state": "planned", "scope": "no contract fixtures have been run"}
+  ]
+}

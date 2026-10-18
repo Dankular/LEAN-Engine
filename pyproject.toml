@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leanproof-service"
+version = "0.1.0"
+description = "A small API for checking typed arithmetic claims with Z3 and Lean 4"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.9,<3",
+  "sympy==1.14.0",
+  "z3-solver>=4.13,<5",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+leanproof_service = ["assumption_registry.json"]
+
+[tool.ruff]
+line-length = 100
