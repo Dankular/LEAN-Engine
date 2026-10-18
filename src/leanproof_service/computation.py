@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Tan|ArcTan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>Sin|Cos|Tan|ArcSin|ArcCos|ArcTan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 
@@ -484,6 +484,9 @@ def _prepare_real_derivative(
     tan_cosine_arguments = _tan_cosine_arguments(tree.body)
     if tan_cosine_arguments is None:
         return None
+    inverse_trig_arguments = _inverse_trig_arguments(tree.body)
+    if inverse_trig_arguments is None:
+        return None
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="differentiate",
@@ -544,6 +547,32 @@ def _prepare_real_derivative(
         else:
             denominator_source = ast.unparse(denominator).replace("**", "^")
         domain_conditions.append(f"{denominator_source} ≠ 0")
+
+    for index, argument in enumerate(inverse_trig_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        lower_name = _fresh_identifier(f"h_inverse_lower_{index}", used_names)
+        upper_name = _fresh_identifier(f"h_inverse_upper_{index}", used_names)
+        domain_hypotheses[_inverse_trig_hypothesis_key(argument, "lower")] = lower_name
+        domain_hypotheses[_inverse_trig_hypothesis_key(argument, "upper")] = upper_name
+        domain_binders.extend(
+            [
+                f"({lower_name} : -1 < {argument_lean})",
+                f"({upper_name} : {argument_lean} < 1)",
+            ]
+        )
+        domain_condition_names.extend([lower_name, upper_name])
+        domain_conditions.extend(
+            [f"-1 < {argument_source}", f"{argument_source} < 1"]
+        )
 
     for index, argument in enumerate(positive_log_arguments):
         argument_lean = _render_real_calculus_node(
@@ -628,6 +657,7 @@ import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring
 
@@ -703,8 +733,11 @@ def _normalize_wolfram_real_functions(source: str) -> str:
     for _ in range(64):
         def normalize_function(match: re.Match[str]) -> str:
             function_name = match.group("function").lower()
-            if function_name == "arctan":
-                function_name = "atan"
+            function_name = {
+                "arcsin": "asin",
+                "arccos": "acos",
+                "arctan": "atan",
+            }.get(function_name, function_name)
             argument = match.group("argument")
             try:
                 argument = parse_math_input(argument).expression
@@ -791,6 +824,43 @@ def _log_arguments(root: ast.AST) -> list[ast.AST]:
             seen.add(key)
             arguments.append(argument)
     return arguments
+
+
+def _inverse_trig_arguments(root: ast.AST) -> list[ast.AST] | None:
+    import sympy as _sympy
+
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id not in {"asin", "acos"}
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            value = _constant_sympy_expression(argument)
+            if value is None or value.is_real is not True:
+                return None
+            if (
+                _sympy.simplify(value >= -1) is not _sympy.true
+                or _sympy.simplify(value <= 1) is not _sympy.true
+            ):
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _inverse_trig_hypothesis_key(argument: ast.AST, endpoint: str) -> str:
+    key = ast.dump(argument, include_attributes=False)
+    return f"{key}:inverse-trig:{endpoint}"
 
 
 def _unwrap_real_abs(node: ast.AST) -> ast.AST:
@@ -959,11 +1029,14 @@ def _render_real_calculus_node(
             "sin": "Real.sin",
             "cos": "Real.cos",
             "tan": "Real.tan",
+            "asin": "Real.arcsin",
+            "acos": "Real.arccos",
             "atan": "Real.arctan",
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
             "log": "Real.log",
+            "sqrt": "Real.sqrt",
         }.get(node.func.id)
         if function_name is None:
             return None
@@ -1177,6 +1250,53 @@ def _derivative_proof_term(
             return (
                 f"(Real.hasDerivAt_tan {hypothesis_name}).comp "
                 f"{point} ({inner})"
+            )
+        if node.func.id in {"asin", "acos"}:
+            argument = node.args[0]
+            function_name = (
+                "Real.arcsin" if node.func.id == "asin" else "Real.arccos"
+            )
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"({function_name} {rendered_argument}))"
+                )
+            lower_hypothesis = (domain_hypotheses or {}).get(
+                _inverse_trig_hypothesis_key(argument, "lower")
+            )
+            upper_hypothesis = (domain_hypotheses or {}).get(
+                _inverse_trig_hypothesis_key(argument, "upper")
+            )
+            if lower_hypothesis is None or upper_hypothesis is None:
+                return None
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if inner is None:
+                return None
+            theorem_name = (
+                "Real.hasDerivAt_arcsin"
+                if node.func.id == "asin"
+                else "Real.hasDerivAt_arccos"
+            )
+            return (
+                f"({theorem_name} (ne_of_gt {lower_hypothesis}) "
+                f"(ne_of_lt {upper_hypothesis})).comp {point} ({inner})"
             )
         derivative_method = {
             "sin": "sin",

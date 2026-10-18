@@ -53,7 +53,8 @@ The response includes the result and Lean evidence, including generated source a
 axiom audit. Calculus results carry explicit domain conditions. For example,
 `D[Log[x], x]` requires `x > 0`, and `Integrate[1/x, x]` returns `log(Abs(x))` under
 `x ≠ 0`. The derivative and antiderivative of `Tan[x]` require `Cos[x] ≠ 0`. The route
-accepts the `line`, `maxChars`, and `timeConstraint` options.
+requires `-1 < argument < 1` for derivatives of `ArcSin[argument]` and
+`ArcCos[argument]`. It accepts the `line`, `maxChars`, and `timeConstraint` options.
 When the time limit is reached, it returns a message-bearing
 `Failure["EvaluationTimeExceeded", ...]` result with `success: true`.
 

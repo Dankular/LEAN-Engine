@@ -392,9 +392,9 @@ def capabilities() -> dict[str, object]:
                 "derivative": {
                     "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
-                    "domain_conditions": "Tan differentiation requires the cosine of each argument to be nonzero; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
+                    "domain_conditions": "Tan arguments require nonzero cosine; ArcSin and ArcCos arguments require strict bounds between -1 and 1; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
@@ -412,7 +412,7 @@ def capabilities() -> dict[str, object]:
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
-                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,

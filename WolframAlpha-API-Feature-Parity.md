@@ -46,6 +46,10 @@ The verified calculus subset also supports `D[ArcTan[2x], x]` and the
 after Lean checks the derivative; generated conditions such as `x^2 + 1 ≠ 0` are
 included in the evidence when the proof currently needs them.
 
+`D[ArcSin[argument], x]` and `D[ArcCos[argument], x]` now require the explicit real
+domain conditions `-1 < argument` and `argument < 1`. Constant arguments outside
+`[-1, 1]` are rejected by this real-calculus route.
+
 ## Full Results API feature inventory
 
 The documented parameter groups are:
