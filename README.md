@@ -1,22 +1,18 @@
 # LEAN Engine
 
-An HTTP API for symbolic computation and machine-checked mathematics. SymPy produces
-symbolic candidates, Z3 searches supported constraints, and Lean 4 with Mathlib checks
-supported proofs.
+LEAN Engine is an HTTP service for symbolic computation and machine-checked mathematics. It routes supported requests to SymPy, Z3, Lean 4 with Mathlib, and optional data providers.
 
-This project implements a bounded subset of Wolfram|Alpha-style computation. Current
-coverage and known gaps are summarized below.
+The service is an early, bounded implementation of Wolfram|Alpha-style APIs. It does not run arbitrary Wolfram Language code or provide full Wolfram|Alpha parity.
 
 ## Quick start
 
-Requirements: Python 3.11+, Lean 4, and the repository's Mathlib project.
+On Windows, install Python 3.11 or newer and [elan](https://github.com/leanprover/elan) so the repository's Lean toolchain can be installed.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -e .
 
-# Prepare Mathlib on first run
+# Fetch Mathlib dependencies and its precompiled cache on first setup
 Set-Location lean
 lake update
 lake exe cache get
@@ -25,17 +21,13 @@ Set-Location ..
 .\scripts\dev.ps1 -Port 8000
 ```
 
-The API listens at `http://127.0.0.1:8000`. The development script creates a local
-token in the ignored `.dev-api-token` file. Set `API_BEARER_TOKEN` before startup to
-use your own token.
+The API runs at `http://127.0.0.1:8000`. The development script creates a local API token in the git-ignored `.dev-api-token` file. Set `API_BEARER_TOKEN` before starting the server to provide your own token.
 
-`/healthz`, `/readyz`, `/v1/capabilities`, and `/docs` are public. `/readyz` reports
-whether Lean and Mathlib are available.
+Check `GET /healthz` for process health, `GET /readyz` for dependency readiness, and `GET /docs` for interactive API documentation. Health and documentation routes are public; the computation routes require a bearer token.
 
-## Make a computation request
+## Make a request
 
-Protected routes use `Authorization: Bearer <token>`. The CAG compatibility route also
-accepts the configured token directly in `Authorization`. For example, in PowerShell:
+This PowerShell example asks the Wolfram Language compatibility route to differentiate `Log[x]`:
 
 ```powershell
 $token = (Get-Content .dev-api-token -Raw).Trim()
@@ -49,59 +41,54 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-The response includes the result and Lean evidence, including generated source and an
-axiom audit. Calculus results carry explicit domain conditions. For example,
-`D[Log[x], x]` requires `x > 0`, and `Integrate[1/x, x]` returns `log(Abs(x))` under
-`x ≠ 0`. The derivative and antiderivative of `Tan[x]` require `Cos[x] ≠ 0`. The route
-requires `-1 < argument < 1` for derivatives of `ArcSin[argument]` and
-`ArcCos[argument]`. `D[Sqrt[x], x]` requires `x > 0`; `Integrate[1/Sqrt[x], x]`
-returns `2*sqrt(x)` under the same condition. It accepts the `line`, `maxChars`, and
-`timeConstraint` options.
-When the time limit is reached, it returns a message-bearing
-`Failure["EvaluationTimeExceeded", ...]` result with `success: true`.
+The response includes the computed result and, where available, Lean proof evidence. This derivative is valid under the domain condition `x > 0`. Other supported calculus operations report their own domain conditions.
 
-## API routes
+## API overview
 
 | Route | Purpose |
 | --- | --- |
-| `POST /api/cag/v1/WolframLanguageCompute` | Compute supported Wolfram Language expressions and return Lean evidence. |
-| `POST /v1/prove`, `POST /v1/prove-formula` | Prove typed claims or bounded polynomial comparisons. |
-| `POST /v1/counterexample` | Search for supported counterexamples and replay them exactly. |
+| `POST /api/cag/v1/WolframLanguageCompute` | Evaluate supported Wolfram Language expressions with CAG-style request options. |
+| `POST /v1/prove`, `POST /v1/prove-formula` | Check typed claims and bounded arithmetic formulas. |
+| `POST /v1/counterexample` | Search supported claims for counterexamples. |
 | `POST /v1/symbolic`, `GET /v2/query` | Run symbolic operations or request Full Results-style JSON/XML. |
-| `POST /v1/natural-language/prove` | Draft a Lean theorem from natural language, then compile and audit it. |
-| `GET /v1/interpret`, `GET /v2/assumptions` | Inspect candidate interpretations and versioned assumption IDs. |
-| `POST /v1/knowledge/query` | Query configured knowledge providers. |
+| `POST /v1/natural-language/prove` | Draft a Lean theorem from a natural-language problem, then compile and audit it. |
+| `GET /v1/interpret`, `GET /v2/assumptions` | Inspect interpretations and versioned assumption IDs. |
+| `POST /v1/knowledge/query` | Query configured factual data providers. |
 
-Open `http://127.0.0.1:8000/docs` for request schemas and interactive API documentation.
-Supported operations are listed by `GET /v1/capabilities`.
+`GET /v1/capabilities` describes supported operations, input limits, and configured backends.
 
 ## Optional integrations
 
-Natural-language theorem drafting requires an OpenAI-compatible inference server. The
-model proposes Lean source; the service compiles it and audits the proof. Configure
-`KIMINA_BASE_URL` and `KIMINA_MODEL`, and set `KIMINA_API_KEY` if the server requires
-authentication. The [Kimina-Prover GGUF model](https://huggingface.co/mradermacher/Kimina-Prover-RL-0.6B-i1-GGUF)
-can be served locally with `llama.cpp`.
+### Natural-language theorem drafting
 
-Knowledge adapters cover Wikidata, DBnomics, NIST constants, GeoNames, and Open-Meteo.
-GeoNames requires `GEONAMES_USERNAME`. Retrieved provider data may include source
-metadata, but retrieval is not a Lean proof.
+The service can call an OpenAI-compatible inference endpoint to draft Lean source. Start a model server separately, then configure:
 
-Interpretations use service-owned, versioned assumption IDs. For an ambiguous input such
-as `sin(30)`, callers can inspect or override the angle-unit assumption, for example
-with `assumption=angle:degrees`.
+```powershell
+$env:KIMINA_BASE_URL = 'http://127.0.0.1:8081/v1'
+$env:KIMINA_MODEL = 'Kimina-Prover-RL-0.6B.i1-Q6_K.gguf'
+# Set this only if the endpoint requires authentication
+$env:KIMINA_API_KEY = 'your-key'
+```
 
-## Limits and references
+The [Kimina-Prover GGUF model](https://huggingface.co/mradermacher/Kimina-Prover-RL-0.6B-i1-GGUF) is one option for local serving. Lean checks the generated theorem, but the service does not independently verify that the theorem faithfully captures the original natural-language request.
 
-The symbolic and Wolfram-compatible routes accept bounded grammars. They do not evaluate
-arbitrary Wolfram Language code, `FreeformPrompt`, graphics, or unrestricted
-natural-language mathematics. Unsupported inputs return an error instead of a guessed
-result.
+### Factual data providers
 
-Lean checks the formal statement supplied to it. A successful natural-language proof
-does not establish that the model translated the original text correctly, and a
-retrieved factual answer is not formally verified.
+Available adapters cover Wikidata, DBnomics, NIST CODATA, GeoNames, and Open-Meteo. GeoNames requires `GEONAMES_USERNAME`. Provider results may include source metadata; retrieval does not make those results Lean-proved facts.
+
+### Assumptions
+
+Ambiguous inputs can have multiple typed interpretations. Inspect candidates with `/v1/interpret`, then pass a service-owned assumption ID to `/v2/query`, for example `assumption=angle:degrees`. The service does not silently change a claim's assumptions just to make it provable.
+
+## Proof and coverage limits
+
+- Each route supports a bounded input grammar. Unsupported expressions are rejected rather than evaluated as arbitrary code.
+- A Lean success means Lean checked the formal statement that was submitted. For model-generated statements, it does not prove the translation from natural language was correct.
+- Symbolic results and retrieved provider data are not automatically Lean proofs.
+- Wolfram|Alpha compatibility is partial. `FreeformPrompt`, unrestricted natural-language math, arbitrary graphics, and general Wolfram Language evaluation are outside the supported subset.
+
+## Project references
 
 - [Feature matrix](features.json)
 - [Wolfram API parity audit](WolframAlpha-API-Feature-Parity.md)
-- [Wolfram API reference (HTML)](WolframAlpha-API-Documentation.html) · [Markdown](WolframAlpha-API-Documentation.md)
+- [Wolfram API reference (Markdown)](WolframAlpha-API-Documentation.md) · [HTML](WolframAlpha-API-Documentation.html)
