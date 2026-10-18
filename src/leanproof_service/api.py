@@ -376,6 +376,7 @@ def capabilities() -> dict[str, object]:
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
                     "D for bounded polynomial differentiation",
+                    "Integrate for bounded polynomial antiderivatives",
                 ],
                 "polynomial_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
@@ -389,6 +390,12 @@ def capabilities() -> dict[str, object]:
                     "syntax": "D[polynomial_expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
+                },
+                "indefinite_integral": {
+                    "syntax": "Integrate[polynomial_expression, variable]",
+                    "proof": "Lean HasDerivAt theorem with axiom audit",
+                    "result_semantics": "one antiderivative representative; additive constant omitted",
+                    "limits": "bounded rational polynomial expressions only",
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]", "Integrate[x, {x, integer, integer}]"
@@ -917,7 +924,8 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic and polynomial subset is computed and compiled into Lean proofs."
+        "A bounded arithmetic, polynomial-calculus, and special-case subset is computed and "
+        "compiled into Lean proofs."
     ),
     openapi_extra={
         "requestBody": {

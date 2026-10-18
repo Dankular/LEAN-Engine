@@ -715,11 +715,25 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
             f"Integrate[{request.variable}, "
             f"{{{request.variable}, {request.lower}, {request.upper}}}]"
         )
+    if (
+        request.operation == "integrate"
+        and request.expression is not None
+        and request.variable is not None
+        and request.lower is None
+        and request.upper is None
+    ):
+        return f"Integrate[{request.expression}, {request.variable}]"
     return None
 
 
 def _query_claim_type(request: SymbolicRequest, code: str) -> str:
     if request.operation == "differentiate":
+        return "HasDerivAt"
+    if (
+        request.operation == "integrate"
+        and request.lower is None
+        and request.upper is None
+    ):
         return "HasDerivAt"
     if code.startswith("Integrate["):
         return "definite_integral_equality"

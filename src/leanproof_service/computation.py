@@ -85,6 +85,18 @@ theorem wolfram_language_compute :
 """
         return Computation(rendered_value, source)
 
+    indefinite_integral = re.fullmatch(
+        r"(?is)\s*Integrate\s*\[\s*(?P<expression>.*),\s*"
+        r"(?P<variable>[a-z][a-z0-9_]{0,31})\s*\]\s*",
+        code,
+    )
+    if indefinite_integral is not None:
+        return _prepare_polynomial_antiderivative(
+            indefinite_integral.group("expression"),
+            indefinite_integral.group("variable"),
+            time_limit_seconds,
+        )
+
     derivative = re.fullmatch(
         r"(?is)\s*D\s*\[\s*(?P<expression>.*),\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*\]\s*",
         code,
@@ -97,6 +109,93 @@ theorem wolfram_language_compute :
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_polynomial_antiderivative(
+    expression_source: str,
+    variable: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    exact_source = _normalize_decimal_literals(expression_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        integrand_lean, integrand_symbols = _render_polynomial_lean(parsed.expression)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if integrand_lean is None:
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="integrate",
+        expression=parsed.expression,
+        variable=variable,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no result"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    antiderivative = symbolic["result"]
+    try:
+        tree = ast.parse(antiderivative, mode="eval")
+        antiderivative_lean, antiderivative_symbols = _render_polynomial_lean(
+            antiderivative
+        )
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if antiderivative_lean is None:
+        return None
+
+    function_variable = "deriv_var"
+    suffix = 0
+    while function_variable in (integrand_symbols | antiderivative_symbols) or (
+        function_variable == variable
+    ):
+        suffix += 1
+        function_variable = f"deriv_var{suffix}"
+    rendered = _render_polynomial_node(
+        tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: function_variable},
+    )
+    proof = _derivative_proof_term(
+        tree.body,
+        variable,
+        function_variable,
+        variable,
+        {"nodes": 0},
+        0,
+    )
+    if rendered is None or proof is None:
+        return None
+
+    variables = sorted(integrand_symbols | antiderivative_symbols | {variable})
+    binders = " ".join(f"({name} : ℝ)" for name in variables)
+    theorem_binders = f" {binders}" if binders else ""
+    source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    HasDerivAt (fun {function_variable} : ℝ => {rendered}) {integrand_lean} {variable} := by
+  convert ({proof}) using 1
+  · ext {function_variable}
+    simp [id_eq] <;> ring
+  · simp [id_eq] <;> field_simp <;> ring
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(antiderivative.replace("**", "^"), source)
 
 
 def _prepare_polynomial_derivative(
