@@ -265,11 +265,14 @@ def execute_query(
     typed_ast = interpreted["interpretation"].get("typed_ast", {})
     is_typed_quantity = interpreted["interpretation"].get("kind") == "typed_quantity"
     is_typed_date = interpreted["interpretation"].get("kind") == "typed_date"
+    is_typed_list = interpreted["interpretation"].get("kind") == "typed_list"
     input_display = (
         f"{typed_ast['magnitude']} {typed_ast['unit']}"
         if is_typed_quantity
         else typed_ast.get("input", expression)
         if is_typed_date
+        else typed_ast.get("display", expression)
+        if is_typed_list
         else expression
     )
     if interpreted.get("outcome") == "computed":
@@ -313,6 +316,8 @@ def execute_query(
     if is_typed_quantity:
         input_minput = quantity_expression
     elif is_typed_date:
+        input_minput = expression
+    elif is_typed_list:
         input_minput = expression
     else:
         input_minput = _wolfram_input_for_query(
@@ -389,6 +394,8 @@ def execute_query(
             if is_typed_quantity
             else expression
             if is_typed_date
+            else expression
+            if is_typed_list
             else _wolfram_value(symbolic.get("result"))
         ),
         result_scanner="Date" if is_typed_date else "Mathematical",

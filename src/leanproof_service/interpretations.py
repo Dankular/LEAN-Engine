@@ -30,6 +30,9 @@ _NUMERIC_DATE = re.compile(
 _MIXED_FRACTION_LITERAL = re.compile(
     r"^\s*(?P<whole>\d+)\s+(?P<numerator>\d+)\s*/\s*(?P<denominator>\d+)\s*$"
 )
+_LIST_OR_TIMES_LITERAL = re.compile(
+    rf"^\s*(?P<number>{_NUMBER_PATTERN})\s+(?P<symbol>[A-Za-z])\s*$"
+)
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -95,6 +98,20 @@ def query_with_interpretations(
         return _interpret_mixed_fraction(
             source_query,
             mixed_fraction,
+            selections,
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    list_or_times = _list_or_times_parts(source_query)
+    if list_or_times is not None:
+        return _interpret_list_or_times(
+            source_query,
+            list_or_times,
             selections,
             compute=compute,
             numeric_precision=numeric_precision,
@@ -593,6 +610,153 @@ def _interpret_mixed_fraction(
         "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
     }
     return resolved
+
+
+def _list_or_times_parts(query: str) -> dict[str, str] | None:
+    match = _LIST_OR_TIMES_LITERAL.fullmatch(query)
+    if match is None or match.group("symbol").lower() == "m":
+        return None
+    return {"number": match.group("number"), "symbol": match.group("symbol")}
+
+
+def _interpret_list_or_times(
+    source_query: str,
+    parts: dict[str, str],
+    selections: list[str],
+    *,
+    compute: bool,
+    numeric_precision: int,
+    time_limit_seconds: float,
+    parse_timeout_seconds: float,
+    pod_timeout_seconds: float | None,
+    deadline: float | None,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "ListOrTimes"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    if len(candidates) != 2:
+        raise RuntimeError("ListOrTimes registry must contain exactly two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    if len(selections) > 1:
+        raise AssumptionSelectionError("select at most one assumption value for ListOrTimes")
+    all_ids = {item["id"] for item in registry["assumptions"]}
+    for selection in selections:
+        if selection not in candidate_ids:
+            if selection not in all_ids:
+                raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+            raise AssumptionSelectionError(f"assumption {selection} is incompatible with this input")
+
+    if selections:
+        chosen = by_id[selections[0]]
+        selection_source = "caller_override"
+    else:
+        defaults = [item for item in candidates if item.get("service_default")]
+        if len(defaults) != 1:
+            raise RuntimeError("ListOrTimes registry must have exactly one service default")
+        chosen = defaults[0]
+        selection_source = "service_default"
+
+    number = parts["number"]
+    symbol = parts["symbol"]
+    classification = {
+        "name": "deterministic_lexical_baseline",
+        "method": "neutral ranking for multiplication and list readings",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+    }
+    assumption_payload = [{
+        "type": "ListOrTimes",
+        "selected": chosen["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in candidates
+        ],
+    }]
+
+    if chosen["meaning"] == "multiplication":
+        expression = f"({number})*{symbol}"
+        resolved = query_with_interpretations(
+            expression,
+            [],
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
+        )
+        resolved["input"] = source_query
+        resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
+        resolved["assumptions"] = assumption_payload
+        resolved["interpretation"] = {
+            **resolved["interpretation"],
+            "typed_ast": {
+                "node": "space_product_interpretation",
+                "number": number,
+                "symbol": symbol,
+                "meaning": "multiplication",
+                "resolved_expression": expression,
+            },
+        }
+        resolved["classification"] = classification
+        return resolved
+
+    if chosen["meaning"] != "list":
+        raise RuntimeError("ListOrTimes registry contains an unsupported meaning")
+    display = f"{{{number}, {symbol}}}"
+    expression = f"List[{number}, {symbol}]"
+    mathml = _list_mathml(number, symbol)
+    return {
+        "input": source_query,
+        "outcome": "computed" if compute else "validated",
+        "parse_timing": parse_timing,
+        "assumptions": assumption_payload,
+        "interpretation": {
+            "kind": "typed_list",
+            "typed_ast": {
+                "node": "list",
+                "items": [
+                    {"kind": "number", "value": number},
+                    {"kind": "symbol", "name": symbol},
+                ],
+                "meaning": "list",
+                "display": display,
+            },
+            "expression": expression,
+            "solver_route": "typed_parser",
+        },
+        "classification": classification,
+        "result": display if compute else None,
+        "numeric_approximation": None,
+        "input_mathml": mathml,
+        "result_mathml": mathml if compute else None,
+        "evidence": {
+            "kind": "deterministic_interpretation" if compute else "interpretation_only",
+            "engine": "typed_parser",
+            "verified": False,
+        },
+        "qualification": "List construction follows the selected interpretation; it is not a formal proof.",
+    }
+
+
+def _list_mathml(number: str, symbol: str) -> str:
+    return (
+        '<math xmlns="http://www.w3.org/1998/Math/MathML">'
+        '<mfenced open="{" close="}"><mrow>'
+        f"<mn>{html.escape(number)}</mn><mo>,</mo><mi>{html.escape(symbol)}</mi>"
+        "</mrow></mfenced></math>"
+    )
 
 
 def _compound_interpretation(

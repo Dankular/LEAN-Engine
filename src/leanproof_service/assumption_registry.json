@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.4.0",
+  "registry_version": "1.5.0",
   "assumptions": [
     {
       "id": "angle:radians",
@@ -95,6 +95,22 @@
       "type": "MixedFraction",
       "description": "Interpret a whole number followed by a proper fraction as multiplication.",
       "meaning": "product",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "list-or-times:times",
+      "type": "ListOrTimes",
+      "description": "Interpret a number and a symbol separated by whitespace as multiplication.",
+      "meaning": "multiplication",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "list-or-times:list",
+      "type": "ListOrTimes",
+      "description": "Interpret a number and a symbol separated by whitespace as a two-item list.",
+      "meaning": "list",
       "entry_version": 1,
       "service_default": false
     }
