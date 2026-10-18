@@ -679,13 +679,15 @@ def _verify_query_computation(
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
         "assumptions": interpreted.get("assumptions", []),
         "scope": (
-            "checks the exact selected formula and result; it does not verify the English "
-            "language-to-formula translation"
+            "checks the exact selected formula and result under the listed domain conditions; "
+            "it does not verify the English language-to-formula translation"
         ),
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
         "lean_source": lean_result.source,
         "result_match": True,
     }
+    if computation.domain_conditions:
+        verification["domain_conditions"] = list(computation.domain_conditions)
     if lean_result.status == "checked":
         verification["axiom_audit"] = {
             "status": "passed",

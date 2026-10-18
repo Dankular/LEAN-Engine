@@ -29,6 +29,7 @@ class Computation:
     lean_source: str
     timed_out: bool = False
     backend_error: str | None = None
+    domain_conditions: tuple[str, ...] = ()
 
 
 _DECIMAL_LITERAL = re.compile(
@@ -377,7 +378,9 @@ def _prepare_real_derivative(
     try:
         parsed = parse_math_input(exact_source)
         tree = ast.parse(parsed.expression, mode="eval")
-        original_lean, symbols = _render_real_calculus_lean(parsed.expression)
+        original_lean, symbols = _render_real_calculus_lean(
+            parsed.expression, allow_variable_denominators=True
+        )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if original_lean is None:
@@ -397,23 +400,47 @@ def _prepare_real_derivative(
 
     result = symbolic["result"]
     try:
-        result_lean, result_symbols = _render_real_calculus_lean(result)
+        result_lean, result_symbols = _render_real_calculus_lean(
+            result, allow_variable_denominators=True
+        )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if result_lean is None:
         return None
 
-    function_variable = "deriv_var"
-    suffix = 0
-    while function_variable in symbols or function_variable == variable:
-        suffix += 1
-        function_variable = f"deriv_var{suffix}"
+    used_names = set(symbols) | set(result_symbols) | {variable}
+    function_variable = _fresh_identifier("deriv_var", used_names)
+    domain_denominators = _variable_denominators(tree.body)
+    domain_hypotheses: dict[str, str] = {}
+    domain_binders: list[str] = []
+    domain_condition_names: list[str] = []
+    domain_conditions: list[str] = []
+    for index, denominator in enumerate(domain_denominators):
+        denominator_lean = _render_real_calculus_node(
+            denominator,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if denominator_lean is None:
+            return None
+        hypothesis_name = _fresh_identifier(f"h_domain_{index}", used_names)
+        domain_hypotheses[ast.dump(denominator, include_attributes=False)] = (
+            hypothesis_name
+        )
+        domain_binders.append(f"({hypothesis_name} : {denominator_lean} ≠ 0)")
+        domain_condition_names.append(hypothesis_name)
+        denominator_source = ast.unparse(denominator).replace("**", "^")
+        domain_conditions.append(f"{denominator_source} ≠ 0")
+
     rendered = _render_real_calculus_node(
         tree.body,
         set(),
         {"nodes": 0},
         0,
         substitutions={variable: function_variable},
+        allow_variable_denominators=True,
     )
     if rendered is None:
         return None
@@ -424,16 +451,23 @@ def _prepare_real_derivative(
         variable,
         {"nodes": 0},
         0,
+        domain_hypotheses=domain_hypotheses,
     )
     if proof is None:
         return None
 
     variables = sorted(set(symbols) | set(result_symbols) | {variable})
-    binders = " ".join(f"({name} : ℝ)" for name in variables)
+    binders = " ".join(
+        [*(f"({name} : ℝ)" for name in variables), *domain_binders]
+    )
     theorem_binders = f" {binders}" if binders else ""
+    field_simp_arguments = (
+        f" [{', '.join(domain_condition_names)}]" if domain_condition_names else ""
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
@@ -445,11 +479,15 @@ theorem wolfram_language_compute{theorem_binders} :
   convert ({proof}) using 1
   · ext {function_variable}
     simp [id_eq] <;> ring
-  · simp [id_eq] <;> field_simp <;> ring
+  · simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring
 
 #print axioms wolfram_language_compute
 """
-    return Computation(result.replace("**", "^"), source)
+    return Computation(
+        result.replace("**", "^"),
+        source,
+        domain_conditions=tuple(domain_conditions),
+    )
 
 
 def _prepare_polynomial_computation(
@@ -516,13 +554,47 @@ def _normalize_wolfram_real_functions(source: str) -> str:
     return normalized
 
 
-def _render_real_calculus_lean(source: str) -> tuple[str | None, set[str]]:
+def _fresh_identifier(base: str, used_names: set[str]) -> str:
+    name = base
+    suffix = 0
+    while name in used_names:
+        suffix += 1
+        name = f"{base}{suffix}"
+    used_names.add(name)
+    return name
+
+
+def _variable_denominators(root: ast.AST) -> list[ast.AST]:
+    denominators: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+            continue
+        if _constant_fraction(node.right) is not None:
+            continue
+        key = ast.dump(node.right, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            denominators.append(node.right)
+    return denominators
+
+
+def _render_real_calculus_lean(
+    source: str,
+    allow_variable_denominators: bool = False,
+) -> tuple[str | None, set[str]]:
     try:
         tree = ast.parse(source, mode="eval")
     except (SyntaxError, RecursionError, ValueError):
         return None, set()
     names: set[str] = set()
-    rendered = _render_real_calculus_node(tree.body, names, {"nodes": 0}, 0)
+    rendered = _render_real_calculus_node(
+        tree.body,
+        names,
+        {"nodes": 0},
+        0,
+        allow_variable_denominators=allow_variable_denominators,
+    )
     return rendered, names
 
 
@@ -532,6 +604,7 @@ def _render_real_calculus_node(
     state: dict[str, int],
     depth: int,
     substitutions: dict[str, str] | None = None,
+    allow_variable_denominators: bool = False,
 ) -> str | None:
     state["nodes"] += 1
     if state["nodes"] > 256 or depth > 32:
@@ -550,7 +623,12 @@ def _render_real_calculus_node(
         return (substitutions or {}).get(node.id, node.id)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         inner = _render_real_calculus_node(
-            node.operand, names, state, depth + 1, substitutions
+            node.operand,
+            names,
+            state,
+            depth + 1,
+            substitutions,
+            allow_variable_denominators,
         )
         if inner is None:
             return None
@@ -572,17 +650,32 @@ def _render_real_calculus_node(
         if function_name is None:
             return None
         argument = _render_real_calculus_node(
-            node.args[0], names, state, depth + 1, substitutions
+            node.args[0],
+            names,
+            state,
+            depth + 1,
+            substitutions,
+            allow_variable_denominators,
         )
         return f"({function_name} {argument})" if argument is not None else None
     if not isinstance(node, ast.BinOp):
         return None
 
     left = _render_real_calculus_node(
-        node.left, names, state, depth + 1, substitutions
+        node.left,
+        names,
+        state,
+        depth + 1,
+        substitutions,
+        allow_variable_denominators,
     )
     right = _render_real_calculus_node(
-        node.right, names, state, depth + 1, substitutions
+        node.right,
+        names,
+        state,
+        depth + 1,
+        substitutions,
+        allow_variable_denominators,
     )
     if left is None or right is None:
         return None
@@ -594,7 +687,7 @@ def _render_real_calculus_node(
         return f"({left} * {right})"
     if isinstance(node.op, ast.Div):
         denominator = _constant_fraction(node.right)
-        if denominator is None or denominator == 0:
+        if denominator == 0 or (denominator is None and not allow_variable_denominators):
             return None
         return f"({left} / {right})"
     if isinstance(node.op, ast.Pow):
@@ -672,6 +765,7 @@ def _derivative_proof_term(
     point: str,
     state: dict[str, int],
     depth: int,
+    domain_hypotheses: dict[str, str] | None = None,
 ) -> str | None:
     state["nodes"] += 1
     if state["nodes"] > 256 or depth > 32:
@@ -706,12 +800,24 @@ def _derivative_proof_term(
         if derivative_method is None:
             return None
         inner = _derivative_proof_term(
-            node.args[0], variable, function_variable, point, state, depth + 1
+            node.args[0],
+            variable,
+            function_variable,
+            point,
+            state,
+            depth + 1,
+            domain_hypotheses,
         )
         return f"({inner}).{derivative_method}" if inner is not None else None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         inner = _derivative_proof_term(
-            node.operand, variable, function_variable, point, state, depth + 1
+            node.operand,
+            variable,
+            function_variable,
+            point,
+            state,
+            depth + 1,
+            domain_hypotheses,
         )
         if inner is None:
             return None
@@ -720,7 +826,13 @@ def _derivative_proof_term(
         return None
 
     left = _derivative_proof_term(
-        node.left, variable, function_variable, point, state, depth + 1
+        node.left,
+        variable,
+        function_variable,
+        point,
+        state,
+        depth + 1,
+        domain_hypotheses,
     )
     if left is None:
         return None
@@ -731,12 +843,36 @@ def _derivative_proof_term(
         return f"({left}).pow {exponent.numerator}"
     if isinstance(node.op, ast.Div):
         denominator = _constant_fraction(node.right)
-        if denominator is None or denominator == 0:
+        if denominator == 0:
             return None
-        return f"({left}).div_const {_lean_rational(denominator)}"
+        if denominator is not None:
+            return f"({left}).div_const {_lean_rational(denominator)}"
+        hypothesis_name = (domain_hypotheses or {}).get(
+            ast.dump(node.right, include_attributes=False)
+        )
+        if hypothesis_name is None:
+            return None
+        right = _derivative_proof_term(
+            node.right,
+            variable,
+            function_variable,
+            point,
+            state,
+            depth + 1,
+            domain_hypotheses,
+        )
+        if right is None:
+            return None
+        return f"({left}).div ({right}) {hypothesis_name}"
 
     right = _derivative_proof_term(
-        node.right, variable, function_variable, point, state, depth + 1
+        node.right,
+        variable,
+        function_variable,
+        point,
+        state,
+        depth + 1,
+        domain_hypotheses,
     )
     if right is None:
         return None

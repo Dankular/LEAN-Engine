@@ -394,6 +394,7 @@ def capabilities() -> dict[str, object]:
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
+                    "domain_conditions": "variable denominators require explicit nonzero hypotheses, returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
@@ -409,12 +410,12 @@ def capabilities() -> dict[str, object]:
                     "limits": "bounded real-calculus grammar; functions require an antiderivative and result representable by this grammar; other free variables are real parameters",
                 },
                 "real_calculus_limits": {
-                    "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^ with integer exponent 0–16"],
+                    "operators": ["+", "-", "*", "division by nonzero rational constants for integration; variable denominators for D require explicit nonzero conditions", "^ with integer exponent 0–16"],
                     "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["variable denominators", "Tan", "Log", "Sin[x^2] antiderivative"],
+                    "unsupported_examples": ["variable-denominator integration", "Tan", "Log", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"
@@ -1049,6 +1050,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
             "axiom_audit": {"status": "passed", "dependencies": list(lean_result.axioms)},
             "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
             "lean_source": lean_result.source,
+            "domain_conditions": list(computation.domain_conditions),
             "time_constraint_requested": compute_request.timeConstraint,
             "time_constraint_applied": effective_budget,
         },
