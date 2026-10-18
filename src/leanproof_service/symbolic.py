@@ -506,7 +506,7 @@ def _check_unit_dimensions(sympy: object, expression: object) -> None:
 
 def _mathml_output(sympy: object, expression: object) -> str | None:
     try:
-        result = sympy.mathml(expression)
+        result = sympy.mathml(expression, printer="presentation")
     except Exception:
         return None
     if not result.startswith("<math"):

@@ -30,6 +30,7 @@ from .knowledge import (
     query_knowledge,
     supported_nist_constants,
 )
+from .math_svg import mathml_image
 from .symbolic import SymbolicRequest, run_symbolic
 
 
@@ -406,9 +407,13 @@ def execute_query(
             "width": plot_width,
             "height": round(plot_width * 2 / 3),
         }
-    input_image = _svg_text_image(input_display) if "image" in formats else None
+    input_image = None
+    if "image" in formats:
+        input_image = mathml_image(input_mathml, input_display) or _svg_text_image(input_display)
     if "image" in formats and result_image is None:
-        result_image = _svg_text_image(result_text)
+        result_image = mathml_image(symbolic.get("result_mathml"), result_text)
+        if result_image is None:
+            result_image = _svg_text_image(result_text)
     approximation_image = None
     if "image" in formats and numeric_approximation is not None:
         approximation_image = _svg_text_image(str(numeric_approximation["value"]))
