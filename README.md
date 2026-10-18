@@ -54,7 +54,9 @@ axiom audit. Calculus results carry explicit domain conditions. For example,
 `D[Log[x], x]` requires `x > 0`, and `Integrate[1/x, x]` returns `log(Abs(x))` under
 `x ≠ 0`. The derivative and antiderivative of `Tan[x]` require `Cos[x] ≠ 0`. The route
 requires `-1 < argument < 1` for derivatives of `ArcSin[argument]` and
-`ArcCos[argument]`. It accepts the `line`, `maxChars`, and `timeConstraint` options.
+`ArcCos[argument]`. `D[Sqrt[x], x]` requires `x > 0`; `Integrate[1/Sqrt[x], x]`
+returns `2*sqrt(x)` under the same condition. It accepts the `line`, `maxChars`, and
+`timeConstraint` options.
 When the time limit is reached, it returns a message-bearing
 `Failure["EvaluationTimeExceeded", ...]` result with `success: true`.
 

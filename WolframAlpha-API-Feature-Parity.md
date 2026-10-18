@@ -50,6 +50,10 @@ included in the evidence when the proof currently needs them.
 domain conditions `-1 < argument` and `argument < 1`. Constant arguments outside
 `[-1, 1]` are rejected by this real-calculus route.
 
+`D[Sqrt[x], x]` is checked under `x > 0`; selected square-root antiderivatives are also
+checked, including `Integrate[1/Sqrt[x], x] = 2*sqrt(x)`. The request evidence reports
+the positivity condition and any separate denominator condition used by the proof.
+
 ## Full Results API feature inventory
 
 The documented parameter groups are:

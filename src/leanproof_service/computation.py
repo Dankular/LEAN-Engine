@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Tan|ArcSin|ArcCos|ArcTan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>Sin|Cos|Tan|ArcSin|ArcCos|ArcTan|Sqrt|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 
@@ -297,6 +297,9 @@ def _prepare_real_antiderivative(
     positive_log_arguments = _positive_log_arguments(integrand_tree.body)
     if positive_log_arguments is None:
         return None
+    positive_sqrt_arguments = _positive_sqrt_arguments(integrand_tree.body)
+    if positive_sqrt_arguments is None:
+        return None
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="integrate",
@@ -322,6 +325,9 @@ def _prepare_real_antiderivative(
         return None
     if antiderivative_lean is None:
         return None
+    antiderivative_positive_sqrt_arguments = _positive_sqrt_arguments(tree.body)
+    if antiderivative_positive_sqrt_arguments is None:
+        return None
 
     domain_expressions = [
         *_variable_denominators(integrand_tree.body),
@@ -335,7 +341,15 @@ def _prepare_real_antiderivative(
     domain_conditions: list[str] = []
     used_names = set(integrand_symbols) | set(antiderivative_symbols) | {variable}
 
-    for index, argument in enumerate(positive_log_arguments):
+    positive_arguments = [
+        *positive_log_arguments,
+        *positive_sqrt_arguments,
+        *antiderivative_positive_sqrt_arguments,
+    ]
+    for index, argument in enumerate(positive_arguments):
+        argument_key = ast.dump(argument, include_attributes=False)
+        if argument_key in positive_hypotheses:
+            continue
         argument_lean = _render_real_calculus_node(
             argument,
             set(),
@@ -346,9 +360,7 @@ def _prepare_real_antiderivative(
         if argument_lean is None:
             return None
         hypothesis_name = _fresh_identifier(f"h_positive_{index}", used_names)
-        positive_hypotheses[ast.dump(argument, include_attributes=False)] = (
-            hypothesis_name
-        )
+        positive_hypotheses[argument_key] = hypothesis_name
         domain_binders.append(f"({hypothesis_name} : 0 < {argument_lean})")
         domain_condition_names.append(f"ne_of_gt {hypothesis_name}")
         argument_source = ast.unparse(argument).replace("**", "^")
@@ -436,6 +448,7 @@ import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
@@ -480,6 +493,9 @@ def _prepare_real_derivative(
         return None
     positive_log_arguments = _positive_log_arguments(tree.body)
     if positive_log_arguments is None:
+        return None
+    positive_sqrt_arguments = _positive_sqrt_arguments(tree.body)
+    if positive_sqrt_arguments is None:
         return None
     tan_cosine_arguments = _tan_cosine_arguments(tree.body)
     if tan_cosine_arguments is None:
@@ -574,7 +590,11 @@ def _prepare_real_derivative(
             [f"-1 < {argument_source}", f"{argument_source} < 1"]
         )
 
-    for index, argument in enumerate(positive_log_arguments):
+    positive_arguments = [*positive_log_arguments, *positive_sqrt_arguments]
+    for index, argument in enumerate(positive_arguments):
+        argument_key = ast.dump(argument, include_attributes=False)
+        if argument_key in positive_hypotheses:
+            continue
         argument_lean = _render_real_calculus_node(
             argument,
             set(),
@@ -585,9 +605,7 @@ def _prepare_real_derivative(
         if argument_lean is None:
             return None
         hypothesis_name = _fresh_identifier(f"h_positive_{index}", used_names)
-        positive_hypotheses[ast.dump(argument, include_attributes=False)] = (
-            hypothesis_name
-        )
+        positive_hypotheses[argument_key] = hypothesis_name
         domain_binders.append(f"({hypothesis_name} : 0 < {argument_lean})")
         domain_condition_names.append(f"ne_of_gt {hypothesis_name}")
         argument_source = ast.unparse(argument).replace("**", "^")
@@ -654,6 +672,7 @@ import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
@@ -797,6 +816,31 @@ def _positive_log_arguments(root: ast.AST) -> list[ast.AST] | None:
         constant = _constant_fraction(argument)
         if constant is not None:
             if constant <= 0:
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _positive_sqrt_arguments(root: ast.AST) -> list[ast.AST] | None:
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "sqrt"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            value = _constant_sympy_expression(argument)
+            if value is None or value.is_real is not True or value.is_nonnegative is not True:
                 return None
             continue
         key = ast.dump(argument, include_attributes=False)
@@ -1298,6 +1342,39 @@ def _derivative_proof_term(
                 f"({theorem_name} (ne_of_gt {lower_hypothesis}) "
                 f"(ne_of_lt {upper_hypothesis})).comp {point} ({inner})"
             )
+        if node.func.id == "sqrt":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(Real.sqrt {rendered_argument}))"
+                )
+            positive_hypothesis = (positive_hypotheses or {}).get(
+                ast.dump(argument, include_attributes=False)
+            )
+            if positive_hypothesis is None:
+                return None
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if inner is None:
+                return None
+            return f"({inner}).sqrt (ne_of_gt {positive_hypothesis})"
         derivative_method = {
             "sin": "sin",
             "cos": "cos",

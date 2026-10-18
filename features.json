@@ -20,6 +20,7 @@
     {"id": "compat.wolfram_compute_request_contract", "state": "implemented", "scope": "POST /api/cag/v1/WolframLanguageCompute requires code and accepts line (default 1), maxChars (default 10000), and timeConstraint (default 60); response includes result, code, success, and uuid; evaluation timeouts return HTTP 200 with the documented message-bearing EvaluationTimeExceeded Failure and success=true; accepts configured key directly or as Bearer token"},
     {"id": "compat.wolfram_arctan_calculus", "state": "implemented_initial_slice", "scope": "D[ArcTan[f(x)],x] supports bounded expressions in the real calculus grammar; indefinite Integrate supports ArcTan[x] and 1/(1+x^2) when Lean checks the resulting HasDerivAt proof; any generated domain conditions are returned in evidence"},
     {"id": "compat.wolfram_inverse_trig_derivatives", "state": "implemented_initial_slice", "scope": "Lean-checked ArcSin and ArcCos derivatives for bounded real expressions with explicit strict argument bounds -1 < argument < 1; out-of-range constant inputs are rejected rather than treated as real-valued"},
+    {"id": "compat.wolfram_sqrt_calculus", "state": "implemented_initial_slice", "scope": "Lean-checked Sqrt derivatives require a positive variable argument; selected antiderivatives such as Integrate[1/Sqrt[x],x] return explicit positivity and denominator conditions"},
     {"id": "fixture_contracts", "state": "planned", "scope": "no contract fixtures have been run"}
   ]
 }
