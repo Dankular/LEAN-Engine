@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -21,6 +22,7 @@ _TRIG_QUERY = re.compile(
 _TRIG_LITERAL = re.compile(r"^\s*(sin|cos|tan)\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$", re.I)
 _LOG_LITERAL = re.compile(r"^\s*log\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$", re.I)
 _NUMBER_PATTERN = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
+_UNIT_LITERAL = re.compile(rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>m)\s*$")
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -80,9 +82,16 @@ def query_with_interpretations(
 
     registry = assumption_registry()
     by_id = {item["id"]: item for item in registry["assumptions"]}
+    unit_literal = _UNIT_LITERAL.fullmatch(source_query) or _UNIT_LITERAL.fullmatch(query)
     trig = _TRIG_QUERY.fullmatch(query)
     compound = None
-    if trig:
+    if unit_literal:
+        number = unit_literal.group("number")
+        candidates = [item for item in registry["assumptions"] if item["type"] == "Unit"]
+        candidate_ids = {item["id"] for item in candidates}
+        explicit_unit = None
+        expression = query
+    elif trig:
         function, number, degree_mark, unit_word = trig.groups()
         expression = f"{function.lower()}({number})"
         explicit_unit = _normalize_unit(unit_word) if unit_word else ("degrees" if degree_mark else None)
@@ -165,7 +174,7 @@ def query_with_interpretations(
                         "kind": "quantity", "magnitude": number, "unit": chosen["argument_unit"]
                     },
                 }
-            else:
+            elif chosen["type"] == "LogBase":
                 base = chosen["argument_base"]
                 expression = f"log({number}, 10)" if base == "10" else f"log({number})"
                 typed_ast = {
@@ -173,6 +182,16 @@ def query_with_interpretations(
                     "function": "log",
                     "argument": {"kind": "number", "value": number},
                     "base": base,
+                }
+            else:
+                expression = f"{number}*{chosen['symbolic_unit']}"
+                typed_ast = {
+                    "node": "quantity",
+                    "magnitude": number,
+                    "unit": chosen["argument_unit"],
+                    "unit_symbol": chosen["symbolic_unit"],
+                    "unit_type": chosen["symbolic_unit_type"],
+                    "wolfram_unit": chosen["wolfram_unit"],
                 }
 
             assumption_payload = [{
@@ -204,9 +223,11 @@ def query_with_interpretations(
         effective_parse_timeout = min(effective_parse_timeout, deadline - perf_counter())
     if effective_parse_timeout <= 0.001:
         raise InterpretationTimeout(perf_counter() - parsing_started)
+    named_units = _named_unit_bindings(typed_ast)
     parsed = run_symbolic(SymbolicRequest(
         operation="validate",
         expression=expression,
+        named_units=named_units,
         time_limit_seconds=effective_parse_timeout,
     ))
     if parsed.get("timed_out"):
@@ -233,6 +254,7 @@ def query_with_interpretations(
             symbolic = run_symbolic(SymbolicRequest(
                 operation="simplify",
                 expression=expression,
+                named_units=named_units,
                 time_limit_seconds=remaining_seconds,
                 numeric_precision=numeric_precision,
             ))
@@ -245,6 +267,15 @@ def query_with_interpretations(
             else:
                 outcome = "computed"
                 result = symbolic.get("result")
+                if typed_ast.get("node") == "quantity":
+                    result = f"{typed_ast['magnitude']} {typed_ast['unit']}"
+
+    input_mathml = symbolic.get("input_mathml")
+    result_mathml = symbolic.get("result_mathml")
+    if typed_ast.get("node") == "quantity":
+        input_mathml = _quantity_mathml(typed_ast)
+        if outcome == "computed":
+            result_mathml = input_mathml
 
     return {
         "input": source_query,
@@ -253,7 +284,11 @@ def query_with_interpretations(
         "parse_timing": parse_timing,
         "assumptions": assumption_payload,
         "interpretation": {
-            "kind": "typed_symbolic_expression",
+            "kind": (
+                "typed_quantity"
+                if typed_ast.get("node") == "quantity"
+                else "typed_symbolic_expression"
+            ),
             "typed_ast": typed_ast,
             "expression": expression,
             "solver_route": "sympy",
@@ -262,8 +297,8 @@ def query_with_interpretations(
         "classification": classifier,
         "result": result,
         "numeric_approximation": symbolic.get("numeric_approximation"),
-        "input_mathml": symbolic.get("input_mathml"),
-        "result_mathml": symbolic.get("result_mathml"),
+        "input_mathml": input_mathml,
+        "result_mathml": result_mathml,
         "evidence": symbolic.get("evidence", {
             "kind": "interpretation_only" if not compute else "symbolic_timeout",
             "engine": "typed_parser" if not compute else "sympy",
@@ -442,7 +477,32 @@ def _normalize_unit(value: str | None) -> str | None:
     return "degrees" if normalized in {"degree", "degrees", "deg"} else "radians"
 
 
+def _named_unit_bindings(typed_ast: dict[str, Any]) -> dict[str, str]:
+    if typed_ast.get("node") != "quantity":
+        return {}
+    return {str(typed_ast["unit_symbol"]): str(typed_ast["unit_type"])}
+
+
+def _quantity_mathml(typed_ast: dict[str, Any]) -> str:
+    magnitude = str(typed_ast["magnitude"])
+    unit = html.escape(str(typed_ast["unit"]))
+    return (
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><mrow>'
+        f"<mn>{magnitude}</mn><mspace width=\"thinmathspace\"/><mtext>{unit}</mtext>"
+        "</mrow></math>"
+    )
+
+
 def _rank_candidates(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if candidates[0]["type"] == "Unit":
+        return {
+            "name": "deterministic_lexical_baseline",
+            "method": "neutral ranking for the ambiguous unit abbreviation",
+            "ranks_candidates_only": True,
+            "selection_authority": False,
+            "scores_calibrated_for_service": False,
+            "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+        }
     if candidates[0]["type"] != "AngleUnit":
         scores = _log_base_scores(query, candidates)
         ranked = sorted(candidates, key=lambda item: -scores[item["id"]])

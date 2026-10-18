@@ -259,6 +259,13 @@ def execute_query(
 
     parse_timing = float(interpreted["parse_timing"])
     expression = interpreted["interpretation"]["expression"]
+    typed_ast = interpreted["interpretation"].get("typed_ast", {})
+    is_typed_quantity = interpreted["interpretation"].get("kind") == "typed_quantity"
+    input_display = (
+        f"{typed_ast['magnitude']} {typed_ast['unit']}"
+        if is_typed_quantity
+        else expression
+    )
     if interpreted.get("outcome") == "computed":
         symbolic = {
             "result": interpreted.get("result"),
@@ -296,14 +303,15 @@ def execute_query(
         }
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
-    input_minput = _wolfram_input_for_query(
+    quantity_expression = _wolfram_quantity(typed_ast) if is_typed_quantity else None
+    input_minput = quantity_expression if is_typed_quantity else _wolfram_input_for_query(
         expression,
         symbolic_request,
         is_explicit_operation=(interpreted["interpretation"].get("kind") == "typed_symbolic_operation"),
     )
     pods = _initial_pods(
         input_text,
-        expression,
+        input_display,
         None,
         formats,
         input_mathml=input_mathml,
@@ -357,13 +365,15 @@ def execute_query(
     result_text = str(symbolic.get("result", ""))
     pods = _initial_pods(
         input_text,
-        expression,
+        input_display,
         result_text,
         formats,
         input_mathml=input_mathml,
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
-        result_moutput=_wolfram_value(symbolic.get("result")),
+        result_moutput=(
+            quantity_expression if is_typed_quantity else _wolfram_value(symbolic.get("result"))
+        ),
         numeric_approximation=numeric_approximation,
         decimal_state_level=decimal_state_level,
     )
@@ -1402,6 +1412,14 @@ def _wolfram_expression(source: str) -> str | None:
         return _render_wolfram_node(node)
     except (SyntaxError, TypeError, ValueError):
         return None
+
+
+def _wolfram_quantity(typed_ast: dict[str, Any]) -> str | None:
+    value = _wolfram_expression(str(typed_ast.get("magnitude", "")))
+    unit = typed_ast.get("wolfram_unit")
+    if value is None or unit not in {"Meters", "MinimsUS", "Minutes"}:
+        return None
+    return f"Quantity[{value}, {json.dumps(unit)}]"
 
 
 def _render_wolfram_node(node: ast.AST) -> str:

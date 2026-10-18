@@ -20,6 +20,7 @@ SymbolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,
 AssumptionName = Literal[
     "real", "positive", "nonnegative", "negative", "nonpositive", "integer", "rational"
 ]
+UnitName = Literal["meter", "minute", "us_minim"]
 SymbolicOperation = Literal["validate", "simplify", "differentiate", "integrate", "solve", "identity"]
 
 
@@ -32,6 +33,7 @@ class SymbolicRequest(StrictModel):
     lower: str | None = Field(default=None, min_length=1, max_length=256)
     upper: str | None = Field(default=None, min_length=1, max_length=256)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
+    named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=30.0)
     numeric_precision: int = Field(default=50, ge=10, le=500)
 
@@ -61,6 +63,8 @@ class SymbolicRequest(StrictModel):
             raise ValueError("lower and upper are only supported by integrate")
         if any(len(set(values)) != len(values) for values in self.assumptions.values()):
             raise ValueError("assumption lists cannot contain duplicates")
+        if set(self.assumptions) & set(self.named_units):
+            raise ValueError("a name cannot be both a symbolic assumption and a unit")
         return self
 
 
@@ -103,11 +107,22 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         name: sp.Symbol(name, **{assumption: True for assumption in assumptions})
         for name, assumptions in request.assumptions.items()
     }
+    if request.named_units:
+        from sympy.physics.units import Quantity, liter, meter, minute
+
+        unit_catalog: dict[str, object] = {"meter": meter, "minute": minute}
+        if "us_minim" in request.named_units.values():
+            us_minim = Quantity("minimUS")
+            us_minim.set_global_relative_scale_factor(sp.Rational("3.785411784") / 61440, liter)
+            unit_catalog["us_minim"] = us_minim
+        symbols.update({name: unit_catalog[unit] for name, unit in request.named_units.items()})
     parser = _SafeParser(sp, symbols)
     if request.operation == "identity":
         parsing_started = perf_counter()
         lhs = parser.parse(request.lhs or "")
         rhs = parser.parse(request.rhs or "")
+        if request.named_units:
+            _check_unit_dimensions(sp, lhs - rhs)
         parse_timing = perf_counter() - parsing_started
         difference = sp.simplify(lhs - rhs)
         equal = difference == 0
@@ -125,6 +140,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
 
     parsing_started = perf_counter()
     expression = parser.parse(request.expression or "")
+    if request.named_units:
+        _check_unit_dimensions(sp, expression)
     parse_timing = perf_counter() - parsing_started
     if request.operation == "validate":
         return {
@@ -180,6 +197,15 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         "evidence": _symbolic_evidence(sp),
         "qualification": "Symbolic computation result; this response is not a Lean proof.",
     }
+
+
+def _check_unit_dimensions(sympy: object, expression: object) -> None:
+    from sympy.physics.units.util import check_dimensions
+
+    try:
+        check_dimensions(expression)
+    except ValueError as exc:
+        raise SymbolicInputError("expression contains incompatible physical dimensions") from exc
 
 
 def _mathml_output(sympy: object, expression: object) -> str | None:

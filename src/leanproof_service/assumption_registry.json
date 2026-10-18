@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.1.0",
+  "registry_version": "1.2.0",
   "assumptions": [
     {
       "id": "angle:radians",
@@ -30,6 +30,39 @@
       "type": "LogBase",
       "description": "Interpret a bare logarithm as a common logarithm with base 10.",
       "argument_base": "10",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "unit:m-meters",
+      "type": "Unit",
+      "description": "Interpret the unit abbreviation m as meters.",
+      "argument_unit": "meters",
+      "symbolic_unit": "unit_meter",
+      "symbolic_unit_type": "meter",
+      "wolfram_unit": "Meters",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "unit:m-minims-us",
+      "type": "Unit",
+      "description": "Interpret the unit abbreviation m as US minims of volume.",
+      "argument_unit": "US minims of volume",
+      "symbolic_unit": "unit_minim_us",
+      "symbolic_unit_type": "us_minim",
+      "wolfram_unit": "MinimsUS",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "unit:m-minutes",
+      "type": "Unit",
+      "description": "Interpret the unit abbreviation m as minutes.",
+      "argument_unit": "minutes",
+      "symbolic_unit": "unit_minute",
+      "symbolic_unit_type": "minute",
+      "wolfram_unit": "Minutes",
       "entry_version": 1,
       "service_default": false
     }

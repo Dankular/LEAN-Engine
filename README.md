@@ -99,7 +99,7 @@ Use `/v1/counterexample` to run bounded counterexample search without invoking L
 }
 ```
 
-The response reports `evidence.kind = symbolic_result` and `verified = false`. A simplification to zero is useful computational evidence, but only a separately checked Lean theorem is returned as a formal proof.
+The request can include a `named_units` mapping to bind selected symbols to the initial `meter`, `minute`, or `us_minim` unit set. Expressions that add incompatible dimensions are rejected. The response reports `evidence.kind = symbolic_result` and `verified = false`. A simplification to zero is useful computational evidence, but only a separately checked Lean theorem is returned as a formal proof.
 
 ## Factual knowledge sources
 
@@ -161,7 +161,9 @@ The `async` query parameter accepts `false` (default), `true`, or a number from 
 
 ## Candidate meanings and assumptions
 
-`GET /v1/interpret?input=sin%2830%29` returns the project-specific interpretation detail response. It parses the supported expression, generates typed assumption alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. The Full Results-style `/v2/query` route exposes the same candidates inside its result envelope. A formula can contain both bare numeric trig calls and bare `log(number)` calls; one `AngleUnit` and one `LogBase` choice apply independently to every matching call of that family. `GET /v2/assumptions` returns the service-owned registry (currently version 1.1.0), covering angle units for bare numeric `sin`/`cos`/`tan` and base e versus base 10 for bare `log(number)` calls.
+`GET /v1/interpret?input=sin%2830%29` returns the project-specific interpretation detail response. It parses the supported expression, generates typed assumption alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. The Full Results-style `/v2/query` route exposes the same candidates inside its result envelope. A formula can contain both bare numeric trig calls and bare `log(number)` calls; one `AngleUnit` and one `LogBase` choice apply independently to every matching call of that family. The version 1.2.0 registry also handles the documented ambiguous unit abbreviation in a quantity such as `10 m`, with caller-selectable meter, US minim, or minute interpretations. `GET /v2/assumptions` returns the service-owned IDs; they are not Wolfram's opaque tokens.
+
+For example, `GET /v2/query?input=10%20m` proposes all three service-owned `Unit` interpretations. Resubmit the selected value with `assumption=unit:m-minutes` to interpret it as minutes. This initial unit assumption covers standalone numeric quantities using the abbreviation `m`; it does not infer units across arbitrary formulas.
 
 ```bash
 curl -G http://127.0.0.1:8000/v1/interpret \
