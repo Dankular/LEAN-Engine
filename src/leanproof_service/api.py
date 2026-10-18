@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import TimeoutError as FutureTimeout
 import hmac
 import hashlib
 import json
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Annotated
 from uuid import uuid4
 
@@ -13,14 +15,25 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
+from .async_jobs import (
+    AsyncJobCapacityError,
+    discard_async_pod_job,
+    get_async_pod_job,
+    submit_async_pod,
+)
 from .computation import ComputeRequest, Computation, check_computation, prepare_computation
 from .full_results import (
     FullResultsBackendError,
     FullResultsRequestError,
+    async_pod_descriptor,
+    async_query_payload,
     execute_query,
+    filter_response_pods,
     normalize_formats,
+    normalize_async,
     normalize_output,
     query_error,
+    render_pod_response,
     render_response,
     validate_error,
     validate_query,
@@ -159,7 +172,18 @@ def capabilities() -> dict[str, object]:
                     "unsupported_stage_controls": [
                         "parsetimeout", "scantimeout", "podtimeout", "formattimeout"
                     ],
-                    "async": False,
+                    "async": {
+                        "status": "implemented_initial_slice",
+                        "modes": ["false", "true", "numeric seconds"],
+                        "true_wait_seconds": 0.4,
+                        "numeric_wait_range_seconds": [0, 30],
+                        "poll_path": "/v2/asyncPod/{job_id}",
+                        "worker_count": 4,
+                        "maximum_active_jobs": 16,
+                        "maximum_retained_jobs": 256,
+                        "result_ttl_seconds": 1800,
+                        "storage": "in_process",
+                    },
                 },
                 "pod_states": [
                     "DecimalApproximation__More digits",
@@ -235,6 +259,7 @@ def interpretation_query(
 
 @app.get("/v2/query", dependencies=[Depends(require_api_token)])
 def full_results_query(
+    request: Request,
     input: Annotated[str | None, Query()] = None,
     output: Annotated[str, Query()] = "xml",
     format: Annotated[list[str] | None, Query()] = None,
@@ -250,6 +275,16 @@ def full_results_query(
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
+    async_mode: Annotated[
+        str,
+        Query(
+            alias="async",
+            description=(
+                "false for synchronous results, true for a 0.4-second initial wait, "
+                "or a numeric wait in seconds"
+            ),
+        ),
+    ] = "false",
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -268,25 +303,113 @@ def full_results_query(
 
     try:
         formats, _ = normalize_formats(format)
-        payload = execute_query(
-            input,
-            assumption,
-            formats,
-            location=location,
-            latlong=latlong,
-            units=units,
-            pod_states=podstate,
-            include_pod_ids=includepodid,
-            exclude_pod_ids=excludepodid,
-            pod_titles=podtitle,
-            pod_indexes=podindex,
-            scanners=scanner,
-            ignorecase=ignorecase,
-            total_timeout_seconds=totaltimeout,
-        )
+        async_wait_seconds = normalize_async(async_mode)
+
+        def run_query() -> dict[str, object]:
+            result = execute_query(
+                input,
+                assumption,
+                formats,
+                location=location,
+                latlong=latlong,
+                units=units,
+                pod_states=podstate,
+                include_pod_ids=includepodid,
+                exclude_pod_ids=excludepodid,
+                pod_titles=podtitle,
+                pod_indexes=podindex,
+                scanners=scanner,
+                ignorecase=ignorecase,
+                total_timeout_seconds=totaltimeout,
+            )
+            if ignorecase:
+                result["queryresult"]["ignorecase"] = True
+            return result
+
+        if async_wait_seconds is not None:
+            pod_title, pod_id, pod_scanner = async_pod_descriptor(
+                input, location=location, latlong=latlong, units=units
+            )
+            probe = async_query_payload(
+                input,
+                pod_id=pod_id,
+                pod_title=pod_title,
+                scanner=pod_scanner,
+                async_url="/v2/asyncPod/pending",
+                formats=formats,
+                elapsed=0.0,
+            )
+            probe = filter_response_pods(
+                probe, includepodid, excludepodid, podtitle, podindex, scanner
+            )
+            async_visible = any(
+                pod.get("id") == pod_id and pod.get("async")
+                for pod in probe["queryresult"]["pods"]
+            )
+            if async_visible and podstate is None:
+                job = submit_async_pod(
+                    run_query,
+                    pod_id=pod_id,
+                    pod_title=pod_title,
+                    scanner=pod_scanner,
+                    output=selected_output,
+                )
+                async_url = str(request.url_for("full_results_async_pod", job_id=job.job_id))
+                pending = async_query_payload(
+                    input,
+                    pod_id=pod_id,
+                    pod_title=pod_title,
+                    scanner=pod_scanner,
+                    async_url=async_url,
+                    formats=formats,
+                    elapsed=monotonic() - job.created_at,
+                )
+                pending = filter_response_pods(
+                    pending, includepodid, excludepodid, podtitle, podindex, scanner
+                )
+                if ignorecase:
+                    pending["queryresult"]["ignorecase"] = True
+                try:
+                    completed = job.future.result(timeout=min(async_wait_seconds, totaltimeout))
+                except FutureTimeout:
+                    return render_response(pending, selected_output)
+                except (AssumptionSelectionError, FullResultsRequestError) as exc:
+                    discard_async_pod_job(job.job_id)
+                    response = render_response(query_error(input, str(exc)), selected_output)
+                    response.status_code = status.HTTP_400_BAD_REQUEST
+                    return response
+                except FullResultsBackendError as exc:
+                    discard_async_pod_job(job.job_id)
+                    response = render_response(
+                        query_error(input, str(exc), code=exc.error_code), selected_output
+                    )
+                    response.status_code = exc.status_code
+                    return response
+                except Exception:
+                    discard_async_pod_job(job.job_id)
+                    response = render_response(
+                        query_error(
+                            input,
+                            "Asynchronous computation failed",
+                            code="COMPUTATION_FAILURE",
+                        ),
+                        selected_output,
+                    )
+                    response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+                    return response
+                discard_async_pod_job(job.job_id)
+                return render_response(completed, selected_output)
+
+        payload = run_query()
     except (AssumptionSelectionError, FullResultsRequestError) as exc:
         response = render_response(query_error(input, str(exc)), selected_output)
         response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    except AsyncJobCapacityError as exc:
+        response = render_response(
+            query_error(input, str(exc), code="ASYNC_CAPACITY_EXCEEDED"), selected_output
+        )
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return response
     except FullResultsBackendError as exc:
         response = render_response(
@@ -295,9 +418,84 @@ def full_results_query(
         )
         response.status_code = exc.status_code
         return response
-    if ignorecase:
-        payload["queryresult"]["ignorecase"] = True
     return render_response(payload, selected_output)
+
+
+@app.get(
+    "/v2/asyncPod/{job_id}",
+    dependencies=[Depends(require_api_token)],
+    name="full_results_async_pod",
+    summary="Fetch an asynchronously computed result pod",
+    description=(
+        "Use the async URL from /v2/query with the same bearer token. Returns HTTP 202 while "
+        "the pod is pending; completed results are retained in process memory for 30 minutes."
+    ),
+)
+def full_results_async_pod(
+    job_id: str,
+    output: Annotated[str | None, Query()] = None,
+) -> Response:
+    job = get_async_pod_job(job_id)
+    if job is None or job.expires_at <= monotonic():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Async pod result was not found",
+        )
+    try:
+        selected_output = normalize_output(output or job.output)
+    except FullResultsRequestError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not job.future.done():
+        state = "running" if job.future.running() else "pending"
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            headers={"Retry-After": "1"},
+            content={
+                "status": state,
+                "job_id": job.job_id,
+                "pod_id": job.pod_id,
+                "retry_after_seconds": 1,
+            },
+        )
+
+    try:
+        result = job.future.result()
+    except (AssumptionSelectionError, FullResultsRequestError) as exc:
+        pod = _async_error_pod(job.pod_id, job.pod_title, job.scanner, str(exc))
+    except FullResultsBackendError as exc:
+        pod = _async_error_pod(job.pod_id, job.pod_title, job.scanner, str(exc))
+    except Exception:
+        pod = _async_error_pod(
+            job.pod_id, job.pod_title, job.scanner, "Asynchronous computation failed"
+        )
+    else:
+        queryresult = result.get("queryresult", {})
+        pod = next(
+            (item for item in queryresult.get("pods", []) if item.get("id") == job.pod_id),
+            None,
+        )
+        if pod is None:
+            message = queryresult.get("error_detail", {}).get("msg")
+            if not message:
+                tips = queryresult.get("tips", [])
+                message = tips[0].get("text") if tips else "No result pod was produced"
+            pod = _async_error_pod(job.pod_id, job.pod_title, job.scanner, str(message))
+    discard_async_pod_job(job.job_id)
+    return render_pod_response(pod, selected_output)
+
+
+def _async_error_pod(pod_id: str, title: str, scanner: str, message: str) -> dict[str, object]:
+    return {
+        "title": title,
+        "scanner": scanner,
+        "id": pod_id,
+        "position": 200,
+        "error": True,
+        "error_text": message,
+        "numsubpods": 1,
+        "primary": True,
+        "subpods": [{"title": "", "plaintext": message}],
+    }
 
 
 @app.get("/v2/validatequery", dependencies=[Depends(require_api_token)])

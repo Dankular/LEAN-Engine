@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import html
 import json
+import math
 import re
 from time import perf_counter
 from typing import Any
@@ -66,6 +67,23 @@ def normalize_output(value: str) -> str:
     return output
 
 
+def normalize_async(value: str) -> float | None:
+    normalized = value.strip().lower()
+    if normalized == "false":
+        return None
+    if normalized == "true":
+        return 0.4
+    try:
+        wait_seconds = float(normalized)
+    except ValueError as exc:
+        raise FullResultsRequestError(
+            "async must be 'true', 'false', or a wait time in seconds"
+        ) from exc
+    if not math.isfinite(wait_seconds) or wait_seconds < 0 or wait_seconds > 30:
+        raise FullResultsRequestError("numeric async wait time must be between 0 and 30 seconds")
+    return wait_seconds
+
+
 def normalize_formats(values: list[str] | None) -> tuple[list[str], list[str]]:
     if not values:
         return ["plaintext"], []
@@ -78,6 +96,79 @@ def normalize_formats(values: list[str] | None) -> tuple[list[str], list[str]]:
     unique = list(dict.fromkeys(formats))
     omitted = [item for item in unique if item not in _SUPPORTED_FORMATS]
     return unique, omitted
+
+
+def async_pod_descriptor(
+    input_text: str,
+    *,
+    location: str | None = None,
+    latlong: str | None = None,
+    units: str | None = None,
+) -> tuple[str, str, str]:
+    try:
+        request = _provider_request(input_text, location, latlong, units)
+    except ProviderContextNeeded:
+        return "Result", "Result", "Mathematical"
+    if request is None:
+        return "Result", "Result", "Mathematical"
+    return {
+        "open_meteo": ("Current weather", "Weather", "Data"),
+        "nist_codata": ("Physical constant", "PhysicalConstant", "Data"),
+        "wikidata": ("Entity matches", "EntitySearch", "Data"),
+        "dbnomics": ("Economic time series", "EconomicSeries", "Data"),
+        "geonames": ("Place matches", "PlaceSearch", "Data"),
+    }[request.provider]
+
+
+def async_query_payload(
+    input_text: str,
+    *,
+    pod_id: str,
+    pod_title: str,
+    scanner: str,
+    async_url: str,
+    formats: list[str],
+    elapsed: float,
+) -> dict[str, Any]:
+    input_pod = _initial_pods(input_text, input_text, None, formats)[0]
+    pending_pod = {
+        "title": pod_title,
+        "scanner": scanner,
+        "id": pod_id,
+        "position": 200,
+        "error": False,
+        "numsubpods": 0,
+        "primary": True,
+        "async": async_url,
+        "status": "pending",
+    }
+    payload = _query_envelope(
+        success=True,
+        error=False,
+        pods=[input_pod, pending_pod],
+        elapsed=elapsed,
+        parse_timing=0.0,
+        datatypes="Mathematical" if scanner == "Mathematical" else "Data",
+        warnings=_format_warnings(formats),
+        assumptions=[],
+        evidence={"kind": "asynchronous_query", "verified": False},
+        qualification=(
+            "The result pod is being computed asynchronously; fetch its async URL to retrieve it."
+        ),
+    )
+    payload["queryresult"]["input"] = input_text
+    return payload
+
+
+def render_pod_response(pod: dict[str, Any], output: str) -> Response:
+    if output == "json":
+        return JSONResponse(content={"pod": pod})
+    wrapper = ET.Element("wrapper")
+    _append_pod(wrapper, pod)
+    return Response(
+        content=ET.tostring(wrapper[0], encoding="unicode", short_empty_elements=True),
+        media_type="application/xml; charset=utf-8",
+    )
 
 
 def execute_query(
@@ -210,7 +301,7 @@ def execute_query(
             qualification="A timeout contains no result and is not a proof.",
         )
         payload["queryresult"]["input"] = input_text
-        return _filter_response_pods(
+        return filter_response_pods(
             payload, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
         )
 
@@ -1337,7 +1428,7 @@ def _select_pods(
     return selected
 
 
-def _filter_response_pods(
+def filter_response_pods(
     payload: dict[str, Any],
     include_pod_ids: list[str] | None,
     exclude_pod_ids: list[str] | None,
