@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import fnmatch
 import html
 import json
@@ -193,6 +194,7 @@ def execute_query(
     parse_timeout_seconds: float = 5.0,
     pod_timeout_seconds: float = 4.0,
     total_timeout_seconds: float = 20.0,
+    plot_width: int = 200,
 ) -> dict[str, Any]:
     started = perf_counter()
     deadline = started + total_timeout_seconds
@@ -300,6 +302,7 @@ def execute_query(
             computation_seconds = min(remaining_seconds, pod_timeout_seconds)
             symbolic = run_symbolic(symbolic_request.model_copy(update={
                 "time_limit_seconds": computation_seconds,
+                **({"plot_width": plot_width} if symbolic_request.operation == "plot" else {}),
             }))
             if symbolic.get("timed_out"):
                 symbolic["timeout_stage"] = (
@@ -386,12 +389,29 @@ def execute_query(
         )
 
     result_text = str(symbolic.get("result", ""))
+    result_image = None
+    plot_svg = symbolic.get("plot_svg")
+    if "image" in formats and isinstance(plot_svg, str):
+        encoded_image = base64.b64encode(plot_svg.encode("utf-8")).decode("ascii")
+        result_image = {
+            "src": f"data:image/svg+xml;base64,{encoded_image}",
+            "alt": result_text,
+            "title": result_text,
+            "width": plot_width,
+            "height": round(plot_width * 2 / 3),
+        }
+    warnings = _format_warnings(
+        formats,
+        _SUPPORTED_FORMATS | ({"image"} if result_image is not None else set()),
+    )
     if is_typed_quantity:
         result_moutput = quantity_expression
     elif is_typed_date or is_typed_list:
         result_moutput = expression
     elif symbolic_request.operation == "series":
         result_moutput = _wolfram_series_output(symbolic.get("series_data"))
+    elif symbolic_request.operation == "plot":
+        result_moutput = input_minput
     else:
         result_moutput = _wolfram_value(symbolic.get("result"))
     pods = _initial_pods(
@@ -403,6 +423,7 @@ def execute_query(
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
         result_moutput=result_moutput,
+        result_image=result_image,
         result_scanner="Date" if is_typed_date else "Mathematical",
         numeric_approximation=numeric_approximation,
         decimal_state_level=decimal_state_level,
@@ -1040,6 +1061,7 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         "prod": "product",
         "solve": "solve",
         "identity": "identity",
+        "plot": "plot",
     }
     operation = aliases.get(operation_name)
     if operation is None:
@@ -1064,6 +1086,7 @@ def _operation_request(
         "sum": "sum", "summation": "sum", "product": "product", "prod": "product",
         "solve": "solve",
         "identity": "identity",
+        "plot": "plot",
     }
     operation = aliases.get(operation_name.lower())
     if operation is None:
@@ -1133,6 +1156,19 @@ def _operation_request(
             lower=arguments[2],
             upper=arguments[3],
             time_limit_seconds=5,
+        )
+    if operation == "plot":
+        if len(arguments) != 4 or variable is None or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
+        ):
+            raise InterpretationError("plot requires an expression, variable, lower bound, and upper bound")
+        return SymbolicRequest(
+            operation="plot",
+            expression=arguments[0],
+            variable=variable,
+            lower=arguments[2],
+            upper=arguments[3],
+            time_limit_seconds=10,
         )
     if len(arguments) not in {2, 4} or variable is None or not re.fullmatch(
         r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
@@ -1415,6 +1451,7 @@ def _initial_pods(
     result_mathml: str | None = None,
     input_minput: str | None = None,
     result_moutput: str | None = None,
+    result_image: dict[str, Any] | None = None,
     result_scanner: str = "Mathematical",
     numeric_approximation: dict[str, Any] | None = None,
     decimal_state_level: int = 0,
@@ -1434,6 +1471,8 @@ def _initial_pods(
         subpod_input["minput"] = input_minput
     if "moutput" in selected_formats and result_moutput is not None:
         subpod_result["moutput"] = result_moutput
+    if "image" in selected_formats and result_image is not None:
+        subpod_result["img"] = result_image
     pods = [
         {
             "title": "Input interpretation",
@@ -1533,6 +1572,11 @@ def _wolfram_input_for_query(
         point = _wolfram_expression(request.point or "")
         if point is not None and request.order is not None:
             return f"Series[{rendered_expression}, {{{variable}, {point}, {request.order}}}]"
+    if request.operation == "plot" and rendered_expression is not None and variable:
+        lower = _wolfram_expression(request.lower or "")
+        upper = _wolfram_expression(request.upper or "")
+        if lower is not None and upper is not None:
+            return f"Plot[{rendered_expression}, {{{variable}, {lower}, {upper}}}]"
     if request.operation == "identity":
         lhs = _wolfram_expression(request.lhs or "")
         rhs = _wolfram_expression(request.rhs or "")
@@ -1881,6 +1925,13 @@ def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
                 child.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             elif key == "states":
                 _append_states(subpod_element, value)
+            elif key == "img" and isinstance(value, dict):
+                attributes = {
+                    name: _xml_value(value[name])
+                    for name in ("src", "alt", "title", "width", "height")
+                    if name in value
+                }
+                ET.SubElement(subpod_element, "img", attributes)
             else:
                 child = ET.SubElement(subpod_element, key)
                 child.text = str(value)

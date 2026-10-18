@@ -147,8 +147,17 @@ def capabilities() -> dict[str, object]:
         },
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "differentiate", "integrate",
-            "limit", "series", "sum", "product", "solve", "identity",
+            "limit", "series", "sum", "product", "solve", "identity", "plot",
         ],
+        "symbolic_plot": {
+            "syntax": "plot(expression, variable, lower, upper)",
+            "bounds": "explicit finite real values with lower < upper",
+            "variables": "one plotted variable; no other free symbols",
+            "formats": ["plaintext", "mathml", "minput", "moutput", "image"],
+            "image": "inline SVG data URL in the Result pod",
+            "plot_width": {"query_parameter": "plotwidth", "default": 200, "range": [100, 1600]},
+            "proof_status": "sampled visualization, not a formal proof",
+        },
         "symbolic_series": {
             "order_range": [1, 32],
             "expansion_point": "explicit expression",
@@ -424,6 +433,7 @@ def full_results_query(
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
     podtimeout: Annotated[float, Query(ge=0.1, le=30)] = 4.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
+    plotwidth: Annotated[int, Query(ge=100, le=1600)] = 200,
     async_mode: Annotated[
         str,
         Query(
@@ -472,6 +482,7 @@ def full_results_query(
                 parse_timeout_seconds=parsetimeout,
                 pod_timeout_seconds=podtimeout,
                 total_timeout_seconds=totaltimeout,
+                plot_width=plotwidth,
             )
             if ignorecase:
                 result["queryresult"]["ignorecase"] = True

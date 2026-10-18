@@ -23,7 +23,7 @@ AssumptionName = Literal[
 UnitName = Literal["meter", "minute", "us_minim"]
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "differentiate", "integrate",
-    "limit", "series", "sum", "product", "solve", "identity",
+    "limit", "series", "sum", "product", "solve", "identity", "plot",
 ]
 
 
@@ -35,6 +35,7 @@ class SymbolicRequest(StrictModel):
     variable: SymbolName | None = None
     lower: str | None = Field(default=None, min_length=1, max_length=256)
     upper: str | None = Field(default=None, min_length=1, max_length=256)
+    plot_width: int = Field(default=720, ge=100, le=1600)
     point: str | None = Field(default=None, min_length=1, max_length=256)
     order: int | None = Field(default=None, strict=True, ge=1, le=32)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
@@ -57,19 +58,21 @@ class SymbolicRequest(StrictModel):
                 raise ValueError("validate does not accept a variable or integration bounds")
             if self.assumptions:
                 raise ValueError("validate does not accept symbolic assumptions")
-        variable_operations = {"differentiate", "integrate", "limit", "series", "sum", "product", "solve"}
+        variable_operations = {
+            "differentiate", "integrate", "limit", "series", "sum", "product", "solve", "plot"
+        }
         if self.operation in variable_operations and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
         if self.operation not in variable_operations and self.variable is not None:
-            raise ValueError("variable is only used by differentiate, integrate, limit, series, sum, product, or solve")
+            raise ValueError("variable is only used by differentiate, integrate, limit, series, sum, product, solve, or plot")
         if self.operation == "integrate":
             if (self.lower is None) != (self.upper is None):
                 raise ValueError("definite integration requires both lower and upper")
-        elif self.operation in {"sum", "product"}:
+        elif self.operation in {"sum", "product", "plot"}:
             if self.lower is None or self.upper is None:
                 raise ValueError(f"{self.operation} requires lower and upper bounds")
         elif self.lower is not None or self.upper is not None:
-            raise ValueError("lower and upper are only supported by integrate, sum, or product")
+            raise ValueError("lower and upper are only supported by integrate, sum, product, or plot")
         if self.operation in {"limit", "series"}:
             if self.point is None:
                 raise ValueError(f"{self.operation} requires a point")
@@ -84,8 +87,10 @@ class SymbolicRequest(StrictModel):
             raise ValueError("assumption lists cannot contain duplicates")
         if set(self.assumptions) & set(self.named_units):
             raise ValueError("a name cannot be both a symbolic assumption and a unit")
-        if self.operation in {"series", "sum", "product"} and self.variable in self.named_units:
-            raise ValueError("series/sum/product variables cannot be bound to named physical units")
+        if self.operation in {"series", "sum", "product", "plot"} and self.variable in self.named_units:
+            raise ValueError("series/sum/product/plot variables cannot be bound to named physical units")
+        if self.operation != "plot" and self.plot_width != 720:
+            raise ValueError("plot_width is only supported by plot")
         return self
 
 
@@ -250,6 +255,38 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             result = sp.summation(expression, (variable, lower, upper))
         else:
             result = sp.product(expression, (variable, lower, upper))
+    elif request.operation == "plot":
+        lower = parser.parse(request.lower or "")
+        upper = parser.parse(request.upper or "")
+        if expression.free_symbols - {variable}:
+            raise SymbolicInputError("plots may contain only the selected variable")
+        if lower.free_symbols or upper.free_symbols:
+            raise SymbolicInputError("plot bounds must be numeric")
+        if lower.is_real is not True or upper.is_real is not True:
+            raise SymbolicInputError("plot bounds must be real")
+        try:
+            lower_value = float(sp.N(lower, 30))
+            upper_value = float(sp.N(upper, 30))
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise SymbolicInputError("plot bounds must be finite numeric values") from exc
+        if not math.isfinite(lower_value) or not math.isfinite(upper_value):
+            raise SymbolicInputError("plot bounds must be finite numeric values")
+        if lower_value >= upper_value:
+            raise SymbolicInputError("plot lower bound must be less than upper bound")
+        if not math.isfinite(upper_value - lower_value):
+            raise SymbolicInputError("plot interval is too wide to render")
+        result = (
+            f"Plot of {sp.sstr(expression)} for {variable} in "
+            f"[{sp.sstr(lower)}, {sp.sstr(upper)}]"
+        )
+        plot_svg = _plot_svg(
+            sp,
+            expression,
+            variable,
+            lower_value,
+            upper_value,
+            request.plot_width,
+        )
     else:
         result = sp.solve(expression, variable, dict=True)
         result = [
@@ -287,7 +324,154 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     if request.operation == "series":
         response["series_order"] = request.order
         response["series_data"] = series_data
+    if request.operation == "plot":
+        response["plot_svg"] = plot_svg
     return response
+
+
+def _plot_svg(
+    sympy: object,
+    expression: object,
+    variable: object,
+    lower: float,
+    upper: float,
+    width: int,
+) -> str:
+    import html
+
+    height = round(width * 2 / 3)
+    scale = width / 720
+    left, right, top, bottom = (
+        max(28, round(76 * scale)),
+        max(8, round(24 * scale)),
+        max(20, round(46 * scale)),
+        max(25, round(56 * scale)),
+    )
+    font_size = max(7, 13 * scale)
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    sample_count = 321
+    x_span = upper - lower
+    samples: list[tuple[float, float] | None] = []
+    for index in range(sample_count):
+        x_value = lower + x_span * (index / (sample_count - 1))
+        try:
+            evaluated = sympy.N(
+                expression.subs(variable, sympy.Float(x_value)),
+                20,
+            )
+            if evaluated.is_real is not True:
+                samples.append(None)
+                continue
+            y_value = float(evaluated)
+        except (AttributeError, OverflowError, TypeError, ValueError, ZeroDivisionError):
+            samples.append(None)
+            continue
+        samples.append((x_value, y_value) if math.isfinite(y_value) else None)
+
+    finite_y = sorted(point[1] for point in samples if point is not None)
+    if not finite_y:
+        raise SymbolicInputError("plot produced no finite real samples over the requested interval")
+    lower_index = int((len(finite_y) - 1) * 0.02)
+    upper_index = int((len(finite_y) - 1) * 0.98)
+    raw_y_min = finite_y[lower_index]
+    raw_y_max = finite_y[upper_index]
+    y_scale = max(abs(raw_y_min), abs(raw_y_max), 1.0)
+    y_min = raw_y_min / y_scale
+    y_max = raw_y_max / y_scale
+    max_scaled_y = sys.float_info.max / y_scale
+    if y_min == y_max:
+        padding = max(abs(y_min) * 0.08, 0.05)
+        y_min = max(-max_scaled_y, y_min - padding)
+        y_max = min(max_scaled_y, y_max + padding)
+    else:
+        margin = (y_max - y_min) * 0.08
+        y_min = max(-max_scaled_y, y_min - margin)
+        y_max = min(max_scaled_y, y_max + margin)
+    if y_min == y_max:
+        raise SymbolicInputError("plot output range is too narrow to render")
+    y_span = y_max - y_min
+
+    def sx(value: float) -> float:
+        return left + ((value - lower) / x_span) * plot_width
+
+    def sy(value: float) -> float:
+        clipped = min(y_max, max(y_min, value / y_scale))
+        return top + (y_max - clipped) * plot_height / y_span
+
+    grid: list[str] = []
+    for index in range(5):
+        x_value = lower + (upper - lower) * index / 4
+        y_scaled = y_min + y_span * index / 4
+        y_value = y_scaled * y_scale
+        if not math.isfinite(y_value):
+            y_value = math.copysign(sys.float_info.max, y_scaled)
+        x_position = sx(x_value)
+        y_position = sy(y_value)
+        grid.append(
+            f'<line x1="{x_position:.2f}" y1="{top}" x2="{x_position:.2f}" '
+            f'y2="{top + plot_height}" class="grid"/>'
+        )
+        grid.append(
+            f'<line x1="{left}" y1="{y_position:.2f}" x2="{left + plot_width}" '
+            f'y2="{y_position:.2f}" class="grid"/>'
+        )
+        grid.append(
+            f'<text x="{x_position:.2f}" y="{top + plot_height + 24}" '
+            f'text-anchor="middle">{x_value:.3g}</text>'
+        )
+        grid.append(
+            f'<text x="{left - 10}" y="{y_position + 4:.2f}" '
+            f'text-anchor="end">{y_value:.3g}</text>'
+        )
+
+    axis_y = sy(0.0) if y_min <= 0.0 <= y_max else top + plot_height
+    axis_x = sx(0.0) if lower <= 0.0 <= upper else left
+    paths: list[str] = []
+    segment: list[tuple[float, float]] = []
+    previous_y: float | None = None
+    for point in samples:
+        if point is None or (
+            previous_y is not None and abs(point[1] - previous_y) > y_span * 1.5
+        ):
+            if segment:
+                path = " ".join(
+                    ("M" if index == 0 else "L") + f" {x:.2f} {y:.2f}"
+                    for index, (x, y) in enumerate(segment)
+                )
+                paths.append(f'<path d="{path}" class="curve"/>')
+            segment = []
+        if point is not None:
+            segment.append((sx(point[0]), sy(point[1])))
+            previous_y = point[1]
+        else:
+            previous_y = None
+    if segment:
+        path = " ".join(
+            ("M" if index == 0 else "L") + f" {x:.2f} {y:.2f}"
+            for index, (x, y) in enumerate(segment)
+        )
+        paths.append(f'<path d="{path}" class="curve"/>')
+
+    title = html.escape(f"y = {sympy.sstr(expression)}", quote=True)
+    variable_label = html.escape(str(variable), quote=True)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="{title}">'
+        f'<style>text{{font:{font_size:.2f}px sans-serif;fill:#334155}}'
+        '.grid{stroke:#e2e8f0;stroke-width:1}'
+        '.axis{stroke:#64748b;stroke-width:1.4}.curve{fill:none;stroke:#2563eb;'
+        'stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}</style>'
+        f'<text x="{width / 2:.0f}" y="24" text-anchor="middle">{title}</text>'
+        f'{"".join(grid)}'
+        f'<line x1="{left}" y1="{axis_y:.2f}" x2="{left + plot_width}" '
+        f'y2="{axis_y:.2f}" class="axis"/>'
+        f'<line x1="{axis_x:.2f}" y1="{top}" x2="{axis_x:.2f}" '
+        f'y2="{top + plot_height}" class="axis"/>'
+        f'{"".join(paths)}'
+        f'<text x="{left + plot_width / 2:.0f}" y="{height - 8}" '
+        f'text-anchor="middle">{variable_label}</text></svg>'
+    )
 
 
 def _series_data(sympy: object, series: object, variable: object, point: object, order: int | None) -> dict[str, object] | None:
