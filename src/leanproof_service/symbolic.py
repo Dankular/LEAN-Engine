@@ -22,7 +22,7 @@ AssumptionName = Literal[
 ]
 UnitName = Literal["meter", "minute", "us_minim"]
 SymbolicOperation = Literal[
-    "validate", "simplify", "factor", "expand", "differentiate", "integrate", "solve", "identity"
+    "validate", "simplify", "factor", "expand", "differentiate", "integrate", "limit", "solve", "identity"
 ]
 
 
@@ -34,6 +34,7 @@ class SymbolicRequest(StrictModel):
     variable: SymbolName | None = None
     lower: str | None = Field(default=None, min_length=1, max_length=256)
     upper: str | None = Field(default=None, min_length=1, max_length=256)
+    point: str | None = Field(default=None, min_length=1, max_length=256)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=30.0)
@@ -54,15 +55,20 @@ class SymbolicRequest(StrictModel):
                 raise ValueError("validate does not accept a variable or integration bounds")
             if self.assumptions:
                 raise ValueError("validate does not accept symbolic assumptions")
-        if self.operation in {"differentiate", "integrate", "solve"} and self.variable is None:
+        if self.operation in {"differentiate", "integrate", "limit", "solve"} and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
-        if self.operation not in {"differentiate", "integrate", "solve"} and self.variable is not None:
-            raise ValueError("variable is only used by differentiate, integrate, or solve")
+        if self.operation not in {"differentiate", "integrate", "limit", "solve"} and self.variable is not None:
+            raise ValueError("variable is only used by differentiate, integrate, limit, or solve")
         if self.operation == "integrate":
             if (self.lower is None) != (self.upper is None):
                 raise ValueError("definite integration requires both lower and upper")
         elif self.lower is not None or self.upper is not None:
             raise ValueError("lower and upper are only supported by integrate")
+        if self.operation == "limit":
+            if self.point is None:
+                raise ValueError("limit requires a point")
+        elif self.point is not None:
+            raise ValueError("point is only supported by limit")
         if any(len(set(values)) != len(values) for values in self.assumptions.values()):
             raise ValueError("assumption lists cannot contain duplicates")
         if set(self.assumptions) & set(self.named_units):
@@ -168,6 +174,43 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         result = sp.expand(expression)
     elif request.operation == "differentiate":
         result = sp.diff(expression, variable)
+    elif request.operation == "limit":
+        point = parser.parse(request.point or "")
+        limit_details: dict[str, object]
+        if point == sp.oo:
+            result = sp.limit(expression, variable, point, dir="+")
+            limit_details = {"direction": "positive_infinity"}
+        elif point == -sp.oo:
+            result = sp.limit(expression, variable, point, dir="-")
+            limit_details = {"direction": "negative_infinity"}
+        else:
+            if point.is_real is not True:
+                raise SymbolicInputError(
+                    "finite limit points must be known real; declare symbolic points as real"
+                )
+            left_limit = sp.limit(expression, variable, point, dir="-")
+            right_limit = sp.limit(expression, variable, point, dir="+")
+            equal_sides = (
+                left_limit == right_limit
+                and not isinstance(left_limit, sp.AccumBounds)
+            )
+            if not equal_sides:
+                try:
+                    equal_sides = sp.simplify(left_limit - right_limit) == 0
+                except (TypeError, ValueError):
+                    equal_sides = False
+            if equal_sides:
+                result = left_limit
+            else:
+                result = (
+                    "DoesNotExist (two-sided limit; "
+                    f"left={sp.sstr(left_limit)}, right={sp.sstr(right_limit)})"
+                )
+            limit_details = {
+                "left": sp.sstr(left_limit),
+                "right": sp.sstr(right_limit),
+                "exists": equal_sides,
+            }
     elif request.operation == "integrate":
         if request.lower is not None and request.upper is not None:
             lower = parser.parse(request.lower)
@@ -192,7 +235,7 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             "value": str(sp.N(result, request.numeric_precision)),
             "precision": request.numeric_precision,
         }
-    return {
+    response: dict[str, object] = {
         "operation": request.operation,
         "result": result if isinstance(result, list) else sp.sstr(result),
         "numeric_approximation": numeric_approximation,
@@ -201,8 +244,15 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         "result_mathml": _mathml_output(sp, result) if isinstance(result, sp.Basic) else None,
         "assumptions": _assumptions_payload(request),
         "evidence": _symbolic_evidence(sp),
-        "qualification": "Symbolic computation result; this response is not a Lean proof.",
+        "qualification": (
+            "Computed as a two-sided limit over the real line; this symbolic result is not a Lean proof."
+            if request.operation == "limit"
+            else "Symbolic computation result; this response is not a Lean proof."
+        ),
     }
+    if request.operation == "limit":
+        response["limit_details"] = limit_details
+    return response
 
 
 def _check_unit_dimensions(sympy: object, expression: object) -> None:

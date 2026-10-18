@@ -10,7 +10,7 @@ A service for LLM clients that separates symbolic computation, constraint solvin
 - Assumptions are conjoined. Declared free variables are universally quantified.
 - Z3 checks polynomial constraints; counterexamples are replayed with exact Python integer/rational arithmetic.
 - `verified` is returned only after Lean compiles the generated theorem and its axiom audit passes.
-- SymPy 1.14 provides bounded simplify, factor, expand, differentiate, integrate, solve, and identity operations over a safe expression grammar. Mathematical expressions accept native syntax, a bounded presentation-LaTeX subset, or a bounded presentation-MathML subset.
+- SymPy 1.14 provides bounded simplify, factor, expand, differentiate, integrate, limit, solve, and identity operations over a safe expression grammar. Mathematical expressions accept native syntax, a bounded presentation-LaTeX subset, or a bounded presentation-MathML subset.
 - Factual retrieval adapters cover Wikidata entity search/records, individual DBnomics series, a pinned CODATA 2022 constants subset, GeoNames place search, and current Open-Meteo weather.
 - Retrieved facts carry provider and retrieval-time metadata; they are never labeled as formal proofs.
 - Lean uses `nlinarith` for nonlinear claims in this bounded polynomial fragment. General nonlinear real arithmetic, arbitrary Lean code, and natural-language formalization are not implemented. Async query jobs are an in-process initial slice and are lost when the service restarts.
@@ -119,7 +119,7 @@ It accepts one comparison per formula, exact integer/decimal constants, `+`, `-`
 
 ## Symbolic mathematics
 
-`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are parse-only `validate`, `simplify`, polynomial `factor`, algebraic `expand`, `differentiate`, `integrate`, `solve` (for an expression equal to zero), and `identity`. Expressions accept native syntax plus a bounded presentation-LaTeX subset (fractions, roots, powers, simple symbol subscripts, common functions, Greek symbols, and degree notation) and a bounded presentation-MathML subset (identifiers, numbers, fractions, powers, roots, simple symbol subscripts, fenced expressions, and common functions). Inputs are limited to 4,000 characters, 256 tokens or MathML nodes, and 32 nesting levels. The parser rejects unsupported commands, MathML elements, declarations, and constructs; it does not evaluate Python code or arbitrary LaTeX/Content MathML.
+`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are parse-only `validate`, `simplify`, polynomial `factor`, algebraic `expand`, `differentiate`, `integrate`, two-sided real `limit`, `solve` (for an expression equal to zero), and `identity`. Finite symbolic limit points must be declared `real` in `assumptions`. Expressions accept native syntax plus a bounded presentation-LaTeX subset (fractions, roots, powers, simple symbol subscripts, common functions, Greek symbols, and degree notation) and a bounded presentation-MathML subset (identifiers, numbers, fractions, powers, roots, simple symbol subscripts, fenced expressions, and common functions). Inputs are limited to 4,000 characters, 256 tokens or MathML nodes, and 32 nesting levels. The parser rejects unsupported commands, MathML elements, declarations, and constructs; it does not evaluate Python code or arbitrary LaTeX/Content MathML.
 
 ```json
 {
@@ -127,6 +127,18 @@ It accepts one comparison per formula, exact integer/decimal constants, `+`, `-`
   "lhs": "sin(x)**2 + cos(x)**2",
   "rhs": "1",
   "assumptions": {"x": ["real"]}
+}
+```
+
+A limit request supplies its point separately. For a finite symbolic point, declare that point real:
+
+```json
+{
+  "operation": "limit",
+  "expression": "x**2",
+  "variable": "x",
+  "point": "a",
+  "assumptions": {"a": ["real"]}
 }
 ```
 
@@ -163,7 +175,7 @@ The Wolfram|Alpha Full Results API reference is saved as [HTML](WolframAlpha-API
 
 ## Full Results-style computation API
 
-`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner accepts native formulas and the bounded presentation-LaTeX or MathML subsets described above, with explicit `simplify(expr)`, `factor(expr)`, `expand(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
+`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner accepts native formulas and the bounded presentation-LaTeX or MathML subsets described above, with explicit `simplify(expr)`, `factor(expr)`, `expand(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, two-sided real `limit(expr, variable, point)`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. At finite points, a limit compares left and right results; at positive or negative infinity it uses the corresponding approach direction. A one-sided mismatch is returned as `DoesNotExist` with both sides shown. Finite symbolic points must be declared real through `/v1/symbolic`; `/v2/query` currently accepts explicit real points. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
 
 The `ignorecase=true` query parameter case-folds mathematical input before parsing. Provider request patterns are matched without case sensitivity while case-sensitive provider identifiers are preserved. The original input remains in the response, and the result records `ignorecase=true`. Case folding also folds formula variable names, so use it only when case should not distinguish symbols. The same control is available on `/v2/validatequery`. Translation and query reinterpretation are not implemented.
 
@@ -178,7 +190,7 @@ The first pod is the interpreted input and the `Result` pod contains the symboli
 
 Finite non-integer numeric results also include a `DecimalApproximation` pod, with a default precision of 50 digits and discoverable `More digits` states. Resubmit the returned state input to `podstate`; repeated values or an `n@` prefix apply multiple precision steps, up to 500 digits. For example, `podstate=2@DecimalApproximation__More digits` requests 200 digits. These states apply to mathematical numeric results, not retrieved data or subpods.
 
-For example, `input=factor(x**2 - 1)` produces `(x - 1)*(x + 1)`, `input=expand((x + 1)**2)` produces `x**2 + 2*x + 1`, `input=differentiate(x**2, x)` produces `2*x`, and `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
+For example, `input=factor(x**2 - 1)` produces `(x - 1)*(x + 1)`, `input=expand((x + 1)**2)` produces `x**2 + 2*x + 1`, `input=limit(sin(x)/x, x, 0)` produces `1`, `input=differentiate(x**2, x)` produces `2*x`, and `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
 
 For example, `input=\frac{1}{2}`, `input=\sin\left(\frac{\pi}{6}\right)`, and presentation MathML `<math>` expressions are normalized into the same bounded symbolic grammar. `GET /v2/validatequery` accepts these input forms too. The supported subset is listed by `/v1/capabilities`; successful parsing is not a Lean proof.
 

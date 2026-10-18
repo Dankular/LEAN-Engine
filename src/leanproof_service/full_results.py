@@ -926,7 +926,7 @@ def _prepare_query(
     parse_started = perf_counter()
     normalized_fields: dict[str, str] = {}
     input_formats: set[str] = set()
-    for field in ("expression", "lhs", "rhs", "lower", "upper"):
+    for field in ("expression", "lhs", "rhs", "lower", "upper", "point"):
         value = getattr(operation_request, field)
         if value is None:
             continue
@@ -949,6 +949,7 @@ def _prepare_query(
             operation_request.rhs,
             operation_request.lower,
             operation_request.upper,
+            operation_request.point,
         ) if value is not None
     ]
     parse_timing = perf_counter() - parse_started
@@ -983,6 +984,8 @@ def _prepare_query(
     if operation_request.lower is not None:
         typed_ast["lower"] = operation_request.lower
         typed_ast["upper"] = operation_request.upper
+    if operation_request.point is not None:
+        typed_ast["point"] = operation_request.point
     interpreted = {
         "input": input_text,
         "outcome": "validated" if validate_only else "prepared",
@@ -1027,6 +1030,7 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         "diff": "differentiate",
         "integrate": "integrate",
         "integral": "integrate",
+        "limit": "limit",
         "solve": "solve",
         "identity": "identity",
     }
@@ -1049,7 +1053,7 @@ def _operation_request(
     aliases = {
         "simplify": "simplify", "factor": "factor", "expand": "expand",
         "differentiate": "differentiate", "diff": "differentiate",
-        "integrate": "integrate", "integral": "integrate", "solve": "solve",
+        "integrate": "integrate", "integral": "integrate", "limit": "limit", "solve": "solve",
         "identity": "identity",
     }
     operation = aliases.get(operation_name.lower())
@@ -1072,6 +1076,18 @@ def _operation_request(
             operation=operation,
             expression=arguments[0],
             variable=variable,
+            time_limit_seconds=5,
+        )
+    if operation == "limit":
+        if len(arguments) != 3 or variable is None or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
+        ):
+            raise InterpretationError("limit requires an expression, a variable name, and a point")
+        return SymbolicRequest(
+            operation="limit",
+            expression=arguments[0],
+            variable=variable,
+            point=arguments[2],
             time_limit_seconds=5,
         )
     if len(arguments) not in {2, 4} or variable is None or not re.fullmatch(
@@ -1438,6 +1454,10 @@ def _wolfram_input_for_query(
         upper = _wolfram_expression(request.upper)
         if lower is not None and upper is not None:
             return f"Integrate[{rendered_expression}, {{{variable}, {lower}, {upper}}}]"
+    if request.operation == "limit" and rendered_expression is not None and variable:
+        point = _wolfram_expression(request.point or "")
+        if point is not None:
+            return f"Limit[{rendered_expression}, {{{variable}, {point}}}]"
     if request.operation == "identity":
         lhs = _wolfram_expression(request.lhs or "")
         rhs = _wolfram_expression(request.rhs or "")
