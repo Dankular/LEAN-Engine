@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+.dev-api-token
+dev-server.log
+dev-server.err.log
 __pycache__/
 *.py[cod]
 *.egg-info/

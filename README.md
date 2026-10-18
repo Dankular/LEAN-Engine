@@ -31,6 +31,14 @@ uvicorn leanproof_service.api:app --app-dir src --host 127.0.0.1 --port 8000
 
 The solver endpoints require `Authorization: Bearer <API_BEARER_TOKEN>`. Health, readiness, capabilities, and OpenAPI discovery are public. The service does not store submitted claims or log request bodies.
 
+For a local development server that automatically restarts when Python files under `src` change, run:
+
+```powershell
+.\scripts\dev.ps1
+```
+
+It serves on `http://127.0.0.1:8000` by default. The script creates a local bearer token in the git-ignored `.dev-api-token` file if `API_BEARER_TOKEN` is not already set. Pass `-Port 8001` to use another port. Lean and Mathlib are checked when a proof request runs; the watcher reloads the API process when its Python source changes.
+
 ## Enable Lean checking
 
 Elan and the pinned Lean 4.35.0 compiler are installed on this machine. Prepare the Mathlib project from the repository root:
@@ -120,7 +128,7 @@ curl -X POST http://127.0.0.1:8000/api/cag/v1/WolframLanguageCompute \
 
 The successful result body includes `"result":"Out[1]=0"` and an additive `evidence` object. The response `uuid` is generated locally; it does not identify a remote Wolfram computation.
 
-The separate Wolfram|Alpha Full Results API is a remote query service that requires a Wolfram AppID and an `input` query. This project currently uses the listed domain providers for factual retrieval; it does not silently send requests to Wolfram|Alpha. The WLC-compatible route above is a local allowlisted Lean-checking adapter.
+The separate Wolfram|Alpha Full Results API is a remote query service that requires a Wolfram AppID and an `input` query. This project currently uses the listed domain providers for factual retrieval; it does not silently send requests to Wolfram|Alpha. The WLC-compatible route above is a local allowlisted Lean-checking adapter. The Full Results API reference is saved as [HTML](WolframAlpha-API-Documentation.html) and [Markdown](WolframAlpha-API-Documentation.md), with a [feature parity audit](WolframAlpha-API-Feature-Parity.md).
 
 ## Candidate meanings and assumptions
 
