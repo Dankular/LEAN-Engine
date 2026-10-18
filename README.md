@@ -1,6 +1,6 @@
 # Lean Proof and Computation Service
 
-A service for LLM clients that separates symbolic computation, constraint solving, formal proof checking, and retrieval from factual data providers. It does not translate natural language into a theorem: callers submit a typed claim or a bounded polynomial formula with declared variable sorts, and each response identifies what kind of evidence it contains.
+A service for LLM clients that separates symbolic computation, constraint solving, formal proof checking, and retrieval from factual data providers. Callers can submit a typed claim or bounded polynomial formula directly, or use `/v1/natural-language/prove` to ask a Lean model for a theorem and proof. Lean checks the generated source; it does not establish that the model preserved the natural-language meaning.
 
 ## Current coverage
 
@@ -10,10 +10,11 @@ A service for LLM clients that separates symbolic computation, constraint solvin
 - Assumptions are conjoined. Declared free variables are universally quantified.
 - Z3 checks polynomial constraints; counterexamples are replayed with exact Python integer/rational arithmetic.
 - `verified` is returned only after Lean compiles the generated theorem and its axiom audit passes.
+- Optional natural-language-to-Lean generation uses an OpenAI-compatible Kimina endpoint, applies a restricted source filter, then compiles the theorem with Lean and audits its axioms.
 - SymPy 1.14 provides bounded simplify, factor, expand, differentiate, integrate, limit, Taylor series, finite integer sum/product, solve, and identity operations over a safe expression grammar. Mathematical expressions accept native syntax, a bounded presentation-LaTeX subset, or a bounded presentation-MathML subset.
 - Factual retrieval adapters cover Wikidata entity search/records, individual DBnomics series, a pinned CODATA 2022 constants subset, GeoNames place search, and current Open-Meteo weather.
 - Retrieved facts carry provider and retrieval-time metadata; they are never labeled as formal proofs.
-- Lean uses `nlinarith` for nonlinear claims in this bounded polynomial fragment. General nonlinear real arithmetic, arbitrary Lean code, and natural-language formalization are not implemented. Async query jobs are an in-process initial slice and are lost when the service restarts.
+- Lean uses `nlinarith` for nonlinear claims in this bounded polynomial fragment. General nonlinear real arithmetic and unrestricted natural-language formalization remain unimplemented. Async query jobs are an in-process initial slice and are lost when the service restarts.
 
 See [features.json](features.json) for the machine-readable feature status.
 
@@ -116,6 +117,30 @@ For a shorter formula-text request, use `POST /v1/prove-formula`. Declare each v
 ```
 
 It accepts one comparison per formula, exact integer/decimal constants, `+`, `-`, `*`, powers using `^` or `**`, and division by nonzero numeric constants. Each assumption is another comparison, conjoined with the others. Formula text is limited to 4,000 characters, 256 syntax nodes, and 32 levels of nesting. It does not parse natural language, function calls, chained comparisons, or division by a variable. Every variable in the claim or assumptions must be declared; a claim uses one shared `Int` or `Real` sort.
+
+## Natural language to Lean
+
+`POST /v1/natural-language/prove` asks a configured OpenAI-compatible model to produce a complete Lean 4 theorem from a natural-language problem. The service accepts one theorem or lemma, keeps only `Mathlib` imports and simple `open` commands, rejects unsafe or axiom-introducing constructs, then runs Lean with an axiom audit. The caller still sends this service's bearer token.
+
+Configure the model with `KIMINA_BASE_URL` (the API root, such as `http://127.0.0.1:8081/v1`) and `KIMINA_MODEL`. `KIMINA_API_KEY` is optional for local servers and used as a bearer token when set. The request's `budget.wall_seconds` limits generation; `lean_timeout_seconds` separately sets the Lean compile cap (default 120, maximum 180) to allow for cold Mathlib imports. The Q6 quant linked here is stored under the ignored `.models/` directory; start its local server with:
+
+```powershell
+llama-server -m ".models\kimina-prover\Kimina-Prover-RL-0.6B.i1-Q6_K.gguf" --host 127.0.0.1 --port 8081 -c 8192 -ngl 99
+$env:KIMINA_BASE_URL = "http://127.0.0.1:8081/v1"
+$env:KIMINA_MODEL = "Kimina-Prover-RL-0.6B.i1-Q6_K.gguf"
+```
+
+```json
+{
+  "problem": "For every real x, x squared is nonnegative.",
+  "budget": {"wall_seconds": 30},
+  "lean_timeout_seconds": 120
+}
+```
+
+The response includes `evidence.lean_source`, `evidence.lean_source_sha256`, the Lean status, and the axiom audit. `outcome == "verified"` means Lean accepted the generated theorem and its axiom audit passed. It does not prove that the theorem preserves the English meaning; `formalization_fidelity.status` remains `unverified_against_natural_language` and the theorem statement must be reviewed. A response with a Lean error or timeout includes the candidate source and diagnostics but is not marked verified.
+
+The linked [Kimina-Prover-RL-0.6B model](https://huggingface.co/AI-MO/Kimina-Prover-RL-0.6B) is a Lean 4 proof generator. Its published example supplies both an English problem and a formal statement; the current route also supports an English-only prompt, but semantic alignment still requires review. The GGUF [Q6 quant](https://huggingface.co/mradermacher/Kimina-Prover-RL-0.6B-i1-GGUF) is served locally through llama.cpp.
 
 ## Symbolic mathematics
 
@@ -254,4 +279,4 @@ The baseline classifier only ranks generated candidates. By default it uses smal
 
 ## Evidence boundary
 
-Lean checks the generated formal proposition under the listed assumptions. It cannot establish that the submitted AST faithfully represents `source_text`, or that an empirical premise matches the world. If source text is supplied, its hash is returned alongside the AST hash so the two artifacts can be reviewed together; the hash does not certify their semantic match. The current interpretation route is a narrow initial slice, not natural-language formalization. This boundary follows a central lesson from [“Navier–Stokes lost in translation”](https://arxiv.org/html/2610.08144v1): kernel acceptance verifies the formal statement presented to Lean, while correspondence to the original mathematical text remains a separate obligation.
+Lean checks the generated formal proposition under the listed assumptions. It cannot establish that the submitted AST faithfully represents `source_text`, or that an empirical premise matches the world. If source text is supplied, its hash is returned alongside the AST hash so the two artifacts can be reviewed together; the hash does not certify their semantic match. The current natural-language route covers only bounded polynomial arithmetic, not general mathematical autoformalization. This boundary follows a central lesson from [“Navier–Stokes lost in translation”](https://arxiv.org/html/2610.08144v1): kernel acceptance verifies the formal statement presented to Lean, while correspondence to the original mathematical text remains a separate obligation.

@@ -46,8 +46,16 @@ from .interpretations import (
     query_with_interpretations,
 )
 from .knowledge import KnowledgeProviderError, KnowledgeRequest, query_knowledge
-from .lean_backend import lake_executable
+from .lean_backend import lake_executable, run_generated_source
 from .models import ClaimRequest
+from .natural_language import (
+    LeanClarificationNeeded,
+    LeanGenerationError,
+    LeanGeneratorNotConfigured,
+    NaturalLanguageLeanRequest,
+    generate_lean,
+    generator_configuration,
+)
 from .reasoner import analyze
 from .symbolic import SymbolicRequest, run_symbolic
 
@@ -98,6 +106,7 @@ def readyz() -> dict[str, object]:
         "solver": {"name": "z3", "version": z3.get_version_string()},
         "symbolic": {"name": "sympy", "version": sympy.__version__},
         "lean": {"installed": lake_executable() is not None, "project_configured": _lean_available()},
+        "natural_language_lean": generator_configuration(),
     }
 
 
@@ -117,6 +126,15 @@ def capabilities() -> dict[str, object]:
             "variables": "must be declared and all use one shared Int or Real sort",
             "syntax_limits": {"maximum_characters": 4000, "maximum_nodes": 256, "maximum_depth": 32},
             "natural_language": False,
+        },
+        "natural_language_to_lean": {
+            "path": "/v1/natural-language/prove",
+            "status": "configured" if generator_configuration()["configured"] else "requires_kimina_endpoint",
+            "protocol": "OpenAI-compatible chat completions",
+            "model": generator_configuration()["model"],
+            "fragment": "Lean 4 theorem generation from natural-language mathematical problems",
+            "formalization_fidelity": "not independently verified against the natural-language input",
+            "proof_verification": "the generated theorem is compiled by Lean and axiom-audited",
         },
         "counterexample_models": {
             "witness_replay": "exact integer and rational arithmetic",
@@ -285,6 +303,68 @@ def prove_formula(request: FormulaProofRequest) -> dict[str, object]:
     except (FormulaInputError, ValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return analyze(typed_claim)
+
+
+@app.post("/v1/natural-language/prove", dependencies=[Depends(require_api_token)])
+def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, object]:
+    try:
+        model, lean_source = generate_lean(
+            request.problem,
+            timeout_seconds=request.budget.wall_seconds / 2,
+        )
+    except LeanGeneratorNotConfigured as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except LeanClarificationNeeded:
+        return {
+            "outcome": "needs_clarification",
+            "problem": request.problem,
+            "formalization_fidelity": {"status": "not_established"},
+            "model": {
+                "name": generator_configuration()["model"],
+                "protocol": "openai_chat_completions",
+            },
+            "message": "The model did not produce a Lean theorem; provide a more precise mathematical statement.",
+        }
+    except LeanGenerationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    lean_result = run_generated_source(
+        lean_source,
+        timeout_seconds=request.lean_timeout_seconds,
+    )
+    verified = lean_result.status == "checked"
+    evidence: dict[str, object] = {
+        "kind": "lean_kernel_checked" if verified else "lean_generation_candidate",
+        "engine": "Lean 4",
+        "lean_status": lean_result.status,
+        "verified": verified,
+        "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
+        "lean_source": lean_result.source,
+    }
+    if verified:
+        evidence["axiom_audit"] = {
+            "status": "passed",
+            "dependencies": list(lean_result.axioms),
+        }
+    return {
+        "outcome": "verified" if verified else lean_result.status,
+        "problem": request.problem,
+        "formalization_fidelity": {
+            "status": "unverified_against_natural_language",
+            "message": (
+                "Lean checked the generated theorem statement and proof, but that does not "
+                "establish that the formal statement preserves the natural-language meaning."
+            ),
+        },
+        "model": {"name": model, "protocol": "openai_chat_completions"},
+        "evidence": evidence,
+        **({"diagnostics": lean_result.diagnostics} if lean_result.diagnostics else {}),
+    }
 
 
 @app.post("/v1/counterexample", dependencies=[Depends(require_api_token)])
