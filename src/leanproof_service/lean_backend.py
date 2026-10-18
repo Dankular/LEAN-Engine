@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from .models import BinaryTerm, ClaimRequest, Comparison, NumberTerm, Sort, Term, VariableTerm
+from .models import BinaryTerm, ClaimRequest, Comparison, NumberTerm, PowerTerm, Sort, Term, VariableTerm
 
 DEFAULT_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 AXIOM_LINE = re.compile(r"depends on axioms:\s*\[([^\]]*)\]")
@@ -38,6 +38,8 @@ def render_term(term: Term, sort: Sort) -> str:
         return term.name
     if isinstance(term, NumberTerm):
         return _lean_number(term, sort)
+    if isinstance(term, PowerTerm):
+        return f"({render_term(term.base, sort)} ^ {term.exponent})"
     if isinstance(term, BinaryTerm):
         op = {"add": "+", "sub": "-", "mul": "*"}[term.kind]
         return f"({render_term(term.left, sort)} {op} {render_term(term.right, sort)})"
@@ -63,9 +65,16 @@ def render_statement(request: ClaimRequest) -> str:
 
 def make_source(request: ClaimRequest) -> str:
     sort = request.variables[0].sort if request.variables else Sort.INT
-    tactic = "omega" if sort is Sort.INT else "linarith"
+    nonlinear = any(
+        _has_nonlinear_term(term)
+        for comparison in [*request.assumptions, request.claim]
+        for term in (comparison.left, comparison.right)
+    )
+    tactic = "nlinarith" if nonlinear else ("omega" if sort is Sort.INT else "linarith")
     imports = "import Lean\n"
     if sort is Sort.REAL:
+        imports += "import Mathlib.Data.Real.Basic\n"
+    if nonlinear or sort is Sort.REAL:
         imports += "import Mathlib.Tactic.Linarith\n"
     return (
         imports
@@ -75,6 +84,26 @@ def make_source(request: ClaimRequest) -> str:
         "#print llm_fact_check\n"
         "#print axioms llm_fact_check\n"
     )
+
+
+def _has_nonlinear_term(term: Term) -> bool:
+    if isinstance(term, PowerTerm):
+        return (term.exponent > 1 and bool(_term_variables(term.base))) or _has_nonlinear_term(term.base)
+    if isinstance(term, BinaryTerm):
+        if term.kind == "mul" and _term_variables(term.left) and _term_variables(term.right):
+            return True
+        return _has_nonlinear_term(term.left) or _has_nonlinear_term(term.right)
+    return False
+
+
+def _term_variables(term: Term) -> set[str]:
+    if isinstance(term, VariableTerm):
+        return {term.name}
+    if isinstance(term, NumberTerm):
+        return set()
+    if isinstance(term, PowerTerm):
+        return _term_variables(term.base)
+    return _term_variables(term.left) | _term_variables(term.right)
 
 
 def check_with_lean(request: ClaimRequest, timeout_seconds: float) -> LeanResult:
@@ -97,6 +126,8 @@ def run_generated_source(source: str, timeout_seconds: float) -> LeanResult:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 check=False,
             )

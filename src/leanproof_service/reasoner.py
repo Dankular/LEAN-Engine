@@ -9,7 +9,7 @@ from typing import Any
 import z3
 
 from .lean_backend import check_with_lean, render_statement
-from .models import BinaryTerm, ClaimRequest, Comparison, NumberTerm, Sort, Term, VariableTerm
+from .models import BinaryTerm, ClaimRequest, Comparison, NumberTerm, PowerTerm, Sort, Term, VariableTerm
 
 
 def analyze(request: ClaimRequest, *, attempt_lean: bool = True) -> dict[str, Any]:
@@ -51,10 +51,20 @@ def analyze(request: ClaimRequest, *, attempt_lean: bool = True) -> dict[str, An
     result = solver.check()
     if result == z3.sat:
         model = solver.model()
-        witness = {
-            name: _model_value(model.eval(variable, model_completion=True), sort)
-            for name, variable in z3_vars.items()
-        }
+        try:
+            witness = {
+                name: _model_value(model.eval(variable, model_completion=True), sort)
+                for name, variable in z3_vars.items()
+            }
+        except ValueError:
+            return _result(
+                request, "unknown", "sat", "not_attempted",
+                assumption_consistency="sat",
+                diagnostics=(
+                    "Z3 found a real algebraic counterexample that this service cannot "
+                    "replay as an exact rational witness."
+                ),
+            )
         if not validate_witness(request, witness):
             return _result(
                 request, "error", "sat", "not_attempted",
@@ -119,6 +129,8 @@ def term_to_z3(term: Term, variables: dict[str, Any], sort: Sort) -> Any:
         if sort is Sort.INT:
             return z3.IntVal(value.numerator)
         return z3.RealVal(f"{value.numerator}/{value.denominator}")
+    if isinstance(term, PowerTerm):
+        return term_to_z3(term.base, variables, sort) ** term.exponent
     if isinstance(term, BinaryTerm):
         left = term_to_z3(term.left, variables, sort)
         right = term_to_z3(term.right, variables, sort)
@@ -151,6 +163,8 @@ def eval_term(term: Term, values: dict[str, int | Fraction]) -> int | Fraction:
     if isinstance(term, NumberTerm):
         value = Fraction(term.value)
         return value.numerator if value.denominator == 1 else value
+    if isinstance(term, PowerTerm):
+        return eval_term(term.base, values) ** term.exponent
     if isinstance(term, BinaryTerm):
         left = eval_term(term.left, values)
         right = eval_term(term.right, values)

@@ -106,7 +106,12 @@ def capabilities() -> dict[str, object]:
     return {
         "formalization": "caller_supplied_typed_specification",
         "sorts": ["Int", "Real"],
-        "fragment": "linear arithmetic with equality and ordered comparisons",
+        "fragment": "bounded polynomial arithmetic with equality and ordered comparisons",
+        "polynomial_limits": {"maximum_degree": 32, "maximum_power_exponent": 16},
+        "counterexample_models": {
+            "witness_replay": "exact integer and rational arithmetic",
+            "algebraic_real_witness": "unknown unless an exact rational witness is available",
+        },
         "backends": {
             "sympy": "implemented",
             "z3": "implemented",

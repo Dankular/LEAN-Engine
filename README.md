@@ -4,16 +4,16 @@ A service for LLM clients that separates symbolic computation, constraint solvin
 
 ## Current coverage
 
-- Integer and real linear arithmetic.
+- Bounded integer and real polynomial arithmetic, including products of variables and nonnegative integer powers.
 - Equality, disequality, and ordered comparisons.
-- Addition, subtraction, and multiplication by a constant.
+- Addition, subtraction, multiplication, and powers up to exponent 16 (maximum polynomial degree 32).
 - Assumptions are conjoined. Declared free variables are universally quantified.
-- Z3 counterexamples are replayed with exact Python integer/rational arithmetic.
+- Z3 checks polynomial constraints; counterexamples are replayed with exact Python integer/rational arithmetic.
 - `verified` is returned only after Lean compiles the generated theorem and its axiom audit passes.
 - SymPy 1.14 provides bounded simplify, differentiate, integrate, solve, and identity operations over a safe expression grammar. Mathematical expressions accept native syntax, a bounded presentation-LaTeX subset, or a bounded presentation-MathML subset.
 - Factual retrieval adapters cover Wikidata entity search/records, individual DBnomics series, a pinned CODATA 2022 constants subset, GeoNames place search, and current Open-Meteo weather.
 - Retrieved facts carry provider and retrieval-time metadata; they are never labeled as formal proofs.
-- Nonlinear Lean proof generation, arbitrary Lean code, and natural-language formalization are not implemented. Async query jobs are an in-process initial slice and are lost when the service restarts.
+- Lean uses `nlinarith` for nonlinear claims in this bounded polynomial fragment. General nonlinear real arithmetic, arbitrary Lean code, and natural-language formalization are not implemented. Async query jobs are an in-process initial slice and are lost when the service restarts.
 
 See [features.json](features.json) for the machine-readable feature status.
 
@@ -85,6 +85,25 @@ Content-Type: application/json
 ```
 
 Use `/v1/counterexample` to run bounded counterexample search without invoking Lean. Both endpoints return the same evidence vocabulary. `solver_unsat` means Z3 found no counterexample in the encoded fragment; it is not a Lean certificate.
+
+Expressions support bounded integer and real polynomials built from addition, subtraction, multiplication, and nonnegative integer powers. Powers are limited to 16 and total polynomial degree to 32. Nonlinear solving can return `unknown` or `solver_unsat` when Z3 or Lean cannot finish; these outcomes are not promoted to a formal proof. Counterexamples are emitted only when the exact integer or rational witness replays successfully. If Z3 finds only an algebraic irrational real witness, the response is `unknown`.
+
+For example, encode `x² ≥ 0` with a `pow` term:
+
+```json
+{
+  "variables": [{"name": "x", "sort": "Real"}],
+  "claim": {
+    "op": "ge",
+    "left": {
+      "kind": "pow",
+      "base": {"kind": "var", "name": "x"},
+      "exponent": 2
+    },
+    "right": {"kind": "number", "value": "0"}
+  }
+}
+```
 
 ## Symbolic mathematics
 

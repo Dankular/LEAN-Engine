@@ -49,8 +49,15 @@ class BinaryTerm(StrictModel):
     right: Term
 
 
-Term = Annotated[Union[VariableTerm, NumberTerm, BinaryTerm], Field(discriminator="kind")]
+class PowerTerm(StrictModel):
+    kind: Literal["pow"]
+    base: Term
+    exponent: int = Field(ge=0, le=16)
+
+
+Term = Annotated[Union[VariableTerm, NumberTerm, BinaryTerm, PowerTerm], Field(discriminator="kind")]
 BinaryTerm.model_rebuild()
+PowerTerm.model_rebuild()
 
 
 class Comparison(StrictModel):
@@ -102,13 +109,15 @@ def term_variables(term: Term) -> set[str]:
         return {term.name}
     if isinstance(term, NumberTerm):
         return set()
+    if isinstance(term, PowerTerm):
+        return term_variables(term.base)
     return term_variables(term.left) | term_variables(term.right)
 
 
 def check_term(
     term: Term, sort: Sort, depth: int, node_count: list[int] | None = None
-) -> dict[str, Fraction]:
-    """Validate the supported linear fragment and return variable coefficients."""
+) -> int:
+    """Validate a bounded polynomial term and return its maximum degree."""
     if node_count is None:
         node_count = [0]
     node_count[0] += 1
@@ -117,48 +126,25 @@ def check_term(
     if depth > 24:
         raise ValueError("expression nesting exceeds 24 levels")
     if isinstance(term, VariableTerm):
-        return {term.name: Fraction(1)}
+        return 1
     if isinstance(term, NumberTerm):
         value = number_value(term)
         if sort is Sort.INT and value.denominator != 1:
             raise ValueError("Int expressions require integer constants")
         if abs(value.numerator).bit_length() > 256 or value.denominator.bit_length() > 256:
             raise ValueError("numeric constants are limited to 256 bits")
-        return {}
+        return 0
+
+    if isinstance(term, PowerTerm):
+        base_degree = check_term(term.base, sort, depth + 1, node_count)
+        degree = base_degree * term.exponent
+        if degree > 32:
+            raise ValueError("polynomial degree is limited to 32")
+        return degree
 
     left = check_term(term.left, sort, depth + 1, node_count)
     right = check_term(term.right, sort, depth + 1, node_count)
-    if term.kind == "add":
-        return _combine(left, right, Fraction(1))
-    if term.kind == "sub":
-        return _combine(left, right, Fraction(-1))
-    if left and right:
-        raise ValueError("nonlinear multiplication is outside the supported fragment")
-
-    scalar_term = term.left if not left else term.right
-    scalar = _constant_value(scalar_term)
-    coefficients = right if not left else left
-    return {name: value * scalar for name, value in coefficients.items() if value * scalar}
-
-
-def _constant_value(term: Term) -> Fraction:
-    if isinstance(term, NumberTerm):
-        return number_value(term)
-    if isinstance(term, BinaryTerm):
-        left = _constant_value(term.left)
-        right = _constant_value(term.right)
-        if term.kind == "add":
-            return left + right
-        if term.kind == "sub":
-            return left - right
-        return left * right
-    raise ValueError("multiplication is supported only by a constant")
-
-
-def _combine(
-    left: dict[str, Fraction], right: dict[str, Fraction], sign: Fraction
-) -> dict[str, Fraction]:
-    result = dict(left)
-    for name, coefficient in right.items():
-        result[name] = result.get(name, Fraction(0)) + sign * coefficient
-    return {name: value for name, value in result.items() if value}
+    degree = max(left, right) if term.kind in {"add", "sub"} else left + right
+    if degree > 32:
+        raise ValueError("polynomial degree is limited to 32")
+    return degree
