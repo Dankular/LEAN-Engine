@@ -9,8 +9,8 @@
     {"id": "native.knowledge_sources", "state": "implemented", "scope": "Wikidata, DBnomics, NIST CODATA subset, GeoNames, Open-Meteo; provenance returned"},
     {"id": "compat.wolfram_language_compute", "state": "implemented", "scope": "local endpoint; three allowlisted expressions; Lean checked"},
     {"id": "formalization.natural_language", "state": "planned", "scope": "callers currently submit a typed AST"},
-    {"id": "compat.wolfram_alpha_full_results", "state": "implemented_initial_slice", "scope": "local /v2/query JSON/XML queryresult envelope, input/result pods, safe symbolic expressions and explicit simplify/differentiate/integrate/solve/identity calls, AngleUnit assumptions, plaintext/MathML, pod selectors, and /v2/validatequery; no Wolfram AppID or remote Wolfram calls"},
-    {"id": "compat.wolfram_routes", "state": "partial", "scope": "WolframLanguageCompute allowlisted subset plus a partial Full Results-style protocol; broad natural-language coverage, most render formats, provider pods, async jobs, pod states, and full parameter compatibility remain unimplemented"},
+    {"id": "compat.wolfram_alpha_full_results", "state": "implemented_initial_slice", "scope": "local /v2/query JSON/XML queryresult envelope, safe symbolic expressions and explicit operations, AngleUnit/LogBase assumptions, plaintext/MathML, pod selectors, /v2/validatequery, plus source-backed weather/CODATA/Wikidata pods; no Wolfram AppID or remote Wolfram calls"},
+    {"id": "compat.wolfram_routes", "state": "partial", "scope": "WolframLanguageCompute allowlisted subset plus a partial Full Results-style protocol; broad natural-language coverage, most render formats, provider domains, async jobs, pod states, and full parameter compatibility remain unimplemented"},
     {"id": "fixture_contracts", "state": "planned", "scope": "no contract fixtures have been run"}
   ]
 }

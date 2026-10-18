@@ -170,6 +170,11 @@ _NIST_CONSTANTS: dict[str, dict[str, str]] = {
 }
 
 
+def supported_nist_constants() -> set[str]:
+    """Return the stable keys in the bundled CODATA subset."""
+    return set(_NIST_CONSTANTS)
+
+
 def _nist(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
     key = re.sub(r"[^a-z0-9]+", "_", (request.constant or "").lower()).strip("_")
     value = _NIST_CONSTANTS.get(key)

@@ -31,13 +31,13 @@ uvicorn leanproof_service.api:app --app-dir src --host 127.0.0.1 --port 8000
 
 The solver endpoints require `Authorization: Bearer <API_BEARER_TOKEN>`. Health, readiness, capabilities, and OpenAPI discovery are public. The service does not store submitted claims or log request bodies.
 
-For a local development server that automatically restarts when Python files under `src` change, run:
+For a local project watcher that compiles Python source, type-checks changed Lean files, checks Lake configuration changes, and restarts the API worker after project source or build-input changes, run:
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-It serves on `http://127.0.0.1:8000` by default. The script creates a local bearer token in the git-ignored `.dev-api-token` file if `API_BEARER_TOKEN` is not already set. Pass `-Port 8001` to use another port. Lean and Mathlib are checked when a proof request runs; the watcher reloads the API process when its Python source changes.
+It serves on `http://127.0.0.1:8000` by default. The watcher covers `src`, `lean`, `scripts`, `tests`, and the root project configuration files, while ignoring generated folders such as `.lake` and `.venv`. Python changes are syntax-compiled before the API worker restarts. Changed Lean files are type-checked with the configured Lake environment; Lake configuration changes run `lake build --allow-empty`. A failed check leaves the current API worker running. The script creates a local bearer token in the git-ignored `.dev-api-token` file if `API_BEARER_TOKEN` is not already set. Pass `-Port 8001` to use another port. Lean and Mathlib are also checked when a proof request runs.
 
 ## Enable Lean checking
 
@@ -145,7 +145,9 @@ The first pod is the interpreted input and the `Result` pod contains the symboli
 
 For example, `input=differentiate(x**2, x)` produces `2*x`, while `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
 
-`GET /v2/validatequery` runs the safe parser and candidate-assumption resolver without running the symbolic simplifier. It returns a `validatequeryresult` envelope and exposes the same typed, service-owned assumption values used by `/v2/query`. The current query planner covers mathematical expressions; natural-language knowledge queries remain available through the explicit `/v1/knowledge/query` provider interface.
+The same planner routes a small set of source-backed data queries to the existing providers: `what is the speed of light?` or `constant: planck_constant` uses the bundled NIST CODATA subset; `weather in London` or `input=weather&location=London` uses Open-Meteo; and `entity: France` searches Wikidata. Weather can also use `latlong=51.5072,-0.1276`. The JSON/XML result contains a Data pod, provider source metadata (including license or attribution fields where provided), retrieval time, and `retrieved_source_data` evidence. These explicit patterns are an initial routing slice; they do not imply general natural-language coverage.
+
+`GET /v2/validatequery` parses supported math expressions and recognizes data-provider request patterns without running symbolic simplification or retrieving provider data. It returns a `validatequeryresult` envelope and exposes the same typed, service-owned assumption values used by `/v2/query`. Broader factual requests remain available through `/v1/knowledge/query`.
 
 ## Candidate meanings and assumptions
 

@@ -123,7 +123,11 @@ def capabilities() -> dict[str, object]:
                 "query_classes": [
                     "safe symbolic expressions",
                     "simplify/differentiate/integrate/solve/identity calls",
+                    "weather location queries",
+                    "supported CODATA constants",
+                    "explicit Wikidata entity searches",
                 ],
+                "location_parameters": ["location", "latlong"],
                 "validation_path": "/v2/validatequery",
             },
             "wolfram_language_compute": {
@@ -203,6 +207,8 @@ def full_results_query(
     podtitle: Annotated[list[str] | None, Query()] = None,
     podindex: Annotated[list[str] | None, Query()] = None,
     scanner: Annotated[list[str] | None, Query()] = None,
+    location: Annotated[str | None, Query()] = None,
+    latlong: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -225,6 +231,8 @@ def full_results_query(
             input,
             assumption,
             formats,
+            location=location,
+            latlong=latlong,
             include_pod_ids=includepodid,
             exclude_pod_ids=excludepodid,
             pod_titles=podtitle,
@@ -236,8 +244,11 @@ def full_results_query(
         response.status_code = status.HTTP_400_BAD_REQUEST
         return response
     except FullResultsBackendError as exc:
-        response = render_response(query_error(input, f"computation backend failed: {exc}"), selected_output)
-        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        response = render_response(
+            query_error(input, str(exc), code=exc.error_code),
+            selected_output,
+        )
+        response.status_code = exc.status_code
         return response
     return render_response(payload, selected_output)
 
@@ -247,6 +258,8 @@ def full_results_validatequery(
     input: Annotated[str | None, Query()] = None,
     output: Annotated[str, Query()] = "xml",
     assumption: Annotated[list[str] | None, Query()] = None,
+    location: Annotated[str | None, Query()] = None,
+    latlong: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -263,8 +276,12 @@ def full_results_validatequery(
         response.status_code = status.HTTP_400_BAD_REQUEST
         return response
     try:
-        payload = validate_query(input, assumption)
+        payload = validate_query(input, assumption, location=location, latlong=latlong)
     except AssumptionSelectionError as exc:
+        response = render_response(validate_error(input, str(exc)), selected_output)
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    except FullResultsRequestError as exc:
         response = render_response(validate_error(input, str(exc)), selected_output)
         response.status_code = status.HTTP_400_BAD_REQUEST
         return response

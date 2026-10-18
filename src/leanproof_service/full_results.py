@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import html
 import json
+import re
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,12 @@ from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
     query_with_interpretations,
+)
+from .knowledge import (
+    KnowledgeProviderError,
+    KnowledgeRequest,
+    query_knowledge,
+    supported_nist_constants,
 )
 from .symbolic import SymbolicRequest, run_symbolic
 
@@ -32,6 +39,18 @@ class FullResultsRequestError(ValueError):
 
 
 class FullResultsBackendError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 500,
+        error_code: str = "COMPUTATION_FAILURE",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+class ProviderContextNeeded(ValueError):
     pass
 
 
@@ -61,6 +80,8 @@ def execute_query(
     assumptions: list[str] | None,
     formats: list[str],
     *,
+    location: str | None = None,
+    latlong: str | None = None,
     include_pod_ids: list[str] | None = None,
     exclude_pod_ids: list[str] | None = None,
     pod_titles: list[str] | None = None,
@@ -68,6 +89,29 @@ def execute_query(
     scanners: list[str] | None = None,
 ) -> dict[str, Any]:
     started = perf_counter()
+    provider_parse_started = perf_counter()
+    try:
+        provider_request = _provider_request(input_text, location, latlong)
+    except ProviderContextNeeded as exc:
+        return _unrecognized_query(input_text, str(exc), perf_counter() - started)
+    provider_parse_timing = perf_counter() - provider_parse_started
+    if provider_request is not None:
+        if assumptions:
+            raise AssumptionSelectionError(
+                "mathematical assumption selections do not apply to this data query"
+            )
+        return _execute_provider_query(
+            input_text,
+            provider_request,
+            formats,
+            started,
+            provider_parse_timing,
+            include_pod_ids=include_pod_ids,
+            exclude_pod_ids=exclude_pod_ids,
+            pod_titles=pod_titles,
+            pod_indexes=pod_indexes,
+            scanners=scanners,
+        )
     try:
         interpreted, symbolic_request = _prepare_query(
             input_text, assumptions or [], validate_only=False
@@ -155,10 +199,57 @@ def execute_query(
     return payload
 
 
-def validate_query(input_text: str, assumptions: list[str] | None) -> dict[str, Any]:
+def validate_query(
+    input_text: str,
+    assumptions: list[str] | None,
+    *,
+    location: str | None = None,
+    latlong: str | None = None,
+) -> dict[str, Any]:
     started = perf_counter()
     try:
+        provider_request = _provider_request(input_text, location, latlong)
+        if provider_request is not None:
+            if assumptions:
+                raise AssumptionSelectionError(
+                    "mathematical assumption selections do not apply to this data query"
+                )
+            provider_name = provider_request.provider
+            elapsed = perf_counter() - started
+            return {
+                "validatequeryresult": {
+                    "success": True,
+                    "error": False,
+                    "timing": _seconds(elapsed),
+                    "parsetiming": _seconds(elapsed),
+                    "version": _API_VERSION,
+                    "service": "LEAN Engine",
+                    "input": input_text,
+                    "assumptions": [],
+                    "interpretation": {
+                        "kind": "typed_data_request",
+                        "provider": provider_name,
+                        "operation": provider_request.operation,
+                        "location": provider_request.location,
+                    },
+                }
+            }
         interpreted, _ = _prepare_query(input_text, assumptions or [], validate_only=True)
+    except ProviderContextNeeded as exc:
+        elapsed = perf_counter() - started
+        return {
+            "validatequeryresult": {
+                "success": False,
+                "error": False,
+                "timing": _seconds(elapsed),
+                "parsetiming": _seconds(elapsed),
+                "version": _API_VERSION,
+                "service": "LEAN Engine",
+                "input": input_text,
+                "assumptions": [],
+                "tips": [{"text": str(exc)}],
+            }
+        }
     except AssumptionSelectionError:
         raise
     except InterpretationError as exc:
@@ -191,6 +282,225 @@ def validate_query(input_text: str, assumptions: list[str] | None) -> dict[str, 
             "classification": interpreted["classification"],
         }
     }
+
+
+def _provider_request(
+    input_text: str,
+    location: str | None,
+    latlong: str | None,
+) -> KnowledgeRequest | None:
+    weather = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's)\s+)?(?:the\s+)?(?:current\s+)?weather"
+        r"(?:\s+(?:in|at|for)\s+(.+?))?\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if weather:
+        embedded_location = (weather.group(1) or "").strip()
+        if embedded_location and (location or latlong):
+            raise FullResultsRequestError(
+                "specify weather location in either input, location, or latlong, not more than one"
+            )
+        if location and latlong:
+            raise FullResultsRequestError("location and latlong cannot be combined")
+        if embedded_location:
+            return _knowledge_request(
+                provider="open_meteo", operation="weather", location=embedded_location
+            )
+        if location:
+            return _knowledge_request(
+                provider="open_meteo", operation="weather", location=location.strip()
+            )
+        if latlong:
+            pieces = latlong.split(",")
+            if len(pieces) != 2:
+                raise FullResultsRequestError("latlong must be a latitude,longitude pair")
+            try:
+                latitude, longitude = (float(piece.strip()) for piece in pieces)
+            except ValueError as exc:
+                raise FullResultsRequestError("latlong must contain numeric coordinates") from exc
+            return _knowledge_request(
+                provider="open_meteo",
+                operation="weather",
+                latitude=latitude,
+                longitude=longitude,
+            )
+        raise ProviderContextNeeded(
+            "weather needs an explicit location; use input='weather in <place>', location, or latlong"
+        )
+
+    if location is not None or latlong is not None:
+        raise FullResultsRequestError("location and latlong are currently supported for weather queries")
+
+    entity = re.fullmatch(r"\s*(?:entity|wikidata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
+    if entity:
+        query = entity.group(1).strip()
+        if not query:
+            raise FullResultsRequestError("entity search needs a non-empty query")
+        return _knowledge_request(provider="wikidata", operation="search", query=query)
+
+    explicit_constant = re.fullmatch(r"\s*(?:constant|codata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
+    if explicit_constant:
+        constant = re.sub(r"[^a-z0-9]+", "_", explicit_constant.group(1).lower()).strip("_")
+        if constant not in supported_nist_constants():
+            raise ProviderContextNeeded(
+                "that constant is not in the bundled CODATA 2022 subset"
+            )
+        return _knowledge_request(
+            provider="nist_codata", operation="constant", constant=constant
+        )
+
+    phrase = re.sub(r"^\s*(?:(?:what\s+is|what's|value\s+of|the)\s+)+", "", input_text, flags=re.I)
+    phrase = re.sub(r"[?.!]+\s*$", "", phrase).strip().lower()
+    phrase = re.sub(r"[-_]+", " ", phrase)
+    phrase = re.sub(r"\s+", " ", phrase)
+    aliases = {
+        "speed of light": "speed_of_light",
+        "speed of light in vacuum": "speed_of_light",
+        "planck constant": "planck_constant",
+        "planck's constant": "planck_constant",
+        "elementary charge": "elementary_charge",
+        "boltzmann constant": "boltzmann_constant",
+        "avogadro constant": "avogadro_constant",
+        "avogadro's constant": "avogadro_constant",
+        "newtonian constant of gravitation": "newtonian_constant_of_gravitation",
+        "gravitational constant": "newtonian_constant_of_gravitation",
+        "fine structure constant": "fine_structure_constant",
+        "electron mass": "electron_mass",
+        "proton mass": "proton_mass",
+    }
+    constant = aliases.get(phrase)
+    if constant is not None:
+        return _knowledge_request(provider="nist_codata", operation="constant", constant=constant)
+    return None
+
+
+def _knowledge_request(**values: Any) -> KnowledgeRequest:
+    try:
+        return KnowledgeRequest.model_validate(values)
+    except ValidationError as exc:
+        messages = "; ".join(error["msg"] for error in exc.errors())
+        raise FullResultsRequestError(f"invalid data query: {messages}") from exc
+
+
+def _execute_provider_query(
+    input_text: str,
+    request: KnowledgeRequest,
+    formats: list[str],
+    started: float,
+    parse_timing: float,
+    *,
+    include_pod_ids: list[str] | None,
+    exclude_pod_ids: list[str] | None,
+    pod_titles: list[str] | None,
+    pod_indexes: list[str] | None,
+    scanners: list[str] | None,
+) -> dict[str, Any]:
+    try:
+        knowledge = query_knowledge(request)
+    except KnowledgeProviderError as exc:
+        raise FullResultsBackendError(
+            str(exc), status_code=exc.status_code, error_code="PROVIDER_FAILURE"
+        ) from exc
+
+    provider_presentation = {
+        "open_meteo": ("Current weather", "Weather", "Weather"),
+        "nist_codata": ("Physical constant", "PhysicalConstant", "ScientificConstant"),
+        "wikidata": ("Entity matches", "EntitySearch", "Entity"),
+    }
+    title, pod_id, datatype = provider_presentation[request.provider]
+    plaintext = _provider_plaintext(request.provider, knowledge["data"])
+    selected_formats = formats or ["plaintext"]
+    input_subpod: dict[str, Any] = {"title": ""}
+    result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
+    if "plaintext" in selected_formats:
+        input_subpod["plaintext"] = input_text
+        result_subpod["plaintext"] = plaintext
+    if "mathml" in selected_formats:
+        input_subpod["mathml"] = _mathml(input_text)
+        result_subpod["mathml"] = _mathml(plaintext)
+    pods = [
+        {
+            "title": "Input interpretation",
+            "scanner": "Identity",
+            "id": "Input",
+            "position": 100,
+            "error": False,
+            "numsubpods": 1,
+            "primary": False,
+            "subpods": [input_subpod],
+        },
+        {
+            "title": title,
+            "scanner": "Data",
+            "id": pod_id,
+            "position": 200,
+            "error": False,
+            "numsubpods": 1,
+            "primary": True,
+            "subpods": [result_subpod],
+        },
+    ]
+    filtered = _select_pods(
+        pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
+    )
+    elapsed = perf_counter() - started
+    payload = _query_envelope(
+        success=True,
+        error=False,
+        pods=filtered,
+        elapsed=elapsed,
+        parse_timing=parse_timing,
+        datatypes=datatype,
+        warnings=_format_warnings(formats),
+        assumptions=[],
+        interpretation={
+            "kind": "typed_data_request",
+            "provider": knowledge["provider"],
+            "operation": knowledge["operation"],
+            "request": request.model_dump(exclude_none=True),
+        },
+        classification={
+            "name": "deterministic_provider_router",
+            "method": "explicit query pattern or supported constant alias",
+            "ranks_candidates_only": True,
+            "selection_authority": False,
+        },
+        evidence=knowledge["evidence"],
+        qualification=knowledge["qualification"],
+        sources=knowledge["sources"],
+        retrieved_at=knowledge["retrieved_at"],
+        data=knowledge["data"],
+    )
+    payload["queryresult"]["input"] = input_text
+    return payload
+
+
+def _provider_plaintext(provider: str, data: Any) -> str:
+    if provider == "nist_codata" and isinstance(data, dict):
+        name = data.get("name", "Physical constant")
+        symbol = data.get("symbol")
+        value = data.get("value", "")
+        unit = data.get("unit", "")
+        label = f"{name} ({symbol})" if symbol else str(name)
+        result = f"{label} = {value} {unit}".strip()
+        uncertainty = data.get("standard_uncertainty")
+        if uncertainty:
+            result += f"; standard uncertainty: {uncertainty}"
+        if data.get("release"):
+            result += f"; release: {data['release']}"
+        return result
+    if provider == "wikidata" and isinstance(data, list):
+        rows = []
+        for entity in data:
+            if not isinstance(entity, dict):
+                continue
+            identifier = entity.get("id", "")
+            label = entity.get("label", identifier or "Entity")
+            description = entity.get("description")
+            rows.append(f"{label} [{identifier}]: {description}" if description else f"{label} [{identifier}]")
+        return "\n".join(rows) if rows else "No matching entities were found."
+    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _prepare_query(
@@ -344,7 +654,12 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
     )
 
 
-def query_error(input_text: str | None, message: str) -> dict[str, Any]:
+def query_error(
+    input_text: str | None,
+    message: str,
+    *,
+    code: str = "INVALID_REQUEST",
+) -> dict[str, Any]:
     queryresult = _base_queryresult(
         success=False,
         error=True,
@@ -354,7 +669,7 @@ def query_error(input_text: str | None, message: str) -> dict[str, Any]:
     )
     queryresult.update({
         "input": input_text or "",
-        "error_detail": {"code": "INVALID_REQUEST", "msg": message},
+        "error_detail": {"code": code, "msg": message},
     })
     return {"queryresult": queryresult}
 
@@ -415,6 +730,9 @@ def _query_envelope(
     tips: list[dict[str, str]] | None = None,
     timedout: str = "",
     timedoutpods: str = "",
+    sources: list[dict[str, Any]] | None = None,
+    retrieved_at: str | None = None,
+    data: Any = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = _base_queryresult(
         success=success,
@@ -441,6 +759,12 @@ def _query_envelope(
         result["evidence"] = evidence
     if qualification is not None:
         result["qualification"] = qualification
+    if sources is not None:
+        result["sources"] = sources
+    if retrieved_at is not None:
+        result["retrieved_at"] = retrieved_at
+    if data is not None:
+        result["data"] = data
     return {"queryresult": result}
 
 
@@ -612,7 +936,7 @@ def _payload_to_xml(payload: dict[str, Any]) -> str:
     root = ET.Element(root_name)
     special = {
         "pods", "assumptions", "warnings", "tips", "error_detail", "evidence",
-        "interpretation", "classification", "qualification",
+        "interpretation", "classification", "qualification", "sources", "data", "retrieved_at",
     }
     for key, value in data.items():
         if key in special or value is None:
@@ -624,6 +948,14 @@ def _payload_to_xml(payload: dict[str, Any]) -> str:
             _append_pod(root, pod)
     if data.get("assumptions") is not None:
         _append_assumptions(root, data["assumptions"])
+    if data.get("sources") is not None:
+        _append_sources(root, data["sources"])
+    if data.get("data") is not None:
+        element = ET.SubElement(root, "data", {"encoding": "json"})
+        element.text = json.dumps(data["data"], ensure_ascii=False, separators=(",", ":"))
+    if data.get("retrieved_at") is not None:
+        element = ET.SubElement(root, "retrieved_at")
+        element.text = str(data["retrieved_at"])
     _append_text_items(root, "warnings", data.get("warnings"))
     _append_text_items(root, "tips", data.get("tips"))
     if data.get("error_detail"):
@@ -662,6 +994,9 @@ def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
                 except ET.ParseError:
                     mathml = ET.SubElement(subpod_element, "mathml")
                     mathml.text = str(value)
+            elif key == "data":
+                child = ET.SubElement(subpod_element, "data", {"encoding": "json"})
+                child.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             else:
                 child = ET.SubElement(subpod_element, key)
                 child.text = str(value)
@@ -683,6 +1018,17 @@ def _append_assumptions(root: ET.Element, assumptions: list[dict[str, Any]]) -> 
                 if isinstance(content, (str, int, float, bool))
             }
             ET.SubElement(item, "value", value_attributes)
+
+
+def _append_sources(root: ET.Element, sources: list[dict[str, Any]]) -> None:
+    parent = ET.SubElement(root, "sources", {"count": str(len(sources))})
+    for source in sources:
+        attributes = {
+            key: str(value)
+            for key, value in source.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+        ET.SubElement(parent, "source", attributes)
 
 
 def _append_text_items(root: ET.Element, name: str, items: list[dict[str, str]] | None) -> None:
