@@ -127,7 +127,9 @@ def capabilities() -> dict[str, object]:
             "z3": "implemented",
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
-        "symbolic_operations": ["validate", "simplify", "differentiate", "integrate", "solve", "identity"],
+        "symbolic_operations": [
+            "validate", "simplify", "factor", "expand", "differentiate", "integrate", "solve", "identity"
+        ],
         "symbolic_named_units": {
             "status": "implemented_initial_slice",
             "unit_names": ["meter", "minute", "us_minim"],
@@ -174,7 +176,7 @@ def capabilities() -> dict[str, object]:
                 "query_classes": [
                     "safe symbolic expressions",
                     "presentation LaTeX and MathML expressions",
-                    "simplify/differentiate/integrate/solve/identity calls",
+                    "simplify/factor/expand/differentiate/integrate/solve/identity calls",
                     "weather location queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",

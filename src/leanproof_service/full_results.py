@@ -1021,6 +1021,8 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
     operation_name = node.func.id.lower()
     aliases = {
         "simplify": "simplify",
+        "factor": "factor",
+        "expand": "expand",
         "differentiate": "differentiate",
         "diff": "differentiate",
         "integrate": "integrate",
@@ -1045,17 +1047,18 @@ def _operation_request(
     variable: str | None,
 ) -> SymbolicRequest | None:
     aliases = {
-        "simplify": "simplify", "differentiate": "differentiate", "diff": "differentiate",
+        "simplify": "simplify", "factor": "factor", "expand": "expand",
+        "differentiate": "differentiate", "diff": "differentiate",
         "integrate": "integrate", "integral": "integrate", "solve": "solve",
         "identity": "identity",
     }
     operation = aliases.get(operation_name.lower())
     if operation is None:
         return None
-    if operation == "simplify":
+    if operation in {"simplify", "factor", "expand"}:
         if len(arguments) != 1:
-            raise InterpretationError("simplify requires exactly one expression")
-        return SymbolicRequest(operation="simplify", expression=arguments[0], time_limit_seconds=5)
+            raise InterpretationError(f"{operation} requires exactly one expression")
+        return SymbolicRequest(operation=operation, expression=arguments[0], time_limit_seconds=5)
     if operation == "identity":
         if len(arguments) != 2:
             raise InterpretationError("identity requires exactly two expressions")
@@ -1420,6 +1423,10 @@ def _wolfram_input_for_query(
     variable = _wolfram_symbol(request.variable or "")
     if request.operation == "simplify" and rendered_expression is not None:
         return f"Simplify[{rendered_expression}]"
+    if request.operation == "factor" and rendered_expression is not None:
+        return f"Factor[{rendered_expression}]"
+    if request.operation == "expand" and rendered_expression is not None:
+        return f"Expand[{rendered_expression}]"
     if request.operation == "differentiate" and rendered_expression is not None and variable:
         return f"D[{rendered_expression}, {variable}]"
     if request.operation == "solve" and rendered_expression is not None and variable:

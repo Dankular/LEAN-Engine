@@ -21,7 +21,9 @@ AssumptionName = Literal[
     "real", "positive", "nonnegative", "negative", "nonpositive", "integer", "rational"
 ]
 UnitName = Literal["meter", "minute", "us_minim"]
-SymbolicOperation = Literal["validate", "simplify", "differentiate", "integrate", "solve", "identity"]
+SymbolicOperation = Literal[
+    "validate", "simplify", "factor", "expand", "differentiate", "integrate", "solve", "identity"
+]
 
 
 class SymbolicRequest(StrictModel):
@@ -160,6 +162,10 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     variable = _get_symbol(sp, symbols, request.variable) if request.variable else None
     if request.operation == "simplify":
         result = sp.simplify(expression)
+    elif request.operation == "factor":
+        result = sp.factor(expression)
+    elif request.operation == "expand":
+        result = sp.expand(expression)
     elif request.operation == "differentiate":
         result = sp.diff(expression, variable)
     elif request.operation == "integrate":
