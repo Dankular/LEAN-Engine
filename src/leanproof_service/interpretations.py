@@ -4,7 +4,7 @@ import html
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from time import perf_counter
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +26,10 @@ _NUMBER_PATTERN = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
 _UNIT_LITERAL = re.compile(rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>m)\s*$")
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
+)
+_CLOCK_TIME = re.compile(
+    r"^\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})(?:\s*(?P<meridiem>am|pm))?\s*$",
+    re.IGNORECASE,
 )
 _MIXED_FRACTION_LITERAL = re.compile(
     r"^\s*(?P<whole>\d+)\s+(?P<numerator>\d+)\s*/\s*(?P<denominator>\d+)\s*$"
@@ -98,6 +102,15 @@ def query_with_interpretations(
         return _interpret_numeric_date(
             source_query,
             date_input,
+            selections,
+            compute=compute,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    clock_time = _CLOCK_TIME.fullmatch(source_query)
+    if clock_time is not None:
+        return _interpret_clock_time(
+            source_query,
+            clock_time,
             selections,
             compute=compute,
             parse_timing=perf_counter() - parsing_started,
@@ -540,6 +553,146 @@ def _interpret_numeric_date(
             "verified": False,
         },
         "qualification": "Date parsing follows the selected service date-order interpretation; it is not a formal proof.",
+    }
+
+
+def _interpret_clock_time(
+    source_query: str,
+    match: re.Match[str],
+    selections: list[str],
+    *,
+    compute: bool,
+    parse_timing: float,
+) -> dict[str, Any]:
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    explicit_meridiem = match.group("meridiem")
+    if hour > 23 or minute > 59:
+        raise InterpretationError("clock time must use an hour from 0 to 23 and a minute from 00 to 59")
+    if explicit_meridiem and not 1 <= hour <= 12:
+        raise InterpretationError("AM/PM clock input must use an hour from 1 to 12")
+
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "TimeAMOrPM"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    if len(candidates) != 2:
+        raise RuntimeError("TimeAMOrPM registry must contain exactly two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    all_ids = {item["id"] for item in registry["assumptions"]}
+    for selection in selections:
+        if selection not in all_ids:
+            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+
+    ambiguous = explicit_meridiem is None and 1 <= hour <= 12
+    if ambiguous:
+        for selection in selections:
+            if selection not in candidate_ids:
+                raise AssumptionSelectionError(
+                    f"assumption {selection} is incompatible with this input"
+                )
+        if len(selections) > 1:
+            raise AssumptionSelectionError("select at most one TimeAMOrPM assumption value")
+        if selections:
+            chosen = by_id[selections[0]]
+            selection_source = "caller_override"
+        else:
+            policy = registry.get("default_policies", {}).get("TimeAMOrPM")
+            if policy == "server_local_meridiem":
+                meaning = "am" if datetime.now().astimezone().hour < 12 else "pm"
+                chosen = next(item for item in candidates if item["meaning"] == meaning)
+            else:
+                defaults = [item for item in candidates if item.get("service_default")]
+                if len(defaults) != 1:
+                    raise RuntimeError("TimeAMOrPM registry has no valid default policy")
+                chosen = defaults[0]
+            selection_source = "service_default"
+        meridiem = chosen["meaning"]
+    else:
+        if selections:
+            raise AssumptionSelectionError(
+                f"assumption {selections[0]} is incompatible with this input"
+            )
+        meridiem = explicit_meridiem.lower() if explicit_meridiem else None
+        chosen = None
+        selection_source = "explicit_input"
+
+    if meridiem:
+        hour_24 = (hour % 12) + (12 if meridiem == "pm" else 0)
+        display = f"{hour}:{minute:02d} {meridiem.upper()}"
+    else:
+        hour_24 = hour
+        display = f"{hour:02d}:{minute:02d}"
+    normalized_time = f"{hour_24:02d}:{minute:02d}"
+    assumption_payload: list[dict[str, Any]] = []
+    if ambiguous:
+        ordered_candidates = [chosen, *(item for item in candidates if item["id"] != chosen["id"])]
+        assumption_payload = [{
+            "type": "TimeAMOrPM",
+            "selected": chosen["id"],
+            "selection_source": selection_source,
+            "registry_version": registry["registry_version"],
+            "values": [
+                {
+                    "input": item["id"],
+                    "desc": item["description"],
+                    "entry_version": item["entry_version"],
+                }
+                for item in ordered_candidates
+            ],
+        }]
+    typed_ast = {
+        "node": "clock_time",
+        "input_hour": hour,
+        "input_minute": minute,
+        "notation": "12_hour" if meridiem else "24_hour",
+        "meridiem": meridiem.upper() if meridiem else None,
+        "hour_24": hour_24,
+        "minute": minute,
+        "iso_time": normalized_time,
+        "display": display,
+    }
+    if ambiguous:
+        classification = {
+            "name": "deterministic_lexical_baseline",
+            "method": "neutral ranking for AM and PM readings of a clock time",
+            "ranks_candidates_only": True,
+            "selection_authority": False,
+            "scores_calibrated_for_service": False,
+            "ranked": [{"input": item["id"], "score": 0.5} for item in ordered_candidates],
+        }
+    else:
+        classification = {
+            "name": "not_applicable",
+            "method": "explicit or 24-hour clock notation removes the AM/PM ambiguity",
+            "ranks_candidates_only": True,
+        }
+    return {
+        "input": source_query,
+        "outcome": "computed" if compute else "validated",
+        "parse_timing": parse_timing,
+        "assumptions": assumption_payload,
+        "interpretation": {
+            "kind": "typed_time",
+            "typed_ast": typed_ast,
+            "expression": f"Time[{hour_24}, {minute}]",
+            "solver_route": "deterministic_clock_interpretation",
+        },
+        "classification": classification,
+        "result": display if compute else None,
+        "numeric_approximation": None,
+        "input_mathml": _text_mathml(source_query.strip()),
+        "result_mathml": _text_mathml(display) if compute else None,
+        "evidence": {
+            "kind": "deterministic_time_interpretation" if compute else "interpretation_only",
+            "engine": "python.datetime",
+            "verified": False,
+        },
+        "qualification": (
+            "The selected AM/PM value resolves a local clock time only; no date, time zone, "
+            "or daylight-saving rule is inferred."
+        ),
     }
 
 

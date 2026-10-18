@@ -1,5 +1,8 @@
 {
-  "registry_version": "1.8.0",
+  "registry_version": "1.9.0",
+  "default_policies": {
+    "TimeAMOrPM": "server_local_meridiem"
+  },
   "assumptions": [
     {
       "id": "angle:radians",
@@ -159,6 +162,22 @@
       "type": "I",
       "description": "Interpret lowercase i as an ordinary variable.",
       "meaning": "variable",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "time:pm",
+      "type": "TimeAMOrPM",
+      "description": "Interpret an ambiguous clock time as PM.",
+      "meaning": "pm",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "time:am",
+      "type": "TimeAMOrPM",
+      "description": "Interpret an ambiguous clock time as AM.",
+      "meaning": "am",
       "entry_version": 1,
       "service_default": false
     }
