@@ -245,7 +245,7 @@ def capabilities() -> dict[str, object]:
             "classifier_selects_assumptions": False,
         },
         "factual_sources": {
-            "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36) and population (P1082) property retrieval with ranked candidates", "status": "implemented_initial_slice"},
+            "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36), official language (P37), currency (P38), and population (P1082) property retrieval with ranked candidates", "status": "implemented_initial_slice"},
             "dbnomics": {"coverage": "individual time series", "status": "implemented"},
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},

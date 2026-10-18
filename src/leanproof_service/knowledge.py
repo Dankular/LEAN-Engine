@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone
+from threading import Lock
 from time import perf_counter
 from typing import Literal
 from urllib.error import HTTPError, URLError
@@ -22,7 +24,7 @@ class KnowledgeRequest(StrictModel):
     ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
-    property_id: Literal["P36", "P1082"] | None = None
+    property_id: Literal["P36", "P37", "P38", "P1082"] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
     series_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -86,6 +88,21 @@ class KnowledgeDeadlineExceeded(TimeoutError):
     """The caller's absolute query deadline expired during provider retrieval."""
 
 
+class ProviderResponse(dict[str, object]):
+    def __init__(self, payload: dict[str, object], cache_metadata: dict[str, object]) -> None:
+        super().__init__(payload)
+        self.cache_metadata = cache_metadata
+
+
+_WIKIDATA_CACHE_TTL_SECONDS = 300
+_WIKIDATA_CACHE_MAX_ENTRIES = 128
+_WIKIDATA_CACHE_MAX_ENTRY_BYTES = 2_000_000
+_WIKIDATA_CACHE_MAX_BYTES = 16_000_000
+_WIKIDATA_CACHE_LOCK = Lock()
+_WIKIDATA_CACHE: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
+_WIKIDATA_CACHE_BYTES = 0
+
+
 def query_knowledge(
     request: KnowledgeRequest, *, deadline: float | None = None
 ) -> dict[str, object]:
@@ -114,20 +131,23 @@ def query_knowledge(
             raise KnowledgeProviderError(f"{request.provider} returned HTTP {exc.code}", code) from exc
         raise KnowledgeProviderError(f"Could not retrieve data from {request.provider}") from exc
 
+    evidence: dict[str, object] = {"kind": "retrieved_source_data", "verified": False}
+    if isinstance(data, dict) and isinstance(data.get("source_cache"), dict):
+        evidence["source_cache"] = data["source_cache"]
     return {
         "provider": request.provider,
         "operation": request.operation,
         "retrieved_at": datetime.now(timezone.utc).isoformat(),
         "sources": [source],
         "data": data,
-        "evidence": {"kind": "retrieved_source_data", "verified": False},
+        "evidence": evidence,
         "qualification": "Source data is returned with provenance; retrieval does not establish a formal proof.",
     }
 
 
 def _request_json(
     url: str, timeout: int, deadline: float | None = None
-) -> dict[str, object]:
+) -> ProviderResponse:
     request = Request(
         url,
         headers={
@@ -143,6 +163,17 @@ def _request_json(
         effective_timeout = min(effective_timeout, deadline - perf_counter())
         if effective_timeout <= 0:
             raise KnowledgeDeadlineExceeded
+    cacheable = url.startswith("https://www.wikidata.org/w/api.php?")
+    if cacheable:
+        cached = _wikidata_cache_get(url)
+        if cached is not None:
+            payload, source_retrieved_at = cached
+            value = json.loads(payload)
+            if isinstance(value, dict):
+                return ProviderResponse(value, {
+                    "status": "hit",
+                    "source_retrieved_at": source_retrieved_at,
+                })
     try:
         with urlopen(request, timeout=effective_timeout) as response:
             payload = response.read(2_000_001)
@@ -156,7 +187,75 @@ def _request_json(
     value = json.loads(payload)
     if not isinstance(value, dict):
         raise KnowledgeProviderError("Provider returned an unexpected JSON shape", 502)
-    return value
+    source_retrieved_at = datetime.now(timezone.utc).isoformat()
+    cached = cacheable and _wikidata_cache_put(url, payload, source_retrieved_at)
+    return ProviderResponse(value, {
+        "status": "miss" if cached else ("bypass" if cacheable else "not_applicable"),
+        "source_retrieved_at": source_retrieved_at,
+    })
+
+
+def _wikidata_cache_get(url: str) -> tuple[bytes, str] | None:
+    global _WIKIDATA_CACHE_BYTES
+    now = perf_counter()
+    with _WIKIDATA_CACHE_LOCK:
+        entry = _WIKIDATA_CACHE.get(url)
+        if entry is None:
+            return None
+        expires_at, payload, source_retrieved_at = entry
+        if expires_at <= now:
+            _WIKIDATA_CACHE.pop(url, None)
+            _WIKIDATA_CACHE_BYTES -= len(payload)
+            return None
+        _WIKIDATA_CACHE.move_to_end(url)
+        return payload, source_retrieved_at
+
+
+def _wikidata_cache_put(url: str, payload: bytes, source_retrieved_at: str) -> bool:
+    global _WIKIDATA_CACHE_BYTES
+    if len(payload) > _WIKIDATA_CACHE_MAX_ENTRY_BYTES:
+        return False
+    with _WIKIDATA_CACHE_LOCK:
+        previous = _WIKIDATA_CACHE.pop(url, None)
+        if previous is not None:
+            _WIKIDATA_CACHE_BYTES -= len(previous[1])
+        _WIKIDATA_CACHE[url] = (
+            perf_counter() + _WIKIDATA_CACHE_TTL_SECONDS,
+            payload,
+            source_retrieved_at,
+        )
+        _WIKIDATA_CACHE_BYTES += len(payload)
+        while (
+            len(_WIKIDATA_CACHE) > _WIKIDATA_CACHE_MAX_ENTRIES
+            or _WIKIDATA_CACHE_BYTES > _WIKIDATA_CACHE_MAX_BYTES
+        ):
+            _, evicted = _WIKIDATA_CACHE.popitem(last=False)
+            _WIKIDATA_CACHE_BYTES -= len(evicted[1])
+        return url in _WIKIDATA_CACHE
+
+
+def _wikidata_cache_summary(responses: list[ProviderResponse]) -> dict[str, object]:
+    metadata = [response.cache_metadata for response in responses]
+    statuses = [str(item.get("status", "bypass")) for item in metadata]
+    hit_count = sum(status == "hit" for status in statuses)
+    miss_count = sum(status == "miss" for status in statuses)
+    status = "hit" if hit_count == len(statuses) and statuses else (
+        "partial" if hit_count else ("miss" if miss_count else "bypass")
+    )
+    retrieved_times = [
+        str(item["source_retrieved_at"])
+        for item in metadata
+        if isinstance(item.get("source_retrieved_at"), str)
+    ]
+    summary: dict[str, object] = {
+        "status": status,
+        "ttl_seconds": _WIKIDATA_CACHE_TTL_SECONDS,
+        "cached_responses": hit_count,
+        "live_responses": len(statuses) - hit_count,
+    }
+    if retrieved_times:
+        summary["oldest_source_response_at"] = min(retrieved_times)
+    return summary
 
 
 def _wikidata(
@@ -197,9 +296,15 @@ def _wikidata_property(
         "capital": "P36",
         "property": request.property_id,
     }.get(request.operation)
-    if property_id not in {"P36", "P1082"}:
+    property_names = {
+        "P36": "capital",
+        "P37": "official language",
+        "P38": "currency",
+        "P1082": "population",
+    }
+    if property_id not in property_names:
         raise KnowledgeProviderError("Wikidata property is not allowlisted", 400)
-    property_name = {"P36": "capital", "P1082": "population"}[property_id]
+    property_name = property_names[property_id]
     search_params = {
         "action": "wbsearchentities",
         "search": request.query or "",
@@ -211,6 +316,7 @@ def _wikidata_property(
     search_data = _request_json(
         f"{base}?{urlencode(search_params)}", request.timeout_seconds, deadline
     )
+    cached_responses = [search_data]
     search_results = search_data.get("search", [])
     candidates = [
         result for result in search_results
@@ -226,6 +332,7 @@ def _wikidata_property(
             "entity_query": request.query,
             "matches": [],
             "selection_rule": "Wikidata entity search order; no entity selected by the service",
+            "source_cache": _wikidata_cache_summary(cached_responses),
         }, {
             "name": "Wikidata API",
             "url": base,
@@ -237,45 +344,41 @@ def _wikidata_property(
     entity_params = {
         "action": "wbgetentities",
         "ids": "|".join(candidate_ids),
-        "props": "labels|descriptions",
+        "props": "labels|descriptions|claims",
         "languages": request.language,
         "format": "json",
     }
     entity_data = _request_json(
         f"{base}?{urlencode(entity_params)}", request.timeout_seconds, deadline
     )
+    cached_responses.append(entity_data)
     entities = entity_data.get("entities", {})
     if not isinstance(entities, dict):
         entities = {}
 
     matches: list[dict[str, object]] = []
     target_ids: set[str] = set()
+    value_key = {
+        "P36": "capitals",
+        "P37": "languages",
+        "P38": "currencies",
+        "P1082": "population",
+    }[property_id]
     for search_rank, candidate in enumerate(candidates, start=1):
         entity_id = candidate["id"]
         entity = entities.get(entity_id)
         if not isinstance(entity, dict):
             continue
-        claim_params = {
-            "action": "wbgetclaims",
-            "entity": entity_id,
-            "property": property_id,
-            "format": "json",
-        }
-        claim_data = _request_json(
-            f"{base}?{urlencode(claim_params)}", request.timeout_seconds, deadline
-        )
-        claims = claim_data.get("claims", [])
+        claims = entity.get("claims", {})
         if isinstance(claims, dict):
-            claims = claims.get(property_id, claims.get("claims", []))
+            claims = claims.get(property_id, [])
         if property_id == "P1082":
             values = _wikidata_population_values(claims)
-            value_key = "population"
         else:
-            values = _wikidata_entity_values(claims)
+            values = _wikidata_entity_values(claims, property_id)
             target_ids.update(
                 str(value["id"]) for value in values if isinstance(value.get("id"), str)
             )
-            value_key = "capitals"
         matches.append({
             "id": entity_id,
             "search_rank": search_rank,
@@ -292,7 +395,7 @@ def _wikidata_property(
             value_key: values,
         })
 
-    if property_id == "P36" and target_ids:
+    if property_id != "P1082" and target_ids:
         target_params = {
             "action": "wbgetentities",
             "ids": "|".join(sorted(target_ids)),
@@ -303,31 +406,37 @@ def _wikidata_property(
         target_data = _request_json(
             f"{base}?{urlencode(target_params)}", request.timeout_seconds, deadline
         )
+        cached_responses.append(target_data)
         target_entities = target_data.get("entities", {})
         if not isinstance(target_entities, dict):
             target_entities = {}
         for match in matches:
-            capitals = match.get("capitals", [])
-            if not isinstance(capitals, list):
+            relationships = match.get(value_key, [])
+            if not isinstance(relationships, list):
                 continue
-            for capital in capitals:
-                if not isinstance(capital, dict):
+            for relationship in relationships:
+                if not isinstance(relationship, dict):
                     continue
-                capital_entity = target_entities.get(capital.get("id"))
-                if isinstance(capital_entity, dict):
-                    capital["label"] = (
-                        _wikidata_language_value(capital_entity.get("labels"), request.language)
-                        or capital.get("id")
+                relationship_entity = target_entities.get(relationship.get("id"))
+                if isinstance(relationship_entity, dict):
+                    relationship["label"] = (
+                        _wikidata_language_value(relationship_entity.get("labels"), request.language)
+                        or relationship.get("id")
                     )
-                capital["url"] = f"https://www.wikidata.org/wiki/{capital.get('id')}"
+                relationship["url"] = (
+                    f"https://www.wikidata.org/wiki/{relationship.get('id')}"
+                )
 
     selection_rule = (
         "Wikidata entity search order; all returned candidates are preserved. Preferred "
         "population statements are used when present; otherwise the latest dated statements "
         "are returned with ties preserved."
         if property_id == "P1082"
-        else "Wikidata entity search order; all returned candidates and non-deprecated capital "
-        "statements are preserved, including statement rank and time qualifiers."
+        else (
+            "Wikidata entity search order; all returned candidates and non-deprecated "
+            f"{property_name} statements are preserved, including rank, references, and "
+            "time qualifiers where available."
+        )
     )
     return {
         "property_id": property_id,
@@ -335,6 +444,7 @@ def _wikidata_property(
         "entity_query": request.query,
         "matches": matches,
         "selection_rule": selection_rule,
+        "source_cache": _wikidata_cache_summary(cached_responses),
     }, {
         "name": "Wikidata API",
         "url": base,
@@ -416,10 +526,12 @@ def _wikidata_population_values(claims: object) -> list[dict[str, object]]:
     return eligible[:5]
 
 
-def _wikidata_entity_values(claims: object) -> list[dict[str, object]]:
+def _wikidata_entity_values(
+    claims: object, property_id: str
+) -> list[dict[str, object]]:
     statements = claims
     if isinstance(statements, dict):
-        statements = statements.get("P36", statements.get("claims", []))
+        statements = statements.get(property_id, statements.get("claims", []))
     if not isinstance(statements, list):
         return []
     values: list[dict[str, object]] = []

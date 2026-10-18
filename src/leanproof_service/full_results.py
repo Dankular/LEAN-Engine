@@ -150,6 +150,10 @@ def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str
         return "Population", "Population", "Data"
     if property_id == "P36":
         return "Capital", "Capital", "Data"
+    if property_id == "P37":
+        return "Official languages", "OfficialLanguages", "Data"
+    if property_id == "P38":
+        return "Currency", "Currency", "Data"
     return "Entity matches", "EntitySearch", "Data"
 
 
@@ -167,6 +171,8 @@ def _wikidata_provider_presentation(
     return {
         "P1082": ("Population", "Population", "Population"),
         "P36": ("Capital", "Capital", "Geography"),
+        "P37": ("Official languages", "OfficialLanguages", "Languages"),
+        "P38": ("Currency", "Currency", "Economics"),
     }.get(_wikidata_property_id(request), ("Entity matches", "EntitySearch", "Entity"))
 
 
@@ -946,6 +952,36 @@ def _provider_request(
             query=query, max_results=3,
         )
 
+    official_languages = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what\s+are|what's|name)\s+)?(?:the\s+)?"
+        r"official\s+languages?\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if official_languages:
+        query = official_languages.group(1).strip()
+        if query.casefold() in {"of", "in"}:
+            raise ProviderContextNeeded("official-language lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P37",
+            query=query, max_results=3,
+        )
+
+    currency = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|which\s+is|name)\s+)?(?:the\s+)?"
+        r"currency\s+(?:(?:of|in)\s+|used\s+in\s+)?(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if currency:
+        query = currency.group(1).strip()
+        if query.casefold() in {"of", "in", "used in"}:
+            raise ProviderContextNeeded("currency lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P38",
+            query=query, max_results=3,
+        )
+
     entity = re.fullmatch(r"\s*(?:entity|wikidata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
     if entity:
         query = entity.group(1).strip()
@@ -1164,9 +1200,12 @@ def _execute_provider_query(
     )
     elapsed = perf_counter() - started
     wikidata_property_id = _wikidata_property_id(request)
-    wikidata_property_name = {"P1082": "population", "P36": "capital"}.get(
-        wikidata_property_id
-    )
+    wikidata_property_name = {
+        "P1082": "population",
+        "P36": "capital",
+        "P37": "official-language",
+        "P38": "currency",
+    }.get(wikidata_property_id)
     payload = _query_envelope(
         success=True,
         error=False,
@@ -1274,11 +1313,17 @@ def _provider_plaintext(provider: str, data: Any) -> str:
                 detail = "; ".join(statements) or "no usable population statement found"
                 rows.append(f"{prefix}: {detail}")
         return "\n".join(rows) if rows else "No Wikidata entity matches were found."
+    wikidata_relationship = {
+        "P36": ("capitals", "capital"),
+        "P37": ("languages", "official language"),
+        "P38": ("currencies", "currency"),
+    }
     if (
         provider == "wikidata"
         and isinstance(data, dict)
-        and data.get("property_id") == "P36"
+        and data.get("property_id") in wikidata_relationship
     ):
+        value_key, property_name = wikidata_relationship[str(data["property_id"])]
         matches = data.get("matches")
         rows = []
         if isinstance(matches, list):
@@ -1291,26 +1336,32 @@ def _provider_plaintext(provider: str, data: Any) -> str:
                 description = match.get("description")
                 if isinstance(description, str) and description:
                     prefix += f" — {description}"
-                capitals = match.get("capitals")
+                relationships = match.get(value_key)
                 values = []
-                if isinstance(capitals, list):
-                    for capital in capitals:
-                        if not isinstance(capital, dict):
+                if isinstance(relationships, list):
+                    for relationship in relationships:
+                        if not isinstance(relationship, dict):
                             continue
-                        place = str(capital.get("label") or capital.get("id") or "Unknown")
-                        if capital.get("id"):
-                            place += f" [{capital['id']}]"
+                        label = str(
+                            relationship.get("label") or relationship.get("id") or "Unknown"
+                        )
+                        if relationship.get("id"):
+                            label += f" [{relationship['id']}]"
                         interval = []
-                        for key, caption in (("start_time", "from"), ("end_time", "until")):
-                            time_value = capital.get(key)
+                        for key, caption in (
+                            ("start_time", "from"),
+                            ("end_time", "until"),
+                            ("point_in_time", "on"),
+                        ):
+                            time_value = relationship.get(key)
                             if isinstance(time_value, str):
                                 interval.append(
                                     f"{caption} {time_value.removeprefix('+').split('T', 1)[0]}"
                                 )
                         if interval:
-                            place += f" ({', '.join(interval)})"
-                        values.append(place)
-                detail = "; ".join(values) if values else "no capital statement found"
+                            label += f" ({', '.join(interval)})"
+                        values.append(label)
+                detail = "; ".join(values) if values else f"no {property_name} statement found"
                 rows.append(f"{prefix}: {detail}")
         return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     if provider == "geonames" and isinstance(data, list):
