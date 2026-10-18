@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+from time import perf_counter
 from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, model_validator
@@ -18,7 +19,7 @@ SymbolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,
 AssumptionName = Literal[
     "real", "positive", "nonnegative", "negative", "nonpositive", "integer", "rational"
 ]
-SymbolicOperation = Literal["simplify", "differentiate", "integrate", "solve", "identity"]
+SymbolicOperation = Literal["validate", "simplify", "differentiate", "integrate", "solve", "identity"]
 
 
 class SymbolicRequest(StrictModel):
@@ -42,6 +43,11 @@ class SymbolicRequest(StrictModel):
         else:
             if self.expression is None or self.lhs is not None or self.rhs is not None:
                 raise ValueError("this operation requires expression and does not accept lhs/rhs")
+        if self.operation == "validate":
+            if self.variable is not None or self.lower is not None or self.upper is not None:
+                raise ValueError("validate does not accept a variable or integration bounds")
+            if self.assumptions:
+                raise ValueError("validate does not accept symbolic assumptions")
         if self.operation in {"differentiate", "integrate", "solve"} and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
         if self.operation not in {"differentiate", "integrate", "solve"} and self.variable is not None:
@@ -92,20 +98,41 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     }
     parser = _SafeParser(sp, symbols)
     if request.operation == "identity":
+        parsing_started = perf_counter()
         lhs = parser.parse(request.lhs or "")
         rhs = parser.parse(request.rhs or "")
+        parse_timing = perf_counter() - parsing_started
         difference = sp.simplify(lhs - rhs)
         equal = difference == 0
         return {
             "operation": request.operation,
             "result": "0" if equal else sp.sstr(difference),
             "symbolic_check": "simplified_to_zero" if equal else "not_simplified_to_zero",
+            "parse_timing_seconds": parse_timing,
+            "input_mathml": _mathml_output(sp, sp.Eq(lhs, rhs, evaluate=False)),
+            "result_mathml": _mathml_output(sp, difference),
             "assumptions": _assumptions_payload(request),
             "evidence": _symbolic_evidence(sp),
             "qualification": "A SymPy simplification result is not a formal proof.",
         }
 
+    parsing_started = perf_counter()
     expression = parser.parse(request.expression or "")
+    parse_timing = perf_counter() - parsing_started
+    if request.operation == "validate":
+        return {
+            "operation": "validate",
+            "parsed": True,
+            "normalized_expression": sp.sstr(expression),
+            "parse_timing_seconds": parse_timing,
+            "input_mathml": _mathml_output(sp, expression),
+            "evidence": {
+                "kind": "symbolic_parse",
+                "engine": "sympy",
+                "version": sp.__version__,
+                "verified": False,
+            },
+        }
     variable = _get_symbol(sp, symbols, request.variable) if request.variable else None
     if request.operation == "simplify":
         result = sp.simplify(expression)
@@ -127,10 +154,26 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     return {
         "operation": request.operation,
         "result": result if isinstance(result, list) else sp.sstr(result),
+        "parse_timing_seconds": parse_timing,
+        "input_mathml": _mathml_output(sp, expression),
+        "result_mathml": _mathml_output(sp, result) if isinstance(result, sp.Basic) else None,
         "assumptions": _assumptions_payload(request),
         "evidence": _symbolic_evidence(sp),
         "qualification": "Symbolic computation result; this response is not a Lean proof.",
     }
+
+
+def _mathml_output(sympy: object, expression: object) -> str | None:
+    try:
+        result = sympy.mathml(expression)
+    except Exception:
+        return None
+    if not result.startswith("<math"):
+        result = (
+            '<math xmlns="http://www.w3.org/1998/Math/MathML">'
+            f"{result}</math>"
+        )
+    return result if len(result) <= 50_000 else None
 
 
 def _get_symbol(sp: object, symbols: dict[str, object], name: str | None) -> object:

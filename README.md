@@ -88,7 +88,7 @@ Use `/v1/counterexample` to run bounded counterexample search without invoking L
 
 ## Symbolic mathematics
 
-`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are `simplify`, `differentiate`, `integrate`, `solve` (for an expression equal to zero), and `identity`. The expression grammar accepts numeric literals, named symbols, `+ - * / **`, and a small allowlist of functions such as `sin`, `cos`, `sqrt`, `log`, and `exp`. It does not evaluate Python code.
+`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are parse-only `validate`, `simplify`, `differentiate`, `integrate`, `solve` (for an expression equal to zero), and `identity`. The expression grammar accepts numeric literals, named symbols, `+ - * / **`, and a small allowlist of functions such as `sin`, `cos`, `sqrt`, `log`, and `exp`. It does not evaluate Python code.
 
 ```json
 {
@@ -128,24 +128,43 @@ curl -X POST http://127.0.0.1:8000/api/cag/v1/WolframLanguageCompute \
 
 The successful result body includes `"result":"Out[1]=0"` and an additive `evidence` object. The response `uuid` is generated locally; it does not identify a remote Wolfram computation.
 
-The separate Wolfram|Alpha Full Results API is a remote query service that requires a Wolfram AppID and an `input` query. This project currently uses the listed domain providers for factual retrieval; it does not silently send requests to Wolfram|Alpha. The WLC-compatible route above is a local allowlisted Lean-checking adapter. The Full Results API reference is saved as [HTML](WolframAlpha-API-Documentation.html) and [Markdown](WolframAlpha-API-Documentation.md), with a [feature parity audit](WolframAlpha-API-Feature-Parity.md).
+The Wolfram|Alpha Full Results API reference is saved as [HTML](WolframAlpha-API-Documentation.html) and [Markdown](WolframAlpha-API-Documentation.md), with a [feature parity audit](WolframAlpha-API-Feature-Parity.md). The local `/v2/query` surface follows its query-result/pod shape for the computation classes this service supports. It is not a call to Wolfram|Alpha and does not accept a Wolfram AppID; authenticate with this service's bearer token.
 
-## Candidate meanings and assumptions
+## Full Results-style computation API
 
-`GET /v2/query?input=sin%2830%29` parses the supported expression, generates typed angle-unit alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. `GET /v2/assumptions` returns the service-owned registry. The first registry version covers bare numeric arguments to `sin`, `cos`, and `tan`.
+`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner supports the safe symbolic expression grammar described below, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml` returns available textual and MathML representations. Other documented Wolfram formats are recognized but omitted with a warning until a local renderer exists.
 
 ```bash
 curl -G http://127.0.0.1:8000/v2/query \
   -H "Authorization: Bearer replace-with-a-long-random-token" \
+  --data-urlencode "input=sin(30)" \
+  --data-urlencode "output=json"
+```
+
+The first pod is the interpreted input and the `Result` pod contains the symbolic result. `includepodid`, `excludepodid`, `podtitle` (with `*` wildcard), `podindex`, and `scanner` can be repeated or comma-separated; positive selectors are combined as alternatives. `includepodid` and `excludepodid` cannot be combined. The service currently produces `Input` and `Result` pods with `Identity` and `Mathematical` scanners.
+
+For example, `input=differentiate(x**2, x)` produces `2*x`, while `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
+
+`GET /v2/validatequery` runs the safe parser and candidate-assumption resolver without running the symbolic simplifier. It returns a `validatequeryresult` envelope and exposes the same typed, service-owned assumption values used by `/v2/query`. The current query planner covers mathematical expressions; natural-language knowledge queries remain available through the explicit `/v1/knowledge/query` provider interface.
+
+## Candidate meanings and assumptions
+
+`GET /v1/interpret?input=sin%2830%29` returns the project-specific interpretation detail response. It parses the supported expression, generates typed assumption alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. The Full Results-style `/v2/query` route exposes the same candidates inside its result envelope. `GET /v2/assumptions` returns the service-owned registry (currently version 1.1.0), covering angle units for bare numeric `sin`/`cos`/`tan` and base e versus base 10 for a bare `log(number)`.
+
+```bash
+curl -G http://127.0.0.1:8000/v1/interpret \
+  -H "Authorization: Bearer replace-with-a-long-random-token" \
   --data-urlencode "input=sin(30)"
 
-curl -G http://127.0.0.1:8000/v2/query \
+curl -G http://127.0.0.1:8000/v1/interpret \
   -H "Authorization: Bearer replace-with-a-long-random-token" \
   --data-urlencode "input=sin(30)" \
   --data-urlencode "assumption=angle:degrees"
 ```
 
 For the first request, the response lists `angle:radians` and `angle:degrees`, with radians marked as `service_default`. The second request selects degrees with `selection_source: caller_override` and computes `1/2`. An explicit unit in the input is surfaced as `explicit_input`; a conflicting override is rejected. Unknown or inapplicable assumption IDs are rejected. IDs belong to this service and are stored in the versioned `src/leanproof_service/assumption_registry.json`; they are not Wolfram tokens.
+
+For `log(100)`, the service proposes `log:base-e` and `log:base-10`; the default is the natural logarithm. Passing `assumption=log:base-10` selects a common logarithm and computes `2`. The classifier ranks the alternatives but never chooses one based on which result is more useful or easier to prove.
 
 The baseline classifier only ranks generated candidates. By default it uses small deterministic lexical cues and neutral scores for bare `sin(30)`; it cannot select an assumption. `ASSUMPTION_CLASSIFIER=decima` enables the optional [Decima-small decision model](https://huggingface.co/amyrmahdy/decima-small), whose open-option decision format fits candidate ranking. It loads only when enabled and the `decima-ai` package is installed. The returned ranking is not calibrated for this service and never counts as proof. The [Nano-Jev model](https://huggingface.co/sdmlai/nano-jev) targets retrieval relevance, answer sufficiency, and claim groundedness; it is a better fit for triaging retrieved evidence than selecting a math interpretation. Model scores cannot validate facts or establish a theorem.
 

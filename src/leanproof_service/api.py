@@ -9,12 +9,28 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
 from .computation import ComputeRequest, Computation, check_computation, prepare_computation
-from .interpretations import InterpretationError, assumption_registry, query_with_interpretations
+from .full_results import (
+    FullResultsBackendError,
+    FullResultsRequestError,
+    execute_query,
+    normalize_formats,
+    normalize_output,
+    query_error,
+    render_response,
+    validate_error,
+    validate_query,
+)
+from .interpretations import (
+    AssumptionSelectionError,
+    InterpretationError,
+    assumption_registry,
+    query_with_interpretations,
+)
 from .knowledge import KnowledgeProviderError, KnowledgeRequest, query_knowledge
 from .lean_backend import lake_executable
 from .models import ClaimRequest
@@ -82,10 +98,10 @@ def capabilities() -> dict[str, object]:
             "z3": "implemented",
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
-        "symbolic_operations": ["simplify", "differentiate", "integrate", "solve", "identity"],
+        "symbolic_operations": ["validate", "simplify", "differentiate", "integrate", "solve", "identity"],
         "interpretations": {
             "status": "implemented_initial_slice",
-            "path": "/v2/query",
+            "path": "/v1/interpret",
             "assumption_registry_version": assumption_registry()["registry_version"],
             "candidate_generator": "deterministic_allowlisted_math_parser",
             "classifier": "deterministic_lexical_baseline; optional Decima ranking via ASSUMPTION_CLASSIFIER=decima",
@@ -100,6 +116,16 @@ def capabilities() -> dict[str, object]:
             "open_meteo": {"coverage": "current weather by location or coordinates", "status": "implemented"},
         },
         "compatibility": {
+            "wolfram_alpha_full_results": {
+                "path": "/v2/query",
+                "status": "local_partial_contract",
+                "outputs": ["json", "xml"],
+                "query_classes": [
+                    "safe symbolic expressions",
+                    "simplify/differentiate/integrate/solve/identity calls",
+                ],
+                "validation_path": "/v2/validatequery",
+            },
             "wolfram_language_compute": {
                 "path": "/api/cag/v1/WolframLanguageCompute",
                 "status": "allowlisted_subset",
@@ -155,7 +181,7 @@ def list_assumptions() -> dict[str, object]:
     return assumption_registry()
 
 
-@app.get("/v2/query", dependencies=[Depends(require_api_token)])
+@app.get("/v1/interpret", dependencies=[Depends(require_api_token)])
 def interpretation_query(
     input: Annotated[str, Query(min_length=1, max_length=4000)],
     assumption: Annotated[list[str] | None, Query()] = None,
@@ -164,6 +190,85 @@ def interpretation_query(
         return query_with_interpretations(input, assumption or [])
     except InterpretationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@app.get("/v2/query", dependencies=[Depends(require_api_token)])
+def full_results_query(
+    input: Annotated[str | None, Query()] = None,
+    output: Annotated[str, Query()] = "xml",
+    format: Annotated[list[str] | None, Query()] = None,
+    assumption: Annotated[list[str] | None, Query()] = None,
+    includepodid: Annotated[list[str] | None, Query()] = None,
+    excludepodid: Annotated[list[str] | None, Query()] = None,
+    podtitle: Annotated[list[str] | None, Query()] = None,
+    podindex: Annotated[list[str] | None, Query()] = None,
+    scanner: Annotated[list[str] | None, Query()] = None,
+) -> Response:
+    try:
+        selected_output = normalize_output(output)
+    except FullResultsRequestError as exc:
+        response = render_response(query_error(input, str(exc)), "json")
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+
+    if input is None or not input.strip() or len(input) > 4000:
+        response = render_response(
+            query_error(input, "input is required and must contain 1 to 4000 characters"),
+            selected_output,
+        )
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+
+    try:
+        formats, _ = normalize_formats(format)
+        payload = execute_query(
+            input,
+            assumption,
+            formats,
+            include_pod_ids=includepodid,
+            exclude_pod_ids=excludepodid,
+            pod_titles=podtitle,
+            pod_indexes=podindex,
+            scanners=scanner,
+        )
+    except (AssumptionSelectionError, FullResultsRequestError) as exc:
+        response = render_response(query_error(input, str(exc)), selected_output)
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    except FullResultsBackendError as exc:
+        response = render_response(query_error(input, f"computation backend failed: {exc}"), selected_output)
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return response
+    return render_response(payload, selected_output)
+
+
+@app.get("/v2/validatequery", dependencies=[Depends(require_api_token)])
+def full_results_validatequery(
+    input: Annotated[str | None, Query()] = None,
+    output: Annotated[str, Query()] = "xml",
+    assumption: Annotated[list[str] | None, Query()] = None,
+) -> Response:
+    try:
+        selected_output = normalize_output(output)
+    except FullResultsRequestError as exc:
+        response = render_response(validate_error(input, str(exc)), "json")
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+
+    if input is None or not input.strip() or len(input) > 4000:
+        response = render_response(
+            validate_error(input, "input is required and must contain 1 to 4000 characters"),
+            selected_output,
+        )
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    try:
+        payload = validate_query(input, assumption)
+    except AssumptionSelectionError as exc:
+        response = render_response(validate_error(input, str(exc)), selected_output)
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    return render_response(payload, selected_output)
 
 
 @app.post("/v1/knowledge/query", dependencies=[Depends(require_api_token)])
