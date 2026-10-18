@@ -23,7 +23,7 @@ AssumptionName = Literal[
 UnitName = Literal["meter", "minute", "us_minim"]
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "differentiate", "integrate",
-    "limit", "sum", "product", "solve", "identity",
+    "limit", "series", "sum", "product", "solve", "identity",
 ]
 
 
@@ -36,6 +36,7 @@ class SymbolicRequest(StrictModel):
     lower: str | None = Field(default=None, min_length=1, max_length=256)
     upper: str | None = Field(default=None, min_length=1, max_length=256)
     point: str | None = Field(default=None, min_length=1, max_length=256)
+    order: int | None = Field(default=None, strict=True, ge=1, le=32)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=30.0)
@@ -56,11 +57,11 @@ class SymbolicRequest(StrictModel):
                 raise ValueError("validate does not accept a variable or integration bounds")
             if self.assumptions:
                 raise ValueError("validate does not accept symbolic assumptions")
-        variable_operations = {"differentiate", "integrate", "limit", "sum", "product", "solve"}
+        variable_operations = {"differentiate", "integrate", "limit", "series", "sum", "product", "solve"}
         if self.operation in variable_operations and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
         if self.operation not in variable_operations and self.variable is not None:
-            raise ValueError("variable is only used by differentiate, integrate, limit, sum, product, or solve")
+            raise ValueError("variable is only used by differentiate, integrate, limit, series, sum, product, or solve")
         if self.operation == "integrate":
             if (self.lower is None) != (self.upper is None):
                 raise ValueError("definite integration requires both lower and upper")
@@ -69,17 +70,22 @@ class SymbolicRequest(StrictModel):
                 raise ValueError(f"{self.operation} requires lower and upper bounds")
         elif self.lower is not None or self.upper is not None:
             raise ValueError("lower and upper are only supported by integrate, sum, or product")
-        if self.operation == "limit":
+        if self.operation in {"limit", "series"}:
             if self.point is None:
-                raise ValueError("limit requires a point")
+                raise ValueError(f"{self.operation} requires a point")
         elif self.point is not None:
-            raise ValueError("point is only supported by limit")
+            raise ValueError("point is only supported by limit or series")
+        if self.operation == "series":
+            if self.order is None:
+                raise ValueError("series requires an expansion order")
+        elif self.order is not None:
+            raise ValueError("order is only supported by series")
         if any(len(set(values)) != len(values) for values in self.assumptions.values()):
             raise ValueError("assumption lists cannot contain duplicates")
         if set(self.assumptions) & set(self.named_units):
             raise ValueError("a name cannot be both a symbolic assumption and a unit")
-        if self.operation in {"sum", "product"} and self.variable in self.named_units:
-            raise ValueError("sum/product variables cannot be bound to named physical units")
+        if self.operation in {"series", "sum", "product"} and self.variable in self.named_units:
+            raise ValueError("series/sum/product variables cannot be bound to named physical units")
         return self
 
 
@@ -183,6 +189,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         result = sp.diff(expression, variable)
     elif request.operation == "limit":
         point = parser.parse(request.point or "")
+        if point.has(variable):
+            raise SymbolicInputError("limit point cannot depend on the limit variable")
         limit_details: dict[str, object]
         if point == sp.oo:
             result = sp.limit(expression, variable, point, dir="+")
@@ -218,6 +226,12 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
                 "right": sp.sstr(right_limit),
                 "exists": equal_sides,
             }
+    elif request.operation == "series":
+        point = parser.parse(request.point or "")
+        if point.has(variable):
+            raise SymbolicInputError("series point cannot depend on the expansion variable")
+        result = sp.series(expression, variable, point, request.order)
+        series_data = _series_data(sp, result, variable, point, request.order)
     elif request.operation == "integrate":
         if request.lower is not None and request.upper is not None:
             lower = parser.parse(request.lower)
@@ -270,7 +284,31 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     }
     if request.operation == "limit":
         response["limit_details"] = limit_details
+    if request.operation == "series":
+        response["series_order"] = request.order
+        response["series_data"] = series_data
     return response
+
+
+def _series_data(sympy: object, series: object, variable: object, point: object, order: int | None) -> dict[str, object] | None:
+    if order is None or not isinstance(variable, sympy.Symbol) or point in {sympy.oo, -sympy.oo}:
+        return None
+    parameter = sympy.Dummy("series_parameter")
+    try:
+        shifted_series = sympy.expand(series.removeO().subs(variable, point + parameter))
+        polynomial = sympy.Poly(shifted_series, parameter)
+    except (AttributeError, sympy.PolynomialError, TypeError, ValueError):
+        return None
+    if any(exponents[0] < 0 or exponents[0] >= order for exponents, _ in polynomial.terms()):
+        return None
+    return {
+        "variable": str(variable),
+        "point": sympy.sstr(point),
+        "coefficients": [sympy.sstr(polynomial.nth(index)) for index in range(order)],
+        "lowest_power": 0,
+        "highest_power_exclusive": order,
+        "denominator": 1,
+    }
 
 
 def _check_unit_dimensions(sympy: object, expression: object) -> None:

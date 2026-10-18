@@ -129,8 +129,15 @@ def capabilities() -> dict[str, object]:
         },
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "differentiate", "integrate",
-            "limit", "sum", "product", "solve", "identity",
+            "limit", "series", "sum", "product", "solve", "identity",
         ],
+        "symbolic_series": {
+            "order_range": [1, 32],
+            "expansion_point": "explicit expression",
+            "output": "SymPy series with a big-O remainder",
+            "wolfram_output": "SeriesData for finite integer-power expansions when representable",
+            "proof_status": "symbolic result, not a Lean proof",
+        },
         "symbolic_discrete_aggregations": {
             "query_bounds": "inclusive integer literals",
             "maximum_bound_size_bits": 256,
@@ -189,7 +196,7 @@ def capabilities() -> dict[str, object]:
                 "query_classes": [
                     "safe symbolic expressions",
                     "presentation LaTeX and MathML expressions",
-                    "simplify/factor/expand/differentiate/integrate/limit/sum/product/solve/identity calls",
+                    "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
                     "weather location queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",

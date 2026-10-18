@@ -386,6 +386,14 @@ def execute_query(
         )
 
     result_text = str(symbolic.get("result", ""))
+    if is_typed_quantity:
+        result_moutput = quantity_expression
+    elif is_typed_date or is_typed_list:
+        result_moutput = expression
+    elif symbolic_request.operation == "series":
+        result_moutput = _wolfram_series_output(symbolic.get("series_data"))
+    else:
+        result_moutput = _wolfram_value(symbolic.get("result"))
     pods = _initial_pods(
         input_text,
         input_display,
@@ -394,15 +402,7 @@ def execute_query(
         input_mathml=input_mathml,
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
-        result_moutput=(
-            quantity_expression
-            if is_typed_quantity
-            else expression
-            if is_typed_date
-            else expression
-            if is_typed_list
-            else _wolfram_value(symbolic.get("result"))
-        ),
+        result_moutput=result_moutput,
         result_scanner="Date" if is_typed_date else "Mathematical",
         numeric_approximation=numeric_approximation,
         decimal_state_level=decimal_state_level,
@@ -986,6 +986,8 @@ def _prepare_query(
         typed_ast["upper"] = operation_request.upper
     if operation_request.point is not None:
         typed_ast["point"] = operation_request.point
+    if operation_request.order is not None:
+        typed_ast["order"] = operation_request.order
     interpreted = {
         "input": input_text,
         "outcome": "validated" if validate_only else "prepared",
@@ -1031,6 +1033,7 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         "integrate": "integrate",
         "integral": "integrate",
         "limit": "limit",
+        "series": "series",
         "sum": "sum",
         "summation": "sum",
         "product": "product",
@@ -1057,7 +1060,7 @@ def _operation_request(
     aliases = {
         "simplify": "simplify", "factor": "factor", "expand": "expand",
         "differentiate": "differentiate", "diff": "differentiate",
-        "integrate": "integrate", "integral": "integrate", "limit": "limit",
+        "integrate": "integrate", "integral": "integrate", "limit": "limit", "series": "series",
         "sum": "sum", "summation": "sum", "product": "product", "prod": "product",
         "solve": "solve",
         "identity": "identity",
@@ -1096,6 +1099,22 @@ def _operation_request(
             point=arguments[2],
             time_limit_seconds=5,
         )
+    if operation == "series":
+        order = _bounded_integer_literal(arguments[3]) if len(arguments) == 4 else None
+        if len(arguments) != 4 or variable is None or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
+        ) or order is None or not 1 <= order <= 32:
+            raise InterpretationError(
+                "series requires an expression, variable, expansion point, and integer order from 1 to 32"
+            )
+        return SymbolicRequest(
+            operation="series",
+            expression=arguments[0],
+            variable=variable,
+            point=arguments[2],
+            order=order,
+            time_limit_seconds=5,
+        )
     if operation in {"sum", "product"}:
         if len(arguments) != 4 or variable is None or not re.fullmatch(
             r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
@@ -1103,7 +1122,7 @@ def _operation_request(
             raise InterpretationError(
                 f"{operation} requires an expression, variable, lower bound, and upper bound"
             )
-        if any(not _is_bounded_integer_literal(bound) for bound in arguments[2:]):
+        if any(_bounded_integer_literal(bound) is None for bound in arguments[2:]):
             raise InterpretationError(
                 f"{operation} query calls require integer literal bounds; use /v1/symbolic for declared symbolic bounds"
             )
@@ -1131,13 +1150,13 @@ def _operation_request(
     )
 
 
-def _is_bounded_integer_literal(source: str) -> bool:
+def _bounded_integer_literal(source: str) -> int | None:
     if len(source) > 90:
-        return False
+        return None
     try:
         node = ast.parse(source, mode="eval").body
     except SyntaxError:
-        return False
+        return None
     if isinstance(node, ast.Constant) and type(node.value) is int:
         value = node.value
     elif (
@@ -1148,8 +1167,8 @@ def _is_bounded_integer_literal(source: str) -> bool:
     ):
         value = node.operand.value if isinstance(node.op, ast.UAdd) else -node.operand.value
     else:
-        return False
-    return abs(value).bit_length() <= 256
+        return None
+    return value if abs(value).bit_length() <= 256 else None
 
 
 def _split_operation_call(query: str) -> tuple[str, list[str]] | None:
@@ -1510,6 +1529,10 @@ def _wolfram_input_for_query(
         point = _wolfram_expression(request.point or "")
         if point is not None:
             return f"Limit[{rendered_expression}, {{{variable}, {point}}}]"
+    if request.operation == "series" and rendered_expression is not None and variable:
+        point = _wolfram_expression(request.point or "")
+        if point is not None and request.order is not None:
+            return f"Series[{rendered_expression}, {{{variable}, {point}, {request.order}}}]"
     if request.operation == "identity":
         lhs = _wolfram_expression(request.lhs or "")
         rhs = _wolfram_expression(request.rhs or "")
@@ -1532,6 +1555,38 @@ def _wolfram_quantity(typed_ast: dict[str, Any]) -> str | None:
     if value is None or unit not in {"Meters", "MinimsUS", "Minutes"}:
         return None
     return f"Quantity[{value}, {json.dumps(unit)}]"
+
+
+def _wolfram_series_output(series_data: Any) -> str | None:
+    if not isinstance(series_data, dict):
+        return None
+    variable = series_data.get("variable")
+    point = _wolfram_expression(str(series_data.get("point", "")))
+    coefficients = series_data.get("coefficients")
+    lower_power = series_data.get("lowest_power")
+    upper_power = series_data.get("highest_power_exclusive")
+    denominator = series_data.get("denominator")
+    if (
+        not isinstance(variable, str)
+        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", variable)
+        or point is None
+        or not isinstance(coefficients, list)
+        or not 1 <= len(coefficients) <= 32
+        or type(lower_power) is not int
+        or type(upper_power) is not int
+        or type(denominator) is not int
+        or denominator != 1
+        or upper_power - lower_power != len(coefficients)
+    ):
+        return None
+    rendered_coefficients = [_wolfram_expression(str(value)) for value in coefficients]
+    if any(value is None for value in rendered_coefficients):
+        return None
+    coefficient_list = "{" + ", ".join(value for value in rendered_coefficients if value is not None) + "}"
+    return (
+        f"SeriesData[{_wolfram_symbol(variable)}, {point}, {coefficient_list}, "
+        f"{lower_power}, {upper_power}, {denominator}]"
+    )
 
 
 def _render_wolfram_node(node: ast.AST) -> str:
