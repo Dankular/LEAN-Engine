@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Tan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>Sin|Cos|Tan|ArcTan|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 
@@ -286,10 +286,16 @@ def _prepare_real_antiderivative(
         return None
     try:
         parsed = parse_math_input(exact_source)
-        integrand_lean, integrand_symbols = _render_real_calculus_lean(parsed.expression)
+        integrand_tree = ast.parse(parsed.expression, mode="eval")
+        integrand_lean, integrand_symbols = _render_real_calculus_lean(
+            parsed.expression, allow_variable_denominators=True
+        )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if integrand_lean is None:
+        return None
+    positive_log_arguments = _positive_log_arguments(integrand_tree.body)
+    if positive_log_arguments is None:
         return None
 
     symbolic = run_symbolic(SymbolicRequest(
@@ -310,26 +316,85 @@ def _prepare_real_antiderivative(
     try:
         tree = ast.parse(antiderivative, mode="eval")
         antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(
-            antiderivative
+            antiderivative, allow_variable_denominators=True
         )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if antiderivative_lean is None:
         return None
 
-    function_variable = "deriv_var"
-    suffix = 0
-    while function_variable in (integrand_symbols | antiderivative_symbols) or (
-        function_variable == variable
-    ):
-        suffix += 1
-        function_variable = f"deriv_var{suffix}"
+    domain_expressions = [
+        *_variable_denominators(integrand_tree.body),
+        *_variable_denominators(tree.body),
+        *_log_arguments(tree.body),
+    ]
+    domain_hypotheses: dict[str, str] = {}
+    positive_hypotheses: dict[str, str] = {}
+    domain_binders: list[str] = []
+    domain_condition_names: list[str] = []
+    domain_conditions: list[str] = []
+    used_names = set(integrand_symbols) | set(antiderivative_symbols) | {variable}
+
+    for index, argument in enumerate(positive_log_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        hypothesis_name = _fresh_identifier(f"h_positive_{index}", used_names)
+        positive_hypotheses[ast.dump(argument, include_attributes=False)] = (
+            hypothesis_name
+        )
+        domain_binders.append(f"({hypothesis_name} : 0 < {argument_lean})")
+        domain_condition_names.append(f"ne_of_gt {hypothesis_name}")
+        argument_source = ast.unparse(argument).replace("**", "^")
+        domain_conditions.append(f"{argument_source} > 0")
+
+    for index, domain_expression in enumerate(domain_expressions):
+        key = ast.dump(domain_expression, include_attributes=False)
+        if key in domain_hypotheses or key in positive_hypotheses:
+            continue
+        constant = _constant_fraction(domain_expression)
+        if constant is not None:
+            if constant == 0:
+                return None
+            continue
+        expression_lean = _render_real_calculus_node(
+            domain_expression,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if expression_lean is None:
+            return None
+        hypothesis_name = _fresh_identifier(f"h_domain_{index}", used_names)
+        domain_hypotheses[key] = hypothesis_name
+        domain_binders.append(f"({hypothesis_name} : {expression_lean} ≠ 0)")
+        domain_condition_names.append(hypothesis_name)
+        if (
+            isinstance(domain_expression, ast.Call)
+            and isinstance(domain_expression.func, ast.Name)
+            and domain_expression.func.id == "cos"
+        ):
+            argument_source = ast.unparse(domain_expression.args[0]).replace("**", "^")
+            expression_source = f"Cos[{argument_source}]"
+        else:
+            expression_source = ast.unparse(domain_expression).replace("**", "^")
+        domain_conditions.append(f"{expression_source} ≠ 0")
+
+    function_variable = _fresh_identifier("deriv_var", used_names)
     rendered = _render_real_calculus_node(
         tree.body,
         set(),
         {"nodes": 0},
         0,
         substitutions={variable: function_variable},
+        allow_variable_denominators=True,
     )
     proof = _derivative_proof_term(
         tree.body,
@@ -338,17 +403,40 @@ def _prepare_real_antiderivative(
         variable,
         {"nodes": 0},
         0,
+        domain_hypotheses=domain_hypotheses,
+        positive_hypotheses=positive_hypotheses,
     )
     if rendered is None or proof is None:
         return None
 
     variables = sorted(integrand_symbols | antiderivative_symbols | {variable})
-    binders = " ".join(f"({name} : ℝ)" for name in variables)
+    binders = " ".join(
+        [*(f"({name} : ℝ)" for name in variables), *domain_binders]
+    )
     theorem_binders = f" {binders}" if binders else ""
+    field_simp_arguments = (
+        f" [{', '.join(domain_condition_names)}]" if domain_condition_names else ""
+    )
+    function_equality_tactic = f"ext {function_variable}; simp [id_eq] <;> ring"
+    has_tangent = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "tan"
+        for expression_tree in (integrand_tree, tree)
+        for node in ast.walk(expression_tree.body)
+    )
+    tangent_simp = ", Real.tan_eq_sin_div_cos" if has_tangent else ""
+    derivative_tactic = (
+        f"simp [id_eq{tangent_simp}] <;> "
+        f"field_simp{field_simp_arguments} <;> ring"
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Tactic.FieldSimp
@@ -357,13 +445,18 @@ import Mathlib.Tactic.Ring
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {integrand_lean} {variable} := by
   convert ({proof}) using 1
-  · ext {function_variable}
-    simp [id_eq] <;> ring
-  · simp [id_eq] <;> field_simp <;> ring
+  all_goals
+    first
+    | {function_equality_tactic}
+    | {derivative_tactic}
 
 #print axioms wolfram_language_compute
 """
-    return Computation(antiderivative.replace("**", "^"), source)
+    return Computation(
+        antiderivative.replace("**", "^"),
+        source,
+        domain_conditions=tuple(domain_conditions),
+    )
 
 
 def _prepare_real_derivative(
@@ -608,8 +701,19 @@ def _prepare_polynomial_computation(
 def _normalize_wolfram_real_functions(source: str) -> str:
     normalized = re.sub(r"\bPi\b", "pi", source, flags=re.IGNORECASE)
     for _ in range(64):
+        def normalize_function(match: re.Match[str]) -> str:
+            function_name = match.group("function").lower()
+            if function_name == "arctan":
+                function_name = "atan"
+            argument = match.group("argument")
+            try:
+                argument = parse_math_input(argument).expression
+            except MathInputError:
+                pass
+            return f"{function_name}({argument})"
+
         normalized, replacements = _WOLFRAM_REAL_FUNCTION.subn(
-            lambda match: f"{match.group('function').lower()}({match.group('argument')})",
+            normalize_function,
             normalized,
         )
         if replacements == 0:
@@ -667,6 +771,38 @@ def _positive_log_arguments(root: ast.AST) -> list[ast.AST] | None:
             seen.add(key)
             arguments.append(argument)
     return arguments
+
+
+def _log_arguments(root: ast.AST) -> list[ast.AST]:
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "log"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = _unwrap_real_abs(node.args[0])
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _unwrap_real_abs(node: ast.AST) -> ast.AST:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"abs", "Abs"}
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return node.args[0]
+    return node
 
 
 def _tan_cosine_arguments(root: ast.AST) -> list[ast.AST] | None:
@@ -823,6 +959,7 @@ def _render_real_calculus_node(
             "sin": "Real.sin",
             "cos": "Real.cos",
             "tan": "Real.tan",
+            "atan": "Real.arctan",
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
@@ -830,8 +967,13 @@ def _render_real_calculus_node(
         }.get(node.func.id)
         if function_name is None:
             return None
+        argument_node = (
+            _unwrap_real_abs(node.args[0])
+            if node.func.id == "log"
+            else node.args[0]
+        )
         argument = _render_real_calculus_node(
-            node.args[0],
+            argument_node,
             names,
             state,
             depth + 1,
@@ -973,19 +1115,21 @@ def _derivative_proof_term(
         ):
             return None
         if node.func.id == "log":
-            argument = node.args[0]
+            argument = _unwrap_real_abs(node.args[0])
             constant_argument = _constant_fraction(argument)
             if constant_argument is not None:
                 if constant_argument <= 0:
                     return None
                 domain_proof = "by norm_num"
             else:
-                hypothesis_name = (positive_hypotheses or {}).get(
-                    ast.dump(argument, include_attributes=False)
-                )
-                if hypothesis_name is None:
-                    return None
-                domain_proof = f"ne_of_gt {hypothesis_name}"
+                argument_key = ast.dump(argument, include_attributes=False)
+                positive_hypothesis = (positive_hypotheses or {}).get(argument_key)
+                if positive_hypothesis is not None:
+                    domain_proof = f"ne_of_gt {positive_hypothesis}"
+                else:
+                    domain_proof = (domain_hypotheses or {}).get(argument_key)
+                    if domain_proof is None:
+                        return None
             inner = _derivative_proof_term(
                 argument,
                 variable,
@@ -1037,6 +1181,7 @@ def _derivative_proof_term(
         derivative_method = {
             "sin": "sin",
             "cos": "cos",
+            "atan": "arctan",
             "exp": "exp",
             "sinh": "sinh",
             "cosh": "cosh",

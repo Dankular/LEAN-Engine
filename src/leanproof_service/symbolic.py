@@ -262,6 +262,14 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             result = sp.integrate(expression, (variable, lower, upper))
         else:
             result = sp.integrate(expression, variable)
+            if isinstance(result, sp.Basic):
+                result = result.replace(
+                    lambda node: (
+                        node.func == sp.log
+                        and variable in node.args[0].free_symbols
+                    ),
+                    lambda node: sp.log(sp.Abs(node.args[0])),
+                )
     elif request.operation in {"sum", "product"}:
         lower = parser.parse(request.lower or "")
         upper = parser.parse(request.upper or "")

@@ -392,30 +392,31 @@ def capabilities() -> dict[str, object]:
                 "derivative": {
                     "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "functions": ["Sin", "Cos", "Tan", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
                     "domain_conditions": "Tan differentiation requires the cosine of each argument to be nonzero; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "result_semantics": "one antiderivative representative; additive constant omitted",
-                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
-                    "limits": "bounded exact expressions with rational constant denominators; function integrals are accepted only when SymPy returns a result in this grammar",
+                    "result_semantics": "one antiderivative representative; additive constant omitted; generated real logarithms use log(abs(argument)) where required",
+                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
+                    "limits": "bounded exact expressions; selected variable-denominator, logarithmic, and tangent antiderivatives are accepted only when Lean checks the result, with required domain conditions returned",
+                    "domain_conditions": "submitted Log arguments require positivity; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
                 },
                 "definite_integral": {
                     "syntax": "Integrate[expression, {variable, lower, upper}]",
                     "proof": "Lean-checked antiderivative plus the interval fundamental theorem of calculus; axiom audit",
                     "bounds": "exact rational numeric expressions",
-                    "limits": "bounded real-calculus grammar; functions require an antiderivative and result representable by this grammar; other free variables are real parameters",
+                    "limits": "bounded real-calculus grammar with exact rational bounds; definite integration does not yet support variable denominators; other free variables are real parameters",
                 },
                 "real_calculus_limits": {
-                    "operators": ["+", "-", "*", "division by nonzero rational constants for integration; variable denominators for D require explicit nonzero conditions", "^ with integer exponent 0–16"],
-                    "functions": ["Sin", "Cos", "Tan", "Exp", "Sinh", "Cosh", "Log"],
+                    "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
+                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Exp", "Sinh", "Cosh", "Log"],
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["variable-denominator integration", "Tan antiderivatives", "logarithmic antiderivatives", "Sin[x^2] antiderivative"],
+                    "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"
@@ -1007,7 +1008,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     if computation.timed_out:
         return _compat_response(
             200,
-            f'Failure["EvaluationTimeExceeded", {effective_budget}]',
+            _evaluation_time_exceeded(effective_budget),
             request_id,
             success=True,
         )
@@ -1015,7 +1016,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     if remaining_budget <= 0:
         return _compat_response(
             200,
-            f'Failure["EvaluationTimeExceeded", {effective_budget}]',
+            _evaluation_time_exceeded(effective_budget),
             request_id,
             success=True,
         )
@@ -1025,7 +1026,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     if lean_result.status == "timeout":
         return _compat_response(
             200,
-            f'Failure["EvaluationTimeExceeded", {effective_budget}]',
+            _evaluation_time_exceeded(effective_budget),
             request_id,
             success=True,
         )
@@ -1084,6 +1085,14 @@ def _compat_response(
 def _format_wolfram_output(line: int, value: str) -> str:
     spacing = "" if all(character in "0123456789/-" for character in value) else " "
     return f"Out[{line}]={spacing}{value}"
+
+
+def _evaluation_time_exceeded(seconds: int) -> str:
+    return (
+        'Failure["EvaluationTimeExceeded", '
+        '<|"MessageTemplate" -> "Evaluation exceeded the `1` second time limit.", '
+        f'"MessageParameters" -> {{{seconds}}}|>]'
+    )
 
 
 def _limit_output(value: str, max_chars: int) -> str:
