@@ -511,6 +511,40 @@ def _prepare_definite_real_integral(
             if all(source != rendered_argument for source, _ in rendered_log_arguments):
                 rendered_log_arguments.append((rendered_argument, sympy_argument))
 
+    arcsin_half_endpoint = False
+    inverse_trig_sources = (
+        (antiderivative_tree.body, {variable: lower}),
+        (antiderivative_tree.body, {variable: upper}),
+        (definite_result_tree.body, {}),
+    )
+    for inverse_root, substitutions in inverse_trig_sources:
+        for node in ast.walk(inverse_root):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Name)
+                or node.func.id != "asin"
+                or len(node.args) != 1
+                or node.keywords
+            ):
+                continue
+            argument = _real_sympy_expression(node.args[0], substitutions)
+            if argument == _sympy.Rational(1, 2):
+                arcsin_half_endpoint = True
+                break
+        if arcsin_half_endpoint:
+            break
+
+    arcsin_half_lemma_name = (
+        fresh_name("h_arcsin_half", used_names) if arcsin_half_endpoint else None
+    )
+    arcsin_half_lemma_source = ""
+    if arcsin_half_lemma_name is not None:
+        arcsin_half_lemma_source = f"""
+  have {arcsin_half_lemma_name} : Real.arcsin ((1 : ℝ) / 2) = Real.pi / 6 := by
+    apply Real.arcsin_eq_of_sin_eq
+    · exact Real.sin_pi_div_six
+    · constructor <;> nlinarith [Real.pi_pos]"""
+
     log_equivalence_lemmas: list[tuple[str, str, str]] = []
     seen_log_equivalences: set[frozenset[str]] = set()
     if len(rendered_log_arguments) <= 32:
@@ -553,9 +587,13 @@ def _prepare_definite_real_integral(
     )
     if log_lemma_source:
         log_lemma_source = "\n" + log_lemma_source
-    log_lemma_simplifier = (
-        f"simp only [{', '.join(log_lemma_names)}] <;> "
-        if log_lemma_names
+    final_simp_names = [
+        *log_lemma_names,
+        *([arcsin_half_lemma_name] if arcsin_half_lemma_name is not None else []),
+    ]
+    final_simplifier = (
+        f"simp only [{', '.join(final_simp_names)}] <;> "
+        if final_simp_names
         else ""
     )
     interval_domain_lemma_source = "\n".join(interval_domain_lemmas)
@@ -607,7 +645,8 @@ theorem wolfram_language_compute{theorem_binders} :
     exact hcont.intervalIntegrable
   rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
 {log_lemma_source}
-  norm_num [F] <;> {log_lemma_simplifier}field_simp <;> ring
+{arcsin_half_lemma_source}
+  norm_num [F] <;> {final_simplifier}field_simp <;> ring
 
 #print axioms wolfram_language_compute
 """
