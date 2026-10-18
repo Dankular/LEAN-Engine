@@ -27,6 +27,9 @@ _UNIT_LITERAL = re.compile(rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>m)\s*
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
 )
+_MIXED_FRACTION_LITERAL = re.compile(
+    r"^\s*(?P<whole>\d+)\s+(?P<numerator>\d+)\s*/\s*(?P<denominator>\d+)\s*$"
+)
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -85,6 +88,20 @@ def query_with_interpretations(
             date_input,
             selections,
             compute=compute,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    mixed_fraction = _mixed_fraction_parts(source_query)
+    if mixed_fraction is not None:
+        return _interpret_mixed_fraction(
+            source_query,
+            mixed_fraction,
+            selections,
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
             parse_timing=perf_counter() - parsing_started,
         )
     try:
@@ -468,6 +485,114 @@ def _text_mathml(value: str) -> str:
         f"{html.escape(value)}"
         "</mtext></math>"
     )
+
+
+def _mixed_fraction_parts(query: str) -> dict[str, int] | None:
+    match = _MIXED_FRACTION_LITERAL.fullmatch(query)
+    if match is None:
+        return None
+    whole = int(match.group("whole"))
+    numerator = int(match.group("numerator"))
+    denominator = int(match.group("denominator"))
+    if whole <= 0 or numerator <= 0 or denominator <= numerator:
+        return None
+    return {"whole": whole, "numerator": numerator, "denominator": denominator}
+
+
+def _interpret_mixed_fraction(
+    source_query: str,
+    parts: dict[str, int],
+    selections: list[str],
+    *,
+    compute: bool,
+    numeric_precision: int,
+    time_limit_seconds: float,
+    parse_timeout_seconds: float,
+    pod_timeout_seconds: float | None,
+    deadline: float | None,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "MixedFraction"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    if len(candidates) != 2:
+        raise RuntimeError("MixedFraction registry must contain exactly two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    if len(selections) > 1:
+        raise AssumptionSelectionError("select at most one assumption value for MixedFraction")
+    for selection in selections:
+        if selection not in candidate_ids:
+            all_ids = {item["id"] for item in registry["assumptions"]}
+            if selection not in all_ids:
+                raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+            raise AssumptionSelectionError(f"assumption {selection} is incompatible with this input")
+
+    if selections:
+        chosen = by_id[selections[0]]
+        selection_source = "caller_override"
+    else:
+        chosen = next((item for item in candidates if item.get("service_default")), None)
+        if chosen is None:
+            raise RuntimeError("MixedFraction registry has no service default")
+        selection_source = "service_default"
+
+    whole = parts["whole"]
+    numerator = parts["numerator"]
+    denominator = parts["denominator"]
+    if chosen["meaning"] == "mixed_fraction":
+        expression = f"{whole} + ({numerator})/({denominator})"
+    elif chosen["meaning"] == "product":
+        expression = f"{whole}*(({numerator})/({denominator}))"
+    else:
+        raise RuntimeError("MixedFraction registry contains an unsupported meaning")
+
+    resolved = query_with_interpretations(
+        expression,
+        [],
+        compute=compute,
+        numeric_precision=numeric_precision,
+        time_limit_seconds=time_limit_seconds,
+        parse_timeout_seconds=parse_timeout_seconds,
+        pod_timeout_seconds=pod_timeout_seconds,
+        deadline=deadline,
+    )
+    assumption_payload = [{
+        "type": "MixedFraction",
+        "selected": chosen["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in candidates
+        ],
+    }]
+    resolved["input"] = source_query
+    resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
+    resolved["assumptions"] = assumption_payload
+    resolved["interpretation"] = {
+        **resolved["interpretation"],
+        "typed_ast": {
+            "node": "mixed_fraction_interpretation",
+            **parts,
+            "meaning": chosen["meaning"],
+            "resolved_expression": expression,
+        },
+    }
+    resolved["classification"] = {
+        "name": "deterministic_lexical_baseline",
+        "method": "neutral ranking for mixed-fraction readings",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+    }
+    return resolved
 
 
 def _compound_interpretation(
