@@ -55,6 +55,10 @@ _LOG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])log\s*\(\s*(?P<number>{_NUMBER_PATTERN})\s*\)",
     re.IGNORECASE,
 )
+_LOG_FUNCTION_IN_EXPRESSION = re.compile(
+    rf"(?<![A-Za-z0-9_])log\s+(?P<number>{_NUMBER_PATTERN})(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
 
 
 class InterpretationError(ValueError):
@@ -143,6 +147,18 @@ def query_with_interpretations(
         return _interpret_list_or_number(
             source_query,
             list_or_number,
+            selections,
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
+            parse_timing=perf_counter() - parsing_started,
+        )
+    if _LOG_FUNCTION_IN_EXPRESSION.search(source_query):
+        return _interpret_function_log(
+            source_query,
             selections,
             compute=compute,
             numeric_precision=numeric_precision,
@@ -413,6 +429,140 @@ def query_with_interpretations(
         }),
         "qualification": "Candidate ranking and symbolic computation are not formal proof.",
     }
+
+
+def _interpret_function_log(
+    source_query: str,
+    selections: list[str],
+    *,
+    compute: bool,
+    numeric_precision: int,
+    time_limit_seconds: float,
+    parse_timeout_seconds: float,
+    pod_timeout_seconds: float | None,
+    deadline: float | None,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    candidates = [item for item in registry["assumptions"] if item["type"] == "Function"]
+    by_id = {item["id"]: item for item in candidates}
+    candidate_ids = set(by_id)
+    backend_candidates = [
+        item for item in registry["assumptions"] if item["type"] == "LogBase"
+    ]
+    if len(candidates) != 2 or len(backend_candidates) != 2:
+        raise RuntimeError("Function and LogBase registries must each contain two values")
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+
+    all_ids = {item["id"] for item in registry["assumptions"]}
+    backend_ids = {item["id"] for item in backend_candidates}
+    for selection in selections:
+        if selection not in all_ids:
+            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+        if selection in backend_ids:
+            raise AssumptionSelectionError(
+                f"assumption {selection} is incompatible with unparenthesized log input"
+            )
+
+    function_selections = [selection for selection in selections if selection in candidate_ids]
+    if len(function_selections) > 1:
+        raise AssumptionSelectionError("select at most one Function assumption value")
+    if function_selections:
+        chosen = by_id[function_selections[0]]
+        selection_source = "caller_override"
+    else:
+        defaults = [item for item in candidates if item.get("service_default")]
+        if len(defaults) != 1:
+            raise RuntimeError("Function registry must have exactly one service default")
+        chosen = defaults[0]
+        selection_source = "service_default"
+
+    backend = next(
+        (item for item in backend_candidates if item["argument_base"] == chosen["argument_base"]),
+        None,
+    )
+    if backend is None:
+        raise RuntimeError("Function choice has no matching symbolic LogBase route")
+    matches = list(_LOG_FUNCTION_IN_EXPRESSION.finditer(source_query))
+    if not matches:
+        raise RuntimeError("Function log handler was called without a matching input")
+    normalized_expression = source_query
+    for match in reversed(matches):
+        number = match.group("number")
+        replacement = f"log({number})"
+        normalized_expression = (
+            normalized_expression[:match.start()]
+            + replacement
+            + normalized_expression[match.end():]
+        )
+
+    remaining_selections = [
+        selection for selection in selections if selection not in candidate_ids
+    ]
+    resolved = query_with_interpretations(
+        normalized_expression,
+        [*remaining_selections, backend["id"]],
+        compute=compute,
+        numeric_precision=numeric_precision,
+        time_limit_seconds=time_limit_seconds,
+        parse_timeout_seconds=parse_timeout_seconds,
+        pod_timeout_seconds=pod_timeout_seconds,
+        deadline=deadline,
+    )
+
+    inner_assumptions = resolved.get("assumptions", [])
+    backend_assumption = next(
+        (item for item in inner_assumptions if item.get("type") == "LogBase"),
+        None,
+    )
+    if backend_assumption is None:
+        raise RuntimeError("symbolic LogBase route did not return its selected assumption")
+    occurrences = backend_assumption.get("occurrences") or [
+        {"function": "log", "argument": match.group("number")} for match in matches
+    ]
+    function_payload = {
+        "type": "Function",
+        "word": "log",
+        "selected": chosen["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "occurrences": occurrences,
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in [chosen, *(item for item in candidates if item["id"] != chosen["id"])]
+        ],
+    }
+    resolved["input"] = source_query
+    resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
+    resolved["assumptions"] = [
+        function_payload if item is backend_assumption else item
+        for item in inner_assumptions
+    ]
+    original_interpretation = resolved["interpretation"]
+    original_ast = original_interpretation.get("typed_ast")
+    resolved["interpretation"] = {
+        **original_interpretation,
+        "typed_ast": {
+            "node": "function_assumption",
+            "function": "log",
+            "meaning": chosen["meaning"],
+            "base": chosen["argument_base"],
+            "occurrences": occurrences,
+            "resolved_expression": normalized_expression,
+            "expression": original_ast,
+        },
+    }
+    nested_classification = resolved.get("classification")
+    resolved["classification"] = {
+        **_rank_candidates(source_query, candidates),
+        "nested_classification": nested_classification,
+    }
+    return resolved
 
 
 def numeric_date_options(query: str) -> list[dict[str, Any]] | None:

@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.9.0",
+  "registry_version": "2.0.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -32,6 +32,24 @@
       "id": "log:base-10",
       "type": "LogBase",
       "description": "Interpret a bare logarithm as a common logarithm with base 10.",
+      "argument_base": "10",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "function:log-natural",
+      "type": "Function",
+      "description": "the natural logarithm",
+      "meaning": "natural_log",
+      "argument_base": "e",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "function:log-base-10",
+      "type": "Function",
+      "description": "the base 10 logarithm",
+      "meaning": "common_log",
       "argument_base": "10",
       "entry_version": 1,
       "service_default": false
