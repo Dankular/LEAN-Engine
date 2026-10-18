@@ -1,5 +1,5 @@
 {
-  "registry_version": "1.5.0",
+  "registry_version": "1.6.0",
   "assumptions": [
     {
       "id": "angle:radians",
@@ -110,6 +110,22 @@
       "id": "list-or-times:list",
       "type": "ListOrTimes",
       "description": "Interpret a number and a symbol separated by whitespace as a two-item list.",
+      "meaning": "list",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "list-or-number:number",
+      "type": "ListOrNumber",
+      "description": "Interpret a comma-grouped numeric string as one number.",
+      "meaning": "number",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "list-or-number:list",
+      "type": "ListOrNumber",
+      "description": "Interpret the values separated by a thousands comma as a two-item list.",
       "meaning": "list",
       "entry_version": 1,
       "service_default": false
