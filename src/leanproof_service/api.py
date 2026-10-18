@@ -99,6 +99,12 @@ def capabilities() -> dict[str, object]:
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
         "symbolic_operations": ["validate", "simplify", "differentiate", "integrate", "solve", "identity"],
+        "symbolic_input_formats": {
+            "native": "bounded safe expression syntax",
+            "latex": "bounded presentation-math subset: fractions, roots, powers, common functions, Greek symbols, and degree notation",
+            "mathml": "bounded presentation MathML subset: identifiers, numbers, fractions, powers, roots, simple symbol subscripts, fenced expressions, and common functions",
+            "limits": {"source_characters": 4000, "tokens_or_nodes": 256, "nesting_depth": 32},
+        },
         "symbolic_numeric_approximation": {
             "default_precision_digits": 50,
             "maximum_precision_digits": 500,
@@ -128,8 +134,10 @@ def capabilities() -> dict[str, object]:
                 "path": "/v2/query",
                 "status": "local_partial_contract",
                 "outputs": ["json", "xml"],
+                "input_formats": ["native", "bounded presentation LaTeX", "bounded presentation MathML"],
                 "query_classes": [
                     "safe symbolic expressions",
+                    "presentation LaTeX and MathML expressions",
                     "simplify/differentiate/integrate/solve/identity calls",
                     "weather location queries",
                     "supported CODATA constants",

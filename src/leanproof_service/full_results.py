@@ -18,6 +18,7 @@ from .interpretations import (
     InterpretationError,
     query_with_interpretations,
 )
+from .input_syntax import MathInputError, parse_math_input
 from .knowledge import (
     KnowledgeProviderError,
     KnowledgeRequest,
@@ -658,11 +659,24 @@ def _prepare_query(
     if assumptions:
         raise AssumptionSelectionError("assumption selection is not applicable to this operation")
 
-    operation_request = operation_request.model_copy(
-        update={"numeric_precision": numeric_precision}
-    )
-
     parse_started = perf_counter()
+    normalized_fields: dict[str, str] = {}
+    input_formats: set[str] = set()
+    for field in ("expression", "lhs", "rhs", "lower", "upper"):
+        value = getattr(operation_request, field)
+        if value is None:
+            continue
+        try:
+            parsed_input = parse_math_input(value)
+        except MathInputError as exc:
+            raise InterpretationError(str(exc)) from exc
+        normalized_fields[field] = parsed_input.expression
+        input_formats.add(parsed_input.input_format)
+    operation_request = operation_request.model_copy(update={
+        **normalized_fields,
+        "numeric_precision": numeric_precision,
+    })
+
     expressions = [
         value for value in (
             operation_request.expression,
@@ -707,6 +721,7 @@ def _prepare_query(
             "operation": operation,
             "variable": operation_request.variable,
             "solver_route": "sympy",
+            **({"input_formats": sorted(input_formats - {"native"})} if input_formats - {"native"} else {}),
         },
         "classification": {
             "name": "not_applicable",
@@ -721,7 +736,12 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
     try:
         node = ast.parse(query, mode="eval").body
     except SyntaxError:
-        return None
+        call = _split_operation_call(query)
+        if call is None:
+            return None
+        operation_name, arguments = call
+        variable = arguments[1] if len(arguments) > 1 else None
+        return _operation_request(operation_name, arguments, variable)
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
         return None
     operation_name = node.func.id.lower()
@@ -740,52 +760,109 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
     if node.keywords:
         raise InterpretationError("symbolic operation calls do not accept keyword arguments")
     args = node.args
+    arguments = [ast.unparse(argument) for argument in args]
+    variable = args[1].id if len(args) > 1 and isinstance(args[1], ast.Name) else None
+    return _operation_request(operation_name, arguments, variable)
 
-    def expression_at(index: int) -> str:
-        if index >= len(args):
-            raise InterpretationError(f"{operation_name} has too few arguments")
-        return ast.unparse(args[index])
 
+def _operation_request(
+    operation_name: str,
+    arguments: list[str],
+    variable: str | None,
+) -> SymbolicRequest | None:
+    aliases = {
+        "simplify": "simplify", "differentiate": "differentiate", "diff": "differentiate",
+        "integrate": "integrate", "integral": "integrate", "solve": "solve",
+        "identity": "identity",
+    }
+    operation = aliases.get(operation_name.lower())
+    if operation is None:
+        return None
     if operation == "simplify":
-        if len(args) != 1:
+        if len(arguments) != 1:
             raise InterpretationError("simplify requires exactly one expression")
-        return SymbolicRequest(
-            operation="simplify",
-            expression=expression_at(0),
-            time_limit_seconds=5,
-        )
+        return SymbolicRequest(operation="simplify", expression=arguments[0], time_limit_seconds=5)
     if operation == "identity":
-        if len(args) != 2:
+        if len(arguments) != 2:
             raise InterpretationError("identity requires exactly two expressions")
         return SymbolicRequest(
-            operation="identity",
-            lhs=expression_at(0),
-            rhs=expression_at(1),
-            time_limit_seconds=5,
+            operation="identity", lhs=arguments[0], rhs=arguments[1], time_limit_seconds=5
         )
     if operation in {"differentiate", "solve"}:
-        if len(args) != 2 or not isinstance(args[1], ast.Name):
+        if len(arguments) != 2 or variable is None or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", variable):
             raise InterpretationError(f"{operation_name} requires an expression and a variable name")
         return SymbolicRequest(
             operation=operation,
-            expression=expression_at(0),
-            variable=args[1].id,
+            expression=arguments[0],
+            variable=variable,
             time_limit_seconds=5,
         )
-    if len(args) not in {2, 4} or not isinstance(args[1], ast.Name):
+    if len(arguments) not in {2, 4} or variable is None or not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
+    ):
         raise InterpretationError(
             "integrate requires expression and variable, with optional lower and upper bounds"
         )
-    lower = expression_at(2) if len(args) == 4 else None
-    upper = expression_at(3) if len(args) == 4 else None
     return SymbolicRequest(
         operation="integrate",
-        expression=expression_at(0),
-        variable=args[1].id,
-        lower=lower,
-        upper=upper,
+        expression=arguments[0],
+        variable=variable,
+        lower=arguments[2] if len(arguments) == 4 else None,
+        upper=arguments[3] if len(arguments) == 4 else None,
         time_limit_seconds=5,
     )
+
+
+def _split_operation_call(query: str) -> tuple[str, list[str]] | None:
+    match = re.match(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*\(", query)
+    if match is None:
+        return None
+    opening_index = query.find("(", match.start(1) + len(match.group(1)))
+    if opening_index < 0:
+        return None
+    arguments: list[str] = []
+    start = opening_index + 1
+    stack = [")"]
+    xml_depth = 0
+    index = start
+    while index < len(query):
+        character = query[index]
+        if character == "<":
+            tag_end = query.find(">", index + 1)
+            if tag_end >= 0:
+                tag = query[index + 1:tag_end].strip()
+                if tag.startswith("/"):
+                    xml_depth = max(0, xml_depth - 1)
+                elif tag and not tag.endswith("/") and not tag.startswith(("!", "?")):
+                    xml_depth += 1
+                index = tag_end + 1
+                continue
+        if xml_depth > 0:
+            index += 1
+            continue
+        if character in "([{":
+            stack.append({"(": ")", "[": "]", "{": "}"}[character])
+        elif character in ")]}":
+            if not stack or character != stack[-1]:
+                return None
+            stack.pop()
+            if not stack:
+                if query[index + 1:].strip():
+                    return None
+                final = query[start:index].strip()
+                if final:
+                    arguments.append(final)
+                elif arguments:
+                    return None
+                return match.group(1).lower(), arguments
+        elif character == "," and len(stack) == 1 and xml_depth == 0:
+            argument = query[start:index].strip()
+            if not argument:
+                return None
+            arguments.append(argument)
+            start = index + 1
+        index += 1
+    return None
 
 
 def query_error(
@@ -1089,6 +1166,7 @@ def _render_wolfram_node(node: ast.AST) -> str:
             "asin": "ArcSin", "acos": "ArcCos", "atan": "ArcTan",
             "sinh": "Sinh", "cosh": "Cosh", "tanh": "Tanh",
             "exp": "Exp", "log": "Log", "sqrt": "Sqrt",
+            "root": "Surd",
             "Abs": "Abs", "abs": "Abs", "floor": "Floor", "ceiling": "Ceiling",
         }
         function = functions.get(node.func.id)

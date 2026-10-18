@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .input_syntax import MathInputError, parse_math_input
 from .symbolic import SymbolicRequest, run_symbolic
 
 
@@ -60,6 +61,13 @@ def query_with_interpretations(
         raise InterpretationError("input must contain 1 to 4000 characters")
 
     parsing_started = perf_counter()
+    source_query = query
+    try:
+        parsed_input = parse_math_input(query)
+    except MathInputError as exc:
+        raise InterpretationError(str(exc)) from exc
+    query = parsed_input.expression
+
     registry = assumption_registry()
     by_id = {item["id"]: item for item in registry["assumptions"]}
     trig = _TRIG_QUERY.fullmatch(query)
@@ -213,7 +221,7 @@ def query_with_interpretations(
             result = symbolic.get("result")
 
     return {
-        "input": query,
+        "input": source_query,
         "outcome": outcome,
         "parse_timing": parse_timing,
         "assumptions": assumption_payload,
@@ -222,6 +230,7 @@ def query_with_interpretations(
             "typed_ast": typed_ast,
             "expression": expression,
             "solver_route": "sympy",
+            **({"input_format": parsed_input.input_format} if parsed_input.input_format != "native" else {}),
         },
         "classification": classifier,
         "result": result,

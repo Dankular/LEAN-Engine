@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, model_validator
 
+from .input_syntax import MathInputError, parse_math_input
 from .models import StrictModel
 
 
@@ -70,14 +71,19 @@ class SymbolicInputError(ValueError):
 def run_symbolic(request: SymbolicRequest) -> dict[str, object]:
     """Evaluate in a child process so a slow symbolic operation can be terminated."""
     command = [sys.executable, "-m", "leanproof_service.symbolic", "--symbolic-worker"]
+    child_environment = os.environ.copy()
+    child_environment["PYTHONIOENCODING"] = "utf-8"
     try:
         process = subprocess.run(
             command,
             input=request.model_dump_json(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=request.time_limit_seconds,
             check=False,
+            env=child_environment,
         )
     except subprocess.TimeoutExpired:
         return {"timed_out": True, "limit_seconds": request.time_limit_seconds}
@@ -209,10 +215,10 @@ class _SafeParser:
     _functions = {
         "sin": "sin", "cos": "cos", "tan": "tan", "asin": "asin", "acos": "acos",
         "atan": "atan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
-        "log": "log", "sqrt": "sqrt", "Abs": "Abs", "abs": "Abs", "floor": "floor",
+        "log": "log", "sqrt": "sqrt", "root": "root", "Abs": "Abs", "abs": "Abs", "floor": "floor",
         "ceiling": "ceiling",
     }
-    _constants = {"pi": "pi", "E": "E", "I": "I"}
+    _constants = {"pi": "pi", "E": "E", "I": "I", "oo": "oo"}
     _identifier = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
 
     def __init__(self, sympy: object, symbols: dict[str, object]) -> None:
@@ -223,6 +229,10 @@ class _SafeParser:
     def parse(self, source: str) -> object:
         if not source or len(source) > 4000:
             raise SymbolicInputError("expression must contain 1 to 4000 characters")
+        try:
+            source = parse_math_input(source).expression
+        except MathInputError as exc:
+            raise SymbolicInputError(str(exc)) from exc
         try:
             tree = ast.parse(source, mode="eval")
         except SyntaxError as exc:
@@ -258,6 +268,10 @@ class _SafeParser:
             value = self._visit(node.operand, depth + 1)
             return value if isinstance(node.op, ast.UAdd) else -value
         if isinstance(node, ast.BinOp):
+            if isinstance(node.op, ast.Pow) and not self._valid_exponent(node.right):
+                raise SymbolicInputError(
+                    "exponents must use bounded numeric values, symbols, or basic arithmetic"
+                )
             left = self._visit(node.left, depth + 1)
             right = self._visit(node.right, depth + 1)
             if isinstance(node.op, ast.Add):
@@ -269,10 +283,6 @@ class _SafeParser:
             if isinstance(node.op, ast.Div):
                 return left / right
             if isinstance(node.op, ast.Pow):
-                if not isinstance(node.right, ast.Constant) or type(node.right.value) is not int:
-                    raise SymbolicInputError("exponents must be integer literals")
-                if abs(node.right.value) > 100:
-                    raise SymbolicInputError("exponents are limited to absolute value 100")
                 return left**right
             raise SymbolicInputError("operator is not supported")
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -281,11 +291,58 @@ class _SafeParser:
                 raise SymbolicInputError("function is not supported")
             if function_name == "log" and len(node.args) not in {1, 2}:
                 raise SymbolicInputError("log takes one or two arguments")
+            elif function_name == "root" and len(node.args) != 2:
+                raise SymbolicInputError("root takes a radicand and an integer index")
             elif function_name != "log" and len(node.args) != 1:
-                raise SymbolicInputError("function takes exactly one argument")
+                if function_name != "root":
+                    raise SymbolicInputError("function takes exactly one argument")
+            if function_name == "root":
+                index = self._integer_literal(node.args[1])
+                if index is None or index < 2 or index > 32:
+                    raise SymbolicInputError("root index must be an integer from 2 to 32")
+                radicand = self._visit(node.args[0], depth + 1)
+                return self.sp.real_root(radicand, index) if index % 2 else self.sp.root(radicand, index)
             args = [self._visit(argument, depth + 1) for argument in node.args]
             return getattr(self.sp, function_name)(*args)
         raise SymbolicInputError("expression contains an unsupported construct")
+
+    @staticmethod
+    def _integer_literal(node: ast.AST) -> int | None:
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            if isinstance(node.operand, ast.Constant) and type(node.operand.value) is int:
+                return node.operand.value if isinstance(node.op, ast.UAdd) else -node.operand.value
+        return None
+
+    @staticmethod
+    def _valid_exponent(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return _SafeParser._bounded_exponent_number(node.value)
+        if isinstance(node, ast.Name):
+            return _SafeParser._identifier.fullmatch(node.id) is not None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return _SafeParser._valid_exponent(node.operand)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            numerator, denominator = node.left, node.right
+            return (
+                isinstance(numerator, ast.Constant)
+                and _SafeParser._bounded_exponent_number(numerator.value)
+                and isinstance(denominator, ast.Constant)
+                and _SafeParser._bounded_exponent_number(denominator.value)
+                and denominator.value != 0
+            )
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult)):
+            return _SafeParser._valid_exponent(node.left) and _SafeParser._valid_exponent(node.right)
+        return False
+
+    @staticmethod
+    def _bounded_exponent_number(value: object) -> bool:
+        if type(value) is int:
+            return abs(value) <= 100
+        if type(value) is float:
+            return math.isfinite(value) and abs(value) <= 100
+        return False
 
 
 def _symbolic_worker() -> None:

@@ -10,7 +10,7 @@ A service for LLM clients that separates symbolic computation, constraint solvin
 - Assumptions are conjoined. Declared free variables are universally quantified.
 - Z3 counterexamples are replayed with exact Python integer/rational arithmetic.
 - `verified` is returned only after Lean compiles the generated theorem and its axiom audit passes.
-- SymPy 1.14 provides bounded simplify, differentiate, integrate, solve, and identity operations over a safe expression grammar.
+- SymPy 1.14 provides bounded simplify, differentiate, integrate, solve, and identity operations over a safe expression grammar. Mathematical expressions accept native syntax, a bounded presentation-LaTeX subset, or a bounded presentation-MathML subset.
 - Factual retrieval adapters cover Wikidata entity search/records, individual DBnomics series, a pinned CODATA 2022 constants subset, GeoNames place search, and current Open-Meteo weather.
 - Retrieved facts carry provider and retrieval-time metadata; they are never labeled as formal proofs.
 - Nonlinear Lean proof generation, arbitrary Lean code, natural-language formalization, persistence, and async jobs are not implemented.
@@ -88,7 +88,7 @@ Use `/v1/counterexample` to run bounded counterexample search without invoking L
 
 ## Symbolic mathematics
 
-`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are parse-only `validate`, `simplify`, `differentiate`, `integrate`, `solve` (for an expression equal to zero), and `identity`. The expression grammar accepts numeric literals, named symbols, `+ - * / **`, and a small allowlist of functions such as `sin`, `cos`, `sqrt`, `log`, and `exp`. It does not evaluate Python code.
+`POST /v1/symbolic` runs SymPy 1.14.0 in a time-limited child process. Supported operations are parse-only `validate`, `simplify`, `differentiate`, `integrate`, `solve` (for an expression equal to zero), and `identity`. Expressions accept native syntax plus a bounded presentation-LaTeX subset (fractions, roots, powers, simple symbol subscripts, common functions, Greek symbols, and degree notation) and a bounded presentation-MathML subset (identifiers, numbers, fractions, powers, roots, simple symbol subscripts, fenced expressions, and common functions). Inputs are limited to 4,000 characters, 256 tokens or MathML nodes, and 32 nesting levels. The parser rejects unsupported commands, MathML elements, declarations, and constructs; it does not evaluate Python code or arbitrary LaTeX/Content MathML.
 
 ```json
 {
@@ -132,7 +132,7 @@ The Wolfram|Alpha Full Results API reference is saved as [HTML](WolframAlpha-API
 
 ## Full Results-style computation API
 
-`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner supports the safe symbolic expression grammar described below, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
+`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner accepts native formulas and the bounded presentation-LaTeX or MathML subsets described above, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
 
 ```bash
 curl -G http://127.0.0.1:8000/v2/query \
@@ -146,6 +146,8 @@ The first pod is the interpreted input and the `Result` pod contains the symboli
 Finite non-integer numeric results also include a `DecimalApproximation` pod, with a default precision of 50 digits and discoverable `More digits` states. Resubmit the returned state input to `podstate`; repeated values or an `n@` prefix apply multiple precision steps, up to 500 digits. For example, `podstate=2@DecimalApproximation__More digits` requests 200 digits. These states apply to mathematical numeric results, not retrieved data or subpods.
 
 For example, `input=differentiate(x**2, x)` produces `2*x`, while `input=integrate(x, x, 0, 1)` produces `1/2`. These are explicit computation forms, not natural-language interpretation.
+
+For example, `input=\frac{1}{2}`, `input=\sin\left(\frac{\pi}{6}\right)`, and presentation MathML `<math>` expressions are normalized into the same bounded symbolic grammar. `GET /v2/validatequery` accepts these input forms too. The supported subset is listed by `/v1/capabilities`; successful parsing is not a Lean proof.
 
 The same planner routes explicit source-backed data queries to the existing providers: `what is the speed of light?` or `constant: planck_constant` uses the bundled NIST CODATA subset; `weather in London` or `input=weather&location=London` uses Open-Meteo; `entity: France` searches Wikidata; `place: Paris` searches GeoNames; and `series: ECB/EXR/A.ARS.EUR.SP00.A` retrieves a DBnomics series. GeoNames requires `GEONAMES_USERNAME`. Weather can also use `latlong=51.5072,-0.1276` and `units=metric` or `units=nonmetric`; nonmetric weather uses Fahrenheit, miles per hour, and inches. The JSON/XML result contains a Data pod, provider source metadata (including license or attribution fields where provided), retrieval time, and `retrieved_source_data` evidence. These explicit patterns are an initial routing slice; they do not imply general natural-language coverage. See the [DBnomics Web API documentation](https://docs.db.nomics.world/web-api/) for its series endpoint and source-specific reuse terms, and the [Open-Meteo API documentation](https://open-meteo.com/en/docs) for weather units and supported variables.
 

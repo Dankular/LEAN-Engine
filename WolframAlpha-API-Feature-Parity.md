@@ -27,7 +27,7 @@ Wolfram documents the Full Results API as a GET service with `appid` and `input`
 | `POST /v1/knowledge/query` | Explicit Wikidata, DBnomics, CODATA subset, GeoNames, and Open-Meteo operations | Provider adapters; `/v2/query` wraps explicit weather, CODATA, Wikidata entity, GeoNames place, and DBnomics series requests as source-backed pods |
 | `POST /api/cag/v1/WolframLanguageCompute` | Small allowlisted expressions checked by Lean | Separate Wolfram Language Compute-shaped endpoint; not Full Results API compatibility |
 
-The current interpretation endpoint and assumption slice are described in [README.md](README.md#candidate-meanings-and-assumptions), while supported operations and factual providers are listed in [features.json](features.json).
+The current interpretation endpoint, accepted symbolic input formats, and assumption slice are described in [README.md](README.md#symbolic-mathematics) and [README.md](README.md#candidate-meanings-and-assumptions), while supported operations and factual providers are listed in [features.json](features.json).
 
 ## Full Results API feature inventory
 
@@ -36,7 +36,7 @@ The documented parameter groups are:
 | Group | Parameters or behavior | Current project status | Priority |
 |---|---|---|---|
 | Request and identity | `input`, `appid`, URL encoding; GET `/v2/query` | `input` and URL encoding; service bearer auth is used instead of an `appid` query credential; no Wolfram credential is accepted | P0 |
-| Input syntax | Free-form text; math input may use presentation LaTeX or MathML | Safe Python-like expressions plus explicit simplify/differentiate/integrate/solve/identity calls; no general natural-language, LaTeX, or MathML parser | P0/P3 |
+| Input syntax | Free-form text; math input may use presentation LaTeX or MathML | Safe native expressions plus bounded presentation-LaTeX and presentation-MathML subsets, then explicit simplify/differentiate/integrate/solve/identity calls; natural-language scanning and general TeX/MathML remain unsupported | P0/P3 |
 | Result envelope | `output=xml/json`; query-level status and metadata such as `success`, `error`, `numpods`, `datatypes`, timing, timeouts, version, and recalculation information | XML and JSON `queryresult` envelopes with core metadata, timing, and stable query IDs; stage-specific timing and recalculation are not implemented | P0 |
 | Pod model | Ordered pods with `id`, `title`, `scanner`, `position`, `primary`, per-pod error, subpods, and supplemental elements | Input, Result, and selected Data pods use the documented core fields; source records and retrieved data are exposed as additive elements; broad supplemental families remain absent | P0 |
 | Pod selection | `includepodid`, `excludepodid`, `podtitle` (including `*`), `podindex`, `scanner`; repeated values supported | Implemented over locally generated math and provider pods; repeated and comma-separated values accepted | P1 |
@@ -78,7 +78,7 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 ### P2 — presentation, locality, and execution control
 
-1. Add plaintext and MathML first; then image/plot URLs, image maps, Wolfram-input/output-like text, cell-like render payloads, and audio only where a local backend can produce them safely.
+1. Extend the bounded presentation-LaTeX and MathML parsers against Wolfram's accepted mathematical inputs, then improve plaintext and MathML rendering; add image/plot URLs, image maps, Wolfram-input/output-like text, cell-like render payloads, and audio only where a local backend can produce them safely.
 2. Add location and preferred units as request context. Make IP-derived location opt-in and avoid retaining the caller's IP.
 3. **Initial slice:** return and accept `DecimalApproximation__More digits` / `Fewer digits` state inputs, including repeated values and `n@` shorthand. Extend states to other mathematical and data pods, subpod states, and stateful paging.
 4. Add per-operation time budgets, partial asynchronous jobs, polling, and a recalculation/resume contract. A single request wall timeout is not equivalent to WA's scan/format stage controls.
