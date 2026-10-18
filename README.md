@@ -151,7 +151,7 @@ The same planner routes explicit source-backed data queries to the existing prov
 
 ## Candidate meanings and assumptions
 
-`GET /v1/interpret?input=sin%2830%29` returns the project-specific interpretation detail response. It parses the supported expression, generates typed assumption alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. The Full Results-style `/v2/query` route exposes the same candidates inside its result envelope. `GET /v2/assumptions` returns the service-owned registry (currently version 1.1.0), covering angle units for bare numeric `sin`/`cos`/`tan` and base e versus base 10 for a bare `log(number)`.
+`GET /v1/interpret?input=sin%2830%29` returns the project-specific interpretation detail response. It parses the supported expression, generates typed assumption alternatives, ranks them, validates the selected registry ID, and routes the resolved expression to SymPy. The Full Results-style `/v2/query` route exposes the same candidates inside its result envelope. A formula can contain both bare numeric trig calls and bare `log(number)` calls; one `AngleUnit` and one `LogBase` choice apply independently to every matching call of that family. `GET /v2/assumptions` returns the service-owned registry (currently version 1.1.0), covering angle units for bare numeric `sin`/`cos`/`tan` and base e versus base 10 for bare `log(number)` calls.
 
 ```bash
 curl -G http://127.0.0.1:8000/v1/interpret \
