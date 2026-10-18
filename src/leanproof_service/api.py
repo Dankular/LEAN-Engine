@@ -305,7 +305,7 @@ def capabilities() -> dict[str, object]:
                         "indefinite antiderivatives using sin, cos, exp, sinh, and cosh when SymPy returns a supported expression",
                         "polynomial identities expressed as a difference",
                         "indefinite polynomial antiderivatives",
-                        "definite integral of x with integer bounds",
+                        "definite integrals of supported expressions with exact rational bounds",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
@@ -379,7 +379,7 @@ def capabilities() -> dict[str, object]:
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
                     "D for bounded polynomial or supported real-function differentiation",
-                    "Integrate for bounded polynomial or supported real-function antiderivatives",
+                    "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                 ],
                 "polynomial_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
@@ -402,6 +402,12 @@ def capabilities() -> dict[str, object]:
                     "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
                     "limits": "bounded exact expressions with rational constant denominators; function integrals are accepted only when SymPy returns a result in this grammar",
                 },
+                "definite_integral": {
+                    "syntax": "Integrate[expression, {variable, lower, upper}]",
+                    "proof": "Lean-checked antiderivative plus the interval fundamental theorem of calculus; axiom audit",
+                    "bounds": "exact rational numeric expressions",
+                    "limits": "bounded real-calculus grammar; functions require an antiderivative and result representable by this grammar; other free variables are real parameters",
+                },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^ with integer exponent 0–16"],
                     "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
@@ -411,7 +417,7 @@ def capabilities() -> dict[str, object]:
                     "unsupported_examples": ["variable denominators", "Tan", "Log", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
-                    "Sin[Pi]", "TrigExpand@Sin[2x]", "Integrate[x, {x, integer, integer}]"
+                    "Sin[Pi]", "TrigExpand@Sin[2x]"
                 ],
                 "proof_status": "each returned result is compiled and axiom-audited by Lean",
             },

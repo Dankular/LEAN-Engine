@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
+from time import monotonic
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,31 +64,20 @@ theorem wolfram_language_compute (x : ℝ) :
 """
         return Computation("2*Cos[x]*Sin[x]", source)
 
-    match = re.fullmatch(
-        r"\s*Integrate\s*\[\s*x\s*,\s*\{\s*x\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*\]\s*",
+    definite_integral = re.fullmatch(
+        r"(?is)\s*Integrate\s*\[\s*(?P<expression>.+?)\s*,\s*"
+        r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
+        r"(?P<lower>[^,{}]+?)\s*,\s*(?P<upper>[^,{}]+?)\s*\}\s*\]\s*",
         code,
     )
-    if match:
-        lower, upper = (int(value) for value in match.groups())
-        if max(abs(lower).bit_length(), abs(upper).bit_length()) > 256:
-            return None
-        exact_value = Fraction(upper * upper - lower * lower, 2)
-        rendered_value = str(exact_value.numerator)
-        if exact_value.denominator != 1:
-            rendered_value += f"/{exact_value.denominator}"
-        lean_lower = f"({lower} : ℝ)"
-        lean_upper = f"({upper} : ℝ)"
-        lean_value = _lean_rational(exact_value)
-        source = f"""import Mathlib.MeasureTheory.Integral.IntervalIntegral.Basic
-import Mathlib.Tactic.NormNum
-
-theorem wolfram_language_compute :
-    (∫ x in {lean_lower}..{lean_upper}, x) = {lean_value} := by
-  norm_num [intervalIntegral.integral_id]
-
-#print axioms wolfram_language_compute
-"""
-        return Computation(rendered_value, source)
+    if definite_integral is not None:
+        return _prepare_definite_real_integral(
+            definite_integral.group("expression"),
+            definite_integral.group("variable"),
+            definite_integral.group("lower"),
+            definite_integral.group("upper"),
+            time_limit_seconds,
+        )
 
     indefinite_integral = re.fullmatch(
         r"(?is)\s*Integrate\s*\[\s*(?P<expression>.*),\s*"
@@ -113,6 +103,175 @@ theorem wolfram_language_compute :
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_definite_real_integral(
+    expression_source: str,
+    variable: str,
+    lower_source: str,
+    upper_source: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+        integrand_lean, integrand_symbols = _render_real_calculus_lean(parsed.expression)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if integrand_lean is None:
+        return None
+
+    lower = _parse_exact_rational(lower_source)
+    upper = _parse_exact_rational(upper_source)
+    if lower is None or upper is None:
+        return None
+
+    symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="integrate",
+        expression=parsed.expression,
+        variable=variable,
+        time_limit_seconds=max(0.001, min(symbolic_deadline - monotonic(), 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no antiderivative"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    antiderivative = symbolic["result"]
+    try:
+        antiderivative_tree = ast.parse(antiderivative, mode="eval")
+        antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(antiderivative)
+    except (ValueError, SyntaxError, RecursionError):
+        return None
+    if antiderivative_lean is None:
+        return None
+
+    remaining_symbolic_time = symbolic_deadline - monotonic()
+    if remaining_symbolic_time <= 0.001:
+        return Computation("", "", timed_out=True)
+    definite_symbolic = run_symbolic(SymbolicRequest(
+        operation="integrate",
+        expression=parsed.expression,
+        variable=variable,
+        lower=_fraction_text(lower),
+        upper=_fraction_text(upper),
+        time_limit_seconds=max(0.001, min(remaining_symbolic_time, 60.0)),
+    ))
+    if definite_symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if definite_symbolic.get("error") or not isinstance(definite_symbolic.get("result"), str):
+        diagnostic = definite_symbolic.get("diagnostics") or definite_symbolic.get("error") or (
+            "Symbolic worker returned no definite integral"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+    definite_result = definite_symbolic["result"]
+    try:
+        definite_result_lean, definite_result_symbols = _render_real_calculus_lean(definite_result)
+    except (ValueError, SyntaxError, RecursionError):
+        return None
+    if definite_result_lean is None:
+        return None
+
+    symbol_names = integrand_symbols | antiderivative_symbols | definite_result_symbols
+
+    def fresh_name(base: str, used_names: set[str]) -> str:
+        name = base
+        suffix = 0
+        while name in used_names:
+            suffix += 1
+            name = f"{base}{suffix}"
+        used_names.add(name)
+        return name
+
+    used_names = set(symbol_names)
+    integration_variable = fresh_name("integral_var", used_names)
+    point_variable = fresh_name("integral_point", used_names)
+    function_variable = fresh_name("deriv_var", used_names)
+
+    integrand_at_integral_var = _render_real_calculus_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: integration_variable},
+    )
+    integrand_at_point = _render_real_calculus_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: point_variable},
+    )
+    antiderivative_at_integral_var = _render_real_calculus_node(
+        antiderivative_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: integration_variable},
+    )
+    proof = _derivative_proof_term(
+        antiderivative_tree.body,
+        variable,
+        function_variable,
+        point_variable,
+        {"nodes": 0},
+        0,
+    )
+    if (
+        integrand_at_integral_var is None
+        or integrand_at_point is None
+        or antiderivative_at_integral_var is None
+        or proof is None
+    ):
+        return None
+
+    binders = " ".join(
+        f"({name} : ℝ)" for name in sorted(symbol_names - {variable})
+    )
+    theorem_binders = f" {binders}" if binders else ""
+    lean_lower = _lean_rational(lower)
+    lean_upper = _lean_rational(upper)
+    source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
+import Mathlib.MeasureTheory.Integral.IntervalIntegral.FundThmCalculus
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.FunProp
+import Mathlib.Tactic.NormNum
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    (∫ {integration_variable} in {lean_lower}..{lean_upper}, {integrand_at_integral_var}) = {definite_result_lean} := by
+  let F : ℝ → ℝ := fun {integration_variable} : ℝ => {antiderivative_at_integral_var}
+  have hderiv : ∀ {point_variable} ∈ Set.uIcc {lean_lower} {lean_upper},
+      HasDerivAt F {integrand_at_point} {point_variable} := by
+    intro {point_variable} hpoint
+    convert ({proof}) using 1
+    · ext {function_variable}
+      simp [F, id_eq] <;> ring
+    · simp [F, id_eq] <;> field_simp <;> ring
+  have hint : IntervalIntegrable
+      (fun {integration_variable} : ℝ => {integrand_at_integral_var})
+      MeasureTheory.volume {lean_lower} {lean_upper} := by
+    apply Continuous.intervalIntegrable
+    fun_prop
+  rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
+  norm_num [F] <;> field_simp <;> ring
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(definite_result.replace("**", "^"), source)
 
 
 def _prepare_real_antiderivative(
@@ -623,6 +782,24 @@ def _constant_fraction(node: ast.AST) -> Fraction | None:
     if value.numerator.bit_length() > 4096 or value.denominator.bit_length() > 4096:
         return None
     return value
+
+
+def _parse_exact_rational(source: str) -> Fraction | None:
+    exact_source = _normalize_decimal_literals(source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    return _constant_fraction(tree.body)
+
+
+def _fraction_text(value: Fraction) -> str:
+    if value.denominator == 1:
+        return str(value.numerator)
+    return f"{value.numerator}/{value.denominator}"
 
 
 def _lean_fraction(value: Fraction) -> str:

@@ -707,14 +707,11 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
         request.operation == "integrate"
         and request.expression is not None
         and request.variable is not None
-        and request.expression.strip() == request.variable
         and request.lower is not None
         and request.upper is not None
-        and _bounded_integer_literal(request.lower) is not None
-        and _bounded_integer_literal(request.upper) is not None
     ):
         return (
-            f"Integrate[{request.variable}, "
+            f"Integrate[{request.expression}, "
             f"{{{request.variable}, {request.lower}, {request.upper}}}]"
         )
     if (
