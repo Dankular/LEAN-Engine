@@ -18,6 +18,7 @@ from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
     InterpretationTimeout,
+    numeric_date_options,
     query_with_interpretations,
 )
 from .input_syntax import MathInputError, parse_math_input
@@ -111,6 +112,8 @@ def async_pod_descriptor(
     except ProviderContextNeeded:
         return "Result", "Result", "Mathematical"
     if request is None:
+        if numeric_date_options(input_text) is not None:
+            return "Date", "Result", "Date"
         return "Result", "Result", "Mathematical"
     return {
         "open_meteo": ("Current weather", "Weather", "Data"),
@@ -261,9 +264,12 @@ def execute_query(
     expression = interpreted["interpretation"]["expression"]
     typed_ast = interpreted["interpretation"].get("typed_ast", {})
     is_typed_quantity = interpreted["interpretation"].get("kind") == "typed_quantity"
+    is_typed_date = interpreted["interpretation"].get("kind") == "typed_date"
     input_display = (
         f"{typed_ast['magnitude']} {typed_ast['unit']}"
         if is_typed_quantity
+        else typed_ast.get("input", expression)
+        if is_typed_date
         else expression
     )
     if interpreted.get("outcome") == "computed":
@@ -304,11 +310,18 @@ def execute_query(
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
     quantity_expression = _wolfram_quantity(typed_ast) if is_typed_quantity else None
-    input_minput = quantity_expression if is_typed_quantity else _wolfram_input_for_query(
-        expression,
-        symbolic_request,
-        is_explicit_operation=(interpreted["interpretation"].get("kind") == "typed_symbolic_operation"),
-    )
+    if is_typed_quantity:
+        input_minput = quantity_expression
+    elif is_typed_date:
+        input_minput = expression
+    else:
+        input_minput = _wolfram_input_for_query(
+            expression,
+            symbolic_request,
+            is_explicit_operation=(
+                interpreted["interpretation"].get("kind") == "typed_symbolic_operation"
+            ),
+        )
     pods = _initial_pods(
         input_text,
         input_display,
@@ -372,8 +385,13 @@ def execute_query(
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
         result_moutput=(
-            quantity_expression if is_typed_quantity else _wolfram_value(symbolic.get("result"))
+            quantity_expression
+            if is_typed_quantity
+            else expression
+            if is_typed_date
+            else _wolfram_value(symbolic.get("result"))
         ),
+        result_scanner="Date" if is_typed_date else "Mathematical",
         numeric_approximation=numeric_approximation,
         decimal_state_level=decimal_state_level,
     )
@@ -386,7 +404,7 @@ def execute_query(
         pods=filtered,
         elapsed=elapsed,
         parse_timing=parse_timing,
-        datatypes="Mathematical",
+        datatypes="Date" if is_typed_date else "Mathematical",
         warnings=warnings,
         assumptions=interpreted["assumptions"],
         interpretation=interpreted["interpretation"],
@@ -394,7 +412,9 @@ def execute_query(
         evidence=symbolic.get("evidence", {
             "kind": "symbolic_result", "engine": "sympy", "verified": False
         }),
-        qualification="Symbolic computation is not a Lean proof.",
+        qualification=interpreted.get(
+            "qualification", "Symbolic computation is not a Lean proof."
+        ),
     )
     payload["queryresult"]["input"] = input_text
     return payload
@@ -1299,6 +1319,7 @@ def _initial_pods(
     result_mathml: str | None = None,
     input_minput: str | None = None,
     result_moutput: str | None = None,
+    result_scanner: str = "Mathematical",
     numeric_approximation: dict[str, Any] | None = None,
     decimal_state_level: int = 0,
 ) -> list[dict[str, Any]]:
@@ -1330,7 +1351,7 @@ def _initial_pods(
         },
         {
             "title": "Result",
-            "scanner": "Mathematical",
+            "scanner": result_scanner,
             "id": "Result",
             "position": 200,
             "error": False,

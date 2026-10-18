@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+from datetime import date
 from time import perf_counter
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +24,9 @@ _TRIG_LITERAL = re.compile(r"^\s*(sin|cos|tan)\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+)
 _LOG_LITERAL = re.compile(r"^\s*log\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$", re.I)
 _NUMBER_PATTERN = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
 _UNIT_LITERAL = re.compile(rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>m)\s*$")
+_NUMERIC_DATE = re.compile(
+    r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
+)
 _TRIG_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<function>sin|cos|tan)\s*\(\s*"
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<degree_mark>\u00b0)?\s*\)"
@@ -74,6 +78,15 @@ def query_with_interpretations(
 
     parsing_started = perf_counter()
     source_query = query
+    date_input = numeric_date_options(source_query)
+    if date_input is not None:
+        return _interpret_numeric_date(
+            source_query,
+            date_input,
+            selections,
+            compute=compute,
+            parse_timing=perf_counter() - parsing_started,
+        )
     try:
         parsed_input = parse_math_input(query)
     except MathInputError as exc:
@@ -306,6 +319,155 @@ def query_with_interpretations(
         }),
         "qualification": "Candidate ranking and symbolic computation are not formal proof.",
     }
+
+
+def numeric_date_options(query: str) -> list[dict[str, Any]] | None:
+    """Return valid month/day/year and day/month/year readings for a numeric date."""
+    match = _NUMERIC_DATE.fullmatch(query)
+    if match is None:
+        return None
+    first = int(match.group("first"))
+    second = int(match.group("second"))
+    year = int(match.group("year"))
+    options: list[dict[str, Any]] = []
+    for assumption_id, input_order, month, day in (
+        ("date:month-day-year", "month/day/year", first, second),
+        ("date:day-month-year", "day/month/year", second, first),
+    ):
+        try:
+            parsed_date = date(year, month, day)
+        except ValueError:
+            continue
+        options.append({
+            "assumption_id": assumption_id,
+            "input_order": input_order,
+            "year": parsed_date.year,
+            "month": parsed_date.month,
+            "day": parsed_date.day,
+            "iso_date": parsed_date.isoformat(),
+            "display": f"{parsed_date.strftime('%B')} {parsed_date.day}, {parsed_date.year}",
+        })
+    return options or None
+
+
+def _interpret_numeric_date(
+    source_query: str,
+    options: list[dict[str, Any]],
+    selections: list[str],
+    *,
+    compute: bool,
+    parse_timing: float,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    by_id = {item["id"]: item for item in registry["assumptions"]}
+    candidate_options = [item for item in options if item["assumption_id"] in by_id]
+    if len(candidate_options) != len(options):
+        raise RuntimeError("assumption registry is missing a valid DateOrder value")
+    candidate_ids = {item["assumption_id"] for item in candidate_options}
+
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    selected_items: list[dict[str, Any]] = []
+    for selection in selections:
+        if selection not in by_id:
+            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+        if selection not in candidate_ids:
+            raise AssumptionSelectionError(f"assumption {selection} is incompatible with this input")
+        selected_items.append(by_id[selection])
+    if len(selected_items) > 1:
+        raise AssumptionSelectionError("select at most one assumption value for DateOrder")
+
+    if selected_items:
+        chosen_id = selected_items[0]["id"]
+        selection_source = "caller_override"
+    elif len(candidate_options) == 1:
+        chosen_id = candidate_options[0]["assumption_id"]
+        selection_source = "unambiguous_input"
+    else:
+        default = next(
+            (
+                item for item in candidate_options
+                if by_id[item["assumption_id"]].get("service_default")
+            ),
+            None,
+        )
+        if default is None:
+            raise RuntimeError("DateOrder registry has no service default")
+        chosen_id = default["assumption_id"]
+        selection_source = "service_default"
+    chosen = next(item for item in candidate_options if item["assumption_id"] == chosen_id)
+
+    assumption_payload: list[dict[str, Any]] = []
+    if len(candidate_options) > 1:
+        assumption_payload = [{
+            "type": "DateOrder",
+            "selected": chosen_id,
+            "selection_source": selection_source,
+            "registry_version": registry["registry_version"],
+            "values": [
+                {
+                    "input": item["assumption_id"],
+                    "desc": by_id[item["assumption_id"]]["description"],
+                    "entry_version": by_id[item["assumption_id"]]["entry_version"],
+                }
+                for item in candidate_options
+            ],
+        }]
+
+    typed_ast = {
+        "node": "date",
+        "calendar": "gregorian",
+        "input": source_query.strip(),
+        "input_order": chosen["input_order"],
+        "year": chosen["year"],
+        "month": chosen["month"],
+        "day": chosen["day"],
+        "iso_date": chosen["iso_date"],
+        "display": chosen["display"],
+    }
+    classifier = {
+        "name": "deterministic_lexical_baseline",
+        "method": "neutral ranking for valid numeric date orders",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [
+            {"input": item["assumption_id"], "score": 0.5}
+            for item in candidate_options
+        ],
+    }
+    date_object = f"DateObject[{{{chosen['year']}, {chosen['month']}, {chosen['day']}}}]"
+    return {
+        "input": source_query,
+        "outcome": "computed" if compute else "validated",
+        "parse_timing": parse_timing,
+        "assumptions": assumption_payload,
+        "interpretation": {
+            "kind": "typed_date",
+            "typed_ast": typed_ast,
+            "expression": date_object,
+            "solver_route": "gregorian_calendar",
+        },
+        "classification": classifier,
+        "result": chosen["display"] if compute else None,
+        "numeric_approximation": None,
+        "input_mathml": _text_mathml(source_query.strip()),
+        "result_mathml": _text_mathml(chosen["display"]) if compute else None,
+        "evidence": {
+            "kind": "deterministic_calendar_interpretation" if compute else "interpretation_only",
+            "engine": "python.datetime",
+            "verified": False,
+        },
+        "qualification": "Date parsing follows the selected service date-order interpretation; it is not a formal proof.",
+    }
+
+
+def _text_mathml(value: str) -> str:
+    return (
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><mtext>'
+        f"{html.escape(value)}"
+        "</mtext></math>"
+    )
 
 
 def _compound_interpretation(
