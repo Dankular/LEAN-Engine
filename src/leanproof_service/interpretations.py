@@ -64,6 +64,7 @@ def query_with_interpretations(
     numeric_precision: int = 50,
     time_limit_seconds: float = 5.0,
     parse_timeout_seconds: float = 5.0,
+    pod_timeout_seconds: float | None = None,
     deadline: float | None = None,
 ) -> dict[str, Any]:
     if not query or len(query) > 4000:
@@ -219,10 +220,11 @@ def query_with_interpretations(
         outcome = "validated"
         result = None
     else:
-        remaining_seconds = (
-            min(time_limit_seconds, deadline - perf_counter()) if deadline is not None
-            else time_limit_seconds
-        )
+        remaining_seconds = time_limit_seconds
+        if deadline is not None:
+            remaining_seconds = min(remaining_seconds, deadline - perf_counter())
+        if pod_timeout_seconds is not None:
+            remaining_seconds = min(remaining_seconds, pod_timeout_seconds)
         if remaining_seconds <= 0.001:
             symbolic = {"timed_out": True, "limit_seconds": max(0.0, remaining_seconds)}
             outcome = "timeout"
@@ -247,6 +249,7 @@ def query_with_interpretations(
     return {
         "input": source_query,
         "outcome": outcome,
+        **({"timeout_stage": "pod"} if outcome == "timeout" else {}),
         "parse_timing": parse_timing,
         "assumptions": assumption_payload,
         "interpretation": {

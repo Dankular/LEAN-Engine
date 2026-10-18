@@ -188,6 +188,7 @@ def execute_query(
     scanners: list[str] | None = None,
     ignorecase: bool = False,
     parse_timeout_seconds: float = 5.0,
+    pod_timeout_seconds: float = 4.0,
     total_timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
     started = perf_counter()
@@ -225,6 +226,7 @@ def execute_query(
             pod_indexes=pod_indexes,
             scanners=scanners,
             deadline=deadline,
+            pod_timeout_seconds=pod_timeout_seconds,
         )
     remaining_seconds = deadline - perf_counter()
     if remaining_seconds <= 0:
@@ -239,6 +241,7 @@ def execute_query(
             numeric_precision=numeric_precision,
             time_limit_seconds=remaining_seconds,
             parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
             deadline=deadline,
         )
     except AssumptionSelectionError:
@@ -265,19 +268,32 @@ def execute_query(
             "evidence": interpreted.get("evidence"),
         }
     elif interpreted.get("outcome") == "timeout":
-        symbolic = {"timed_out": True, "evidence": interpreted.get("evidence")}
+        symbolic = {
+            "timed_out": True,
+            "timeout_stage": "total" if deadline - perf_counter() <= 0.001 else "pod",
+            "evidence": interpreted.get("evidence"),
+        }
     else:
         remaining_seconds = deadline - perf_counter()
         if remaining_seconds <= 0:
-            symbolic = {"timed_out": True}
+            symbolic = {"timed_out": True, "timeout_stage": "total"}
         else:
+            computation_seconds = min(remaining_seconds, pod_timeout_seconds)
             symbolic = run_symbolic(symbolic_request.model_copy(update={
-                "time_limit_seconds": remaining_seconds,
+                "time_limit_seconds": computation_seconds,
             }))
+            if symbolic.get("timed_out"):
+                symbolic["timeout_stage"] = (
+                    "total" if deadline - perf_counter() <= 0.001 else "pod"
+                )
         parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
     elapsed = perf_counter() - started
     if elapsed > total_timeout_seconds and not symbolic.get("timed_out"):
-        symbolic = {"timed_out": True, "limit_seconds": total_timeout_seconds}
+        symbolic = {
+            "timed_out": True,
+            "timeout_stage": "total",
+            "limit_seconds": total_timeout_seconds,
+        }
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
     input_minput = _wolfram_input_for_query(
@@ -295,6 +311,7 @@ def execute_query(
     )
     warnings = _format_warnings(formats)
     if symbolic.get("timed_out"):
+        pod_timed_out = symbolic.get("timeout_stage") == "pod"
         payload = _query_envelope(
             success=False,
             error=False,
@@ -304,12 +321,22 @@ def execute_query(
             datatypes="Mathematical",
             timedout="Mathematical",
             timedoutpods="Result",
-            warnings=[*warnings, {"text": "The symbolic result exceeded its execution time limit."}],
+            warnings=[*warnings, {
+                "text": (
+                    "The result pod exceeded its per-pod execution time limit."
+                    if pod_timed_out
+                    else "The symbolic result exceeded its total execution time limit."
+                )
+            }],
             assumptions=interpreted["assumptions"],
             interpretation=interpreted["interpretation"],
             classification=interpreted["classification"],
             evidence={"kind": "symbolic_timeout", "engine": "sympy", "verified": False},
-            qualification="A timeout contains no result and is not a proof.",
+            qualification=(
+                "The result pod exceeded its local execution budget; this is not a proof."
+                if pod_timed_out
+                else "A timeout contains no result and is not a proof."
+            ),
         )
         payload["queryresult"]["input"] = input_text
         return filter_response_pods(
@@ -619,9 +646,11 @@ def _execute_provider_query(
     pod_indexes: list[str] | None,
     scanners: list[str] | None,
     deadline: float,
+    pod_timeout_seconds: float,
 ) -> dict[str, Any]:
+    provider_deadline = min(deadline, perf_counter() + pod_timeout_seconds)
     try:
-        knowledge = query_knowledge(request, deadline=deadline)
+        knowledge = query_knowledge(request, deadline=provider_deadline)
     except KnowledgeDeadlineExceeded:
         provider_titles = {
             "open_meteo": "Current weather",
@@ -631,6 +660,7 @@ def _execute_provider_query(
             "geonames": "Place matches",
         }
         pods = _initial_pods(input_text, input_text, None, formats)[:1]
+        pod_timed_out = deadline - perf_counter() > 0.001
         payload = _query_envelope(
             success=False,
             error=False,
@@ -638,12 +668,23 @@ def _execute_provider_query(
             elapsed=perf_counter() - started,
             parse_timing=parse_timing,
             datatypes="Data",
-            warnings=[{"text": "The data retrieval exceeded the total query time limit."}],
+            warnings=[{"text": (
+                "The data result pod exceeded its per-pod execution time limit."
+                if pod_timed_out
+                else "The data retrieval exceeded the total query time limit."
+            )}],
             assumptions=[],
             timedout="Data",
             timedoutpods=provider_titles[request.provider],
-            evidence={"kind": "provider_timeout", "provider": request.provider, "verified": False},
-            qualification="No data result was retrieved before the query deadline.",
+            evidence={
+                "kind": "provider_timeout", "provider": request.provider,
+                "timeout_stage": "pod" if pod_timed_out else "total", "verified": False,
+            },
+            qualification=(
+                "No data result was retrieved within the per-pod execution budget."
+                if pod_timed_out
+                else "No data result was retrieved before the query deadline."
+            ),
         )
         payload["queryresult"]["input"] = input_text
         return payload
@@ -810,6 +851,7 @@ def _prepare_query(
     numeric_precision: int = 50,
     time_limit_seconds: float = 5.0,
     parse_timeout_seconds: float = 5.0,
+    pod_timeout_seconds: float | None = None,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     try:
@@ -824,6 +866,7 @@ def _prepare_query(
             numeric_precision=numeric_precision,
             time_limit_seconds=time_limit_seconds,
             parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
             deadline=deadline,
         )
         expression = str(interpreted["interpretation"]["expression"])

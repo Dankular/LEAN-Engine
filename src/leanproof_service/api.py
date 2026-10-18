@@ -176,7 +176,15 @@ def capabilities() -> dict[str, object]:
                         "maximum_seconds": 30,
                         "scope": "monotonic deadline for symbolic worker execution and provider request sequences",
                     },
-                    "unsupported_stage_controls": ["scantimeout", "podtimeout", "formattimeout"],
+                    "podtimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 4,
+                        "minimum_seconds": 0.1,
+                        "maximum_seconds": 30,
+                        "scope": "per-result symbolic execution or provider retrieval budget",
+                        "format_stage_equivalent": False,
+                    },
+                    "unsupported_stage_controls": ["scantimeout", "formattimeout"],
                     "async": {
                         "status": "implemented_initial_slice",
                         "modes": ["false", "true", "numeric seconds"],
@@ -280,6 +288,7 @@ def full_results_query(
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
+    podtimeout: Annotated[float, Query(ge=0.1, le=30)] = 4.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
     async_mode: Annotated[
         str,
@@ -327,6 +336,7 @@ def full_results_query(
                 scanners=scanner,
                 ignorecase=ignorecase,
                 parse_timeout_seconds=parsetimeout,
+                pod_timeout_seconds=podtimeout,
                 total_timeout_seconds=totaltimeout,
             )
             if ignorecase:
