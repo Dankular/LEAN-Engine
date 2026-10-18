@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import sys
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from time import perf_counter
 from typing import Annotated, Literal
 
@@ -14,13 +16,25 @@ from pydantic import Field, StringConstraints, model_validator
 
 from .input_syntax import MathInputError, parse_math_input
 from .models import StrictModel
+from .physical_units import PHYSICAL_UNITS
 
 
 SymbolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,31}$")]
 AssumptionName = Literal[
     "real", "positive", "nonnegative", "negative", "nonpositive", "integer", "rational"
 ]
-UnitName = Literal["meter", "minute", "us_minim"]
+UnitName = Literal[
+    "meter", "kilometer", "centimeter", "millimeter", "mile", "foot", "inch", "yard",
+    "second", "minute", "hour", "day", "gram", "kilogram", "pound", "liter",
+    "milliliter", "hertz", "newton", "joule", "watt", "pascal", "kelvin", "degree",
+    "radian", "us_minim",
+]
+_DECIMAL_LITERAL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:(?:\d(?:_?\d)*\.\d(?:_?\d)*|"
+    r"\d(?:_?\d)*\.|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?|"
+    r"\d(?:_?\d)*[eE][+-]?\d(?:_?\d)*)"
+)
+_MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot",
@@ -40,7 +54,7 @@ class SymbolicRequest(StrictModel):
     order: int | None = Field(default=None, strict=True, ge=1, le=32)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
-    time_limit_seconds: float = Field(default=5.0, ge=0.001, le=30.0)
+    time_limit_seconds: float = Field(default=5.0, ge=0.001, le=60.0)
     numeric_precision: int = Field(default=50, ge=10, le=500)
 
     @model_validator(mode="after")
@@ -134,9 +148,13 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         for name, assumptions in request.assumptions.items()
     }
     if request.named_units:
-        from sympy.physics.units import Quantity, liter, meter, minute
+        from sympy.physics import units as sympy_units
+        from sympy.physics.units import Quantity, liter
 
-        unit_catalog: dict[str, object] = {"meter": meter, "minute": minute}
+        unit_catalog: dict[str, object] = {
+            name: getattr(sympy_units, unit.sympy_name)
+            for name, unit in PHYSICAL_UNITS.items()
+        }
         if "us_minim" in request.named_units.values():
             us_minim = Quantity("minimUS")
             us_minim.set_global_relative_scale_factor(sp.Rational("3.785411784") / 61440, liter)
@@ -495,6 +513,43 @@ def _series_data(sympy: object, series: object, variable: object, point: object,
     }
 
 
+def _normalize_decimal_literals(source: str) -> str:
+    """Replace decimal spellings with bounded exact ratios before Python parses floats."""
+    invalid = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal invalid
+        token = match.group(0).replace("_", "")
+        try:
+            decimal = Decimal(token)
+            _, digits, exponent = decimal.as_tuple()
+            if len(digits) > 1233 or abs(exponent) > 1233:
+                invalid = True
+                return match.group(0)
+            if exponent >= 0 and len(digits) + exponent > 1233:
+                invalid = True
+                return match.group(0)
+            value = Fraction(decimal)
+        except (InvalidOperation, ValueError, OverflowError):
+            invalid = True
+            return match.group(0)
+
+        if (
+            value.numerator.bit_length() > _MAX_DECIMAL_BITS
+            or value.denominator.bit_length() > _MAX_DECIMAL_BITS
+        ):
+            invalid = True
+            return match.group(0)
+        if value.denominator == 1:
+            return str(value.numerator)
+        return f"({value.numerator}/{value.denominator})"
+
+    normalized = _DECIMAL_LITERAL.sub(replace, source)
+    if invalid:
+        raise SymbolicInputError("decimal literals exceed the exact-rational size limit")
+    return normalized
+
+
 def _check_unit_dimensions(sympy: object, expression: object) -> None:
     from sympy.physics.units.util import check_dimensions
 
@@ -555,9 +610,10 @@ class _SafeParser:
             source = parse_math_input(source).expression
         except MathInputError as exc:
             raise SymbolicInputError(str(exc)) from exc
+        source = _normalize_decimal_literals(source)
         try:
             tree = ast.parse(source, mode="eval")
-        except SyntaxError as exc:
+        except (SyntaxError, RecursionError, ValueError) as exc:
             raise SymbolicInputError("expression syntax is invalid") from exc
         return self._visit(tree.body, 0)
 
@@ -572,9 +628,7 @@ class _SafeParser:
                 if abs(node.value).bit_length() > 256:
                     raise SymbolicInputError("integer literals are limited to 256 bits")
                 return self.sp.Integer(node.value)
-            if not math.isfinite(node.value):
-                raise SymbolicInputError("decimal literals must be finite")
-            return self.sp.Rational(str(node.value))
+            raise SymbolicInputError("decimal literal could not be preserved exactly")
         if isinstance(node, ast.Name):
             name = node.id
             if name in self._constants:

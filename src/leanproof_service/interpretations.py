@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from .input_syntax import MathInputError, parse_math_input
+from .physical_units import (
+    PHYSICAL_UNITS,
+    UNIT_ALIASES_BY_LENGTH,
+    UNIT_ALIAS_TO_NAME,
+)
 from .symbolic import SymbolicRequest, run_symbolic
 
 
@@ -23,7 +28,11 @@ _TRIG_QUERY = re.compile(
 _TRIG_LITERAL = re.compile(r"^\s*(sin|cos|tan)\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$", re.I)
 _LOG_LITERAL = re.compile(r"^\s*log\s*\(\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*\)\s*$", re.I)
 _NUMBER_PATTERN = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
-_UNIT_LITERAL = re.compile(rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>m)\s*$")
+_UNIT_LITERAL_NAMES = "|".join(re.escape(alias) for alias in (*UNIT_ALIASES_BY_LENGTH, "m"))
+_UNIT_LITERAL = re.compile(
+    rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>{_UNIT_LITERAL_NAMES})\s*$",
+    re.IGNORECASE,
+)
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
 )
@@ -208,12 +217,32 @@ def query_with_interpretations(
     unit_literal = _UNIT_LITERAL.fullmatch(source_query) or _UNIT_LITERAL.fullmatch(query)
     trig = _TRIG_QUERY.fullmatch(query)
     compound = None
+    explicit_typed_quantity: dict[str, Any] | None = None
     if unit_literal:
         number = unit_literal.group("number")
-        candidates = [item for item in registry["assumptions"] if item["type"] == "Unit"]
-        candidate_ids = {item["id"] for item in candidates}
+        unit_alias = unit_literal.group("unit").casefold()
+        if unit_alias == "m":
+            candidates = [item for item in registry["assumptions"] if item["type"] == "Unit"]
+            candidate_ids = {item["id"] for item in candidates}
+        else:
+            unit = PHYSICAL_UNITS[UNIT_ALIAS_TO_NAME[unit_alias]]
+            unit_symbol = f"unit_{unit.name}"
+            explicit_typed_quantity = {
+                "node": "quantity",
+                "magnitude": number,
+                "unit": unit.display,
+                "unit_symbol": unit_symbol,
+                "unit_type": unit.name,
+                "wolfram_unit": unit.wolfram_name,
+                "unit_alias": unit_alias,
+                "selection_source": "explicit_input",
+            }
+            candidates = []
+            candidate_ids = set()
+            expression = f"{number}*{unit_symbol}"
         explicit_unit = None
-        expression = query
+        if unit_alias == "m":
+            expression = query
     elif trig:
         function, number, degree_mark, unit_word = trig.groups()
         expression = f"{function.lower()}({number})"
@@ -331,6 +360,15 @@ def query_with_interpretations(
                     for item in candidates
                 ],
             }]
+        elif explicit_typed_quantity is not None:
+            typed_ast = explicit_typed_quantity
+            classifier = {
+                "name": "not_applicable",
+                "method": "explicit unit resolved from input",
+                "ranks_candidates_only": True,
+                "selection_authority": False,
+            }
+            assumption_payload = []
         else:
             typed_ast = {"node": "symbolic_expression", "source": expression}
             classifier = {

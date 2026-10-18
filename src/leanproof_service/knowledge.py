@@ -18,10 +18,11 @@ from .models import StrictModel
 class KnowledgeRequest(StrictModel):
     provider: Literal["wikidata", "dbnomics", "nist_codata", "geonames", "open_meteo"]
     operation: Literal[
-        "search", "entity", "series", "constant", "weather", "weather_forecast"
+        "search", "entity", "population", "capital", "property", "series", "constant", "weather", "weather_forecast"
     ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
+    property_id: Literal["P36", "P1082"] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
     series_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -37,7 +38,7 @@ class KnowledgeRequest(StrictModel):
     @model_validator(mode="after")
     def validate_provider_operation(self) -> KnowledgeRequest:
         expected = {
-            "wikidata": {"search", "entity"},
+            "wikidata": {"search", "entity", "population", "capital", "property"},
             "dbnomics": {"series"},
             "nist_codata": {"constant"},
             "geonames": {"search"},
@@ -46,10 +47,16 @@ class KnowledgeRequest(StrictModel):
         if self.operation not in expected[self.provider]:
             raise ValueError(f"{self.operation} is not supported by {self.provider}")
         if self.provider == "wikidata":
-            if self.operation == "search" and self.query is None:
-                raise ValueError("Wikidata search requires query")
+            if self.operation in {"search", "population", "capital", "property"} and self.query is None:
+                raise ValueError(f"Wikidata {self.operation} lookup requires query")
             if self.operation == "entity" and self.entity_id is None:
                 raise ValueError("Wikidata entity lookup requires entity_id")
+            if self.operation == "property" and self.property_id is None:
+                raise ValueError("Wikidata property lookup requires an allowlisted property_id")
+            if self.operation != "property" and self.property_id is not None:
+                raise ValueError("property_id is only used with Wikidata property lookups")
+        elif self.property_id is not None:
+            raise ValueError("property_id is only supported for Wikidata")
         elif self.provider == "dbnomics":
             if not all((self.provider_code, self.dataset_code, self.series_code)):
                 raise ValueError("DBnomics series lookup requires provider_code, dataset_code, and series_code")
@@ -166,6 +173,8 @@ def _wikidata(
         return results, {
             "name": "Wikidata entity search", "url": "https://www.wikidata.org/", "license": "CC0"
         }
+    if request.operation in {"population", "capital", "property"}:
+        return _wikidata_property(request, base, deadline)
     params = {
         "action": "wbgetentities", "ids": request.entity_id or "", "props": "labels|descriptions|claims",
         "languages": request.language, "format": "json",
@@ -176,6 +185,285 @@ def _wikidata(
     return entity, {
         "name": "Wikidata entity API", "url": "https://www.wikidata.org/", "license": "CC0"
     }
+
+
+def _wikidata_property(
+    request: KnowledgeRequest,
+    base: str,
+    deadline: float | None,
+) -> tuple[object, dict[str, str]]:
+    property_id = {
+        "population": "P1082",
+        "capital": "P36",
+        "property": request.property_id,
+    }.get(request.operation)
+    if property_id not in {"P36", "P1082"}:
+        raise KnowledgeProviderError("Wikidata property is not allowlisted", 400)
+    property_name = {"P36": "capital", "P1082": "population"}[property_id]
+    search_params = {
+        "action": "wbsearchentities",
+        "search": request.query or "",
+        "language": request.language,
+        "format": "json",
+        "type": "item",
+        "limit": str(request.max_results),
+    }
+    search_data = _request_json(
+        f"{base}?{urlencode(search_params)}", request.timeout_seconds, deadline
+    )
+    search_results = search_data.get("search", [])
+    candidates = [
+        result for result in search_results
+        if isinstance(search_results, list)
+        and isinstance(result, dict)
+        and isinstance(result.get("id"), str)
+        and re.fullmatch(r"Q[1-9][0-9]*", result["id"])
+    ][: request.max_results] if isinstance(search_results, list) else []
+    if not candidates:
+        return {
+            "property_id": property_id,
+            "property": property_name,
+            "entity_query": request.query,
+            "matches": [],
+            "selection_rule": "Wikidata entity search order; no entity selected by the service",
+        }, {
+            "name": "Wikidata API",
+            "url": base,
+            "license": "CC0",
+            "attribution": "Wikidata contributors",
+        }
+
+    candidate_ids = [candidate["id"] for candidate in candidates]
+    entity_params = {
+        "action": "wbgetentities",
+        "ids": "|".join(candidate_ids),
+        "props": "labels|descriptions",
+        "languages": request.language,
+        "format": "json",
+    }
+    entity_data = _request_json(
+        f"{base}?{urlencode(entity_params)}", request.timeout_seconds, deadline
+    )
+    entities = entity_data.get("entities", {})
+    if not isinstance(entities, dict):
+        entities = {}
+
+    matches: list[dict[str, object]] = []
+    target_ids: set[str] = set()
+    for search_rank, candidate in enumerate(candidates, start=1):
+        entity_id = candidate["id"]
+        entity = entities.get(entity_id)
+        if not isinstance(entity, dict):
+            continue
+        claim_params = {
+            "action": "wbgetclaims",
+            "entity": entity_id,
+            "property": property_id,
+            "format": "json",
+        }
+        claim_data = _request_json(
+            f"{base}?{urlencode(claim_params)}", request.timeout_seconds, deadline
+        )
+        claims = claim_data.get("claims", [])
+        if isinstance(claims, dict):
+            claims = claims.get(property_id, claims.get("claims", []))
+        if property_id == "P1082":
+            values = _wikidata_population_values(claims)
+            value_key = "population"
+        else:
+            values = _wikidata_entity_values(claims)
+            target_ids.update(
+                str(value["id"]) for value in values if isinstance(value.get("id"), str)
+            )
+            value_key = "capitals"
+        matches.append({
+            "id": entity_id,
+            "search_rank": search_rank,
+            "label": (
+                _wikidata_language_value(entity.get("labels"), request.language)
+                or candidate.get("label")
+                or entity_id
+            ),
+            "description": (
+                _wikidata_language_value(entity.get("descriptions"), request.language)
+                or candidate.get("description")
+            ),
+            "url": f"https://www.wikidata.org/wiki/{entity_id}",
+            value_key: values,
+        })
+
+    if property_id == "P36" and target_ids:
+        target_params = {
+            "action": "wbgetentities",
+            "ids": "|".join(sorted(target_ids)),
+            "props": "labels",
+            "languages": request.language,
+            "format": "json",
+        }
+        target_data = _request_json(
+            f"{base}?{urlencode(target_params)}", request.timeout_seconds, deadline
+        )
+        target_entities = target_data.get("entities", {})
+        if not isinstance(target_entities, dict):
+            target_entities = {}
+        for match in matches:
+            capitals = match.get("capitals", [])
+            if not isinstance(capitals, list):
+                continue
+            for capital in capitals:
+                if not isinstance(capital, dict):
+                    continue
+                capital_entity = target_entities.get(capital.get("id"))
+                if isinstance(capital_entity, dict):
+                    capital["label"] = (
+                        _wikidata_language_value(capital_entity.get("labels"), request.language)
+                        or capital.get("id")
+                    )
+                capital["url"] = f"https://www.wikidata.org/wiki/{capital.get('id')}"
+
+    selection_rule = (
+        "Wikidata entity search order; all returned candidates are preserved. Preferred "
+        "population statements are used when present; otherwise the latest dated statements "
+        "are returned with ties preserved."
+        if property_id == "P1082"
+        else "Wikidata entity search order; all returned candidates and non-deprecated capital "
+        "statements are preserved, including statement rank and time qualifiers."
+    )
+    return {
+        "property_id": property_id,
+        "property": property_name,
+        "entity_query": request.query,
+        "matches": matches,
+        "selection_rule": selection_rule,
+    }, {
+        "name": "Wikidata API",
+        "url": base,
+        "license": "CC0",
+        "attribution": "Wikidata contributors",
+    }
+
+
+def _wikidata_language_value(value: object, language: str) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    localized = value.get(language)
+    if not isinstance(localized, dict):
+        return None
+    text = localized.get("value")
+    return text if isinstance(text, str) else None
+
+
+def _wikidata_population_values(claims: object) -> list[dict[str, object]]:
+    if isinstance(claims, dict):
+        statements = claims.get("P1082", claims.get("claims", []))
+    else:
+        statements = claims
+    if not isinstance(statements, list):
+        return []
+
+    values: list[dict[str, object]] = []
+    for statement in statements:
+        if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+            continue
+        main_snak = statement.get("mainsnak")
+        if not isinstance(main_snak, dict) or main_snak.get("snaktype") != "value":
+            continue
+        datavalue = main_snak.get("datavalue")
+        quantity = datavalue.get("value") if isinstance(datavalue, dict) else None
+        amount = quantity.get("amount") if isinstance(quantity, dict) else None
+        if not isinstance(amount, str) or len(amount) > 128:
+            continue
+        if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", amount):
+            continue
+        point_in_time = None
+        qualifiers = statement.get("qualifiers")
+        time_snaks = qualifiers.get("P585") if isinstance(qualifiers, dict) else None
+        if isinstance(time_snaks, list):
+            for time_snak in time_snaks:
+                if not isinstance(time_snak, dict):
+                    continue
+                time_data = time_snak.get("datavalue")
+                time_value = time_data.get("value") if isinstance(time_data, dict) else None
+                time_text = time_value.get("time") if isinstance(time_value, dict) else None
+                if isinstance(time_text, str):
+                    point_in_time = time_text
+                    break
+        observation: dict[str, object] = {
+            "amount": amount.removeprefix("+"),
+            "rank": statement.get("rank", "normal"),
+        }
+        statement_id = statement.get("id")
+        if isinstance(statement_id, str):
+            observation["statement_id"] = statement_id
+        references = statement.get("references")
+        if isinstance(references, list):
+            observation["reference_count"] = len(references)
+        if point_in_time is not None:
+            observation["point_in_time"] = point_in_time
+        if isinstance(quantity, dict):
+            for bound in ("lowerBound", "upperBound"):
+                bound_value = quantity.get(bound)
+                if isinstance(bound_value, str) and len(bound_value) <= 128:
+                    observation[bound] = bound_value.removeprefix("+")
+        values.append(observation)
+
+    preferred = [item for item in values if item.get("rank") == "preferred"]
+    eligible = preferred or values
+    dated = [item for item in eligible if isinstance(item.get("point_in_time"), str)]
+    if dated:
+        latest = max(str(item["point_in_time"]) for item in dated)
+        eligible = [item for item in dated if item["point_in_time"] == latest]
+    return eligible[:5]
+
+
+def _wikidata_entity_values(claims: object) -> list[dict[str, object]]:
+    statements = claims
+    if isinstance(statements, dict):
+        statements = statements.get("P36", statements.get("claims", []))
+    if not isinstance(statements, list):
+        return []
+    values: list[dict[str, object]] = []
+    for statement in statements:
+        if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+            continue
+        main_snak = statement.get("mainsnak")
+        if not isinstance(main_snak, dict) or main_snak.get("snaktype") != "value":
+            continue
+        datavalue = main_snak.get("datavalue")
+        entity_value = datavalue.get("value") if isinstance(datavalue, dict) else None
+        if not isinstance(entity_value, dict) or entity_value.get("entity-type") != "item":
+            continue
+        entity_id = entity_value.get("id")
+        numeric_id = entity_value.get("numeric-id")
+        if not isinstance(entity_id, str) and isinstance(numeric_id, int):
+            entity_id = f"Q{numeric_id}"
+        if not isinstance(entity_id, str) or not re.fullmatch(r"Q[1-9][0-9]*", entity_id):
+            continue
+        value: dict[str, object] = {"id": entity_id, "rank": statement.get("rank", "normal")}
+        statement_id = statement.get("id")
+        if isinstance(statement_id, str):
+            value["statement_id"] = statement_id
+        references = statement.get("references")
+        if isinstance(references, list):
+            value["reference_count"] = len(references)
+        qualifiers = statement.get("qualifiers")
+        if isinstance(qualifiers, dict):
+            for property_name, output_name in (
+                ("P580", "start_time"), ("P582", "end_time"), ("P585", "point_in_time")
+            ):
+                snaks = qualifiers.get(property_name)
+                if not isinstance(snaks, list):
+                    continue
+                for snak in snaks:
+                    snak_data = snak.get("datavalue") if isinstance(snak, dict) else None
+                    time_value = snak_data.get("value") if isinstance(snak_data, dict) else None
+                    time_text = time_value.get("time") if isinstance(time_value, dict) else None
+                    if isinstance(time_text, str):
+                        value[output_name] = time_text
+                        break
+        values.append(value)
+    preferred = [value for value in values if value.get("rank") == "preferred"]
+    return (preferred or values)[:5]
 
 
 def _dbnomics(

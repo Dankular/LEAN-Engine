@@ -53,7 +53,13 @@ def generator_configuration() -> dict[str, object]:
     }
 
 
-def generate_lean(problem: str, timeout_seconds: float) -> tuple[str, str]:
+def generate_lean(
+    problem: str,
+    timeout_seconds: float,
+    *,
+    previous_source: str | None = None,
+    diagnostics: str | None = None,
+) -> tuple[str, str]:
     base_url = os.environ.get("KIMINA_BASE_URL", "").strip()
     model = os.environ.get("KIMINA_MODEL", "").strip()
     if not base_url or not model:
@@ -61,14 +67,29 @@ def generate_lean(problem: str, timeout_seconds: float) -> tuple[str, str]:
             "Set KIMINA_BASE_URL and KIMINA_MODEL to enable natural-language Lean generation"
         )
     endpoint = _chat_completions_url(base_url)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": problem},
+    ]
+    if previous_source is not None and diagnostics is not None:
+        messages.extend((
+            {"role": "assistant", "content": f"```lean\n{previous_source}\n```"},
+            {
+                "role": "user",
+                "content": (
+                    "Lean rejected that candidate. Correct the proof using the diagnostics "
+                    "below. Preserve the theorem statement and all binders exactly; change "
+                    "only imports/open commands if needed and the proof. If no faithful proof "
+                    "is available, return no theorem.\n\nLean diagnostics:\n"
+                    f"{diagnostics[:4000]}"
+                ),
+            },
+        ))
     payload = json.dumps({
         "model": model,
         "temperature": 0.2,
         "max_tokens": 4096,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": problem},
-        ],
+        "messages": messages,
     }).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     api_key = os.environ.get("KIMINA_API_KEY")
@@ -92,6 +113,31 @@ def generate_lean(problem: str, timeout_seconds: float) -> tuple[str, str]:
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise LeanGenerationError("Lean generation model returned an invalid chat completion") from exc
     return model, normalize_lean_source(content)
+
+
+def lean_statement_signature(source: str) -> tuple[tuple[str, ...], str] | None:
+    lines = source.splitlines()
+    theorem_index = next(
+        (index for index, line in enumerate(lines) if re.match(r"^(?:theorem|lemma)\s+", line)),
+        None,
+    )
+    if theorem_index is None:
+        return None
+    declaration = "\n".join(lines[theorem_index:])
+    match = re.match(
+        r"^(?:theorem|lemma)\s+[A-Za-z_][A-Za-z0-9_']*(?P<signature>.*?)\s*:=\s*by\b",
+        declaration,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        return None
+    prelude = tuple(
+        line.strip()
+        for line in lines[:theorem_index]
+        if line.strip() and line.strip() != "import Mathlib"
+    )
+    signature = re.sub(r"\s+", " ", match.group("signature")).strip()
+    return prelude, signature
 
 
 def normalize_lean_source(content: str) -> str:

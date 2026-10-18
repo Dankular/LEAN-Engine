@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 import base64
 import fnmatch
+import hashlib
 import html
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -15,6 +17,11 @@ import xml.etree.ElementTree as ET
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
+from .computation import (
+    _normalize_decimal_literals,
+    check_computation,
+    prepare_computation,
+)
 from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
@@ -36,6 +43,7 @@ from .natural_language_query import (
     NaturalLanguageOperation,
     plan_natural_language_operation,
 )
+from .physical_units import SUPPORTED_WOLFRAM_UNIT_NAMES
 from .symbolic import SymbolicRequest, run_symbolic
 from .weather_svg import forecast_chart_image, forecast_plaintext
 
@@ -130,10 +138,36 @@ def async_pod_descriptor(
             else ("Current weather", "Weather", "Data")
         ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "Data"),
-        "wikidata": ("Entity matches", "EntitySearch", "Data"),
+        "wikidata": _wikidata_async_descriptor(request),
         "dbnomics": ("Economic time series", "EconomicSeries", "Data"),
         "geonames": ("Place matches", "PlaceSearch", "Data"),
     }[request.provider]
+
+
+def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str]:
+    property_id = _wikidata_property_id(request)
+    if property_id == "P1082":
+        return "Population", "Population", "Data"
+    if property_id == "P36":
+        return "Capital", "Capital", "Data"
+    return "Entity matches", "EntitySearch", "Data"
+
+
+def _wikidata_property_id(request: KnowledgeRequest) -> str | None:
+    if request.provider != "wikidata":
+        return None
+    if request.operation == "property":
+        return request.property_id
+    return {"population": "P1082", "capital": "P36"}.get(request.operation)
+
+
+def _wikidata_provider_presentation(
+    request: KnowledgeRequest,
+) -> tuple[str, str, str]:
+    return {
+        "P1082": ("Population", "Population", "Population"),
+        "P36": ("Capital", "Capital", "Geography"),
+    }.get(_wikidata_property_id(request), ("Entity matches", "EntitySearch", "Entity"))
 
 
 def async_query_payload(
@@ -146,6 +180,7 @@ def async_query_payload(
     formats: list[str],
     elapsed: float,
     text_width: int = 500,
+    verify_requested: bool = False,
 ) -> dict[str, Any]:
     input_image = _svg_text_image(input_text, width=text_width) if "image" in formats else None
     input_pod = _initial_pods(
@@ -174,7 +209,17 @@ def async_query_payload(
             _SUPPORTED_FORMATS | ({"image"} if input_image is not None else set()),
         ),
         assumptions=[],
-        evidence={"kind": "asynchronous_query", "verified": False},
+        evidence={
+            "kind": "asynchronous_query",
+            "verified": False,
+            **({
+                "formal_verification": {
+                    "status": "pending",
+                    "verified": False,
+                    "reason": "The requested proof stage will run with the result pod.",
+                }
+            } if verify_requested else {}),
+        },
         qualification=(
             "The result pod is being computed asynchronously; fetch its async URL to retrieve it."
         ),
@@ -185,9 +230,20 @@ def async_query_payload(
 
 def render_pod_response(pod: dict[str, Any], output: str) -> Response:
     if output == "json":
-        return JSONResponse(content={"pod": pod})
+        return JSONResponse(content={
+            "pod": pod,
+            **({"evidence": pod["evidence"]} if pod.get("evidence") is not None else {}),
+        })
     wrapper = ET.Element("wrapper")
     _append_pod(wrapper, pod)
+    if isinstance(pod.get("evidence"), dict):
+        evidence = ET.SubElement(wrapper[0], "evidence")
+        for key, value in pod["evidence"].items():
+            if isinstance(value, (str, int, float, bool)):
+                evidence.set(key, _xml_value(value))
+            else:
+                nested = ET.SubElement(evidence, key)
+                nested.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return Response(
         content=ET.tostring(wrapper[0], encoding="unicode", short_empty_elements=True),
         media_type="application/xml; charset=utf-8",
@@ -213,7 +269,11 @@ def execute_query(
     pod_timeout_seconds: float = 4.0,
     total_timeout_seconds: float = 20.0,
     text_width: int = 500,
+    max_image_width: int = 500,
+    magnification: float = 1.0,
     plot_width: int = 200,
+    verify: bool = False,
+    proof_timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
     started = perf_counter()
     deadline = started + total_timeout_seconds
@@ -238,7 +298,7 @@ def execute_query(
             raise AssumptionSelectionError(
                 "mathematical assumption selections do not apply to this data query"
             )
-        return _execute_provider_query(
+        payload = _execute_provider_query(
             input_text,
             provider_request,
             formats,
@@ -254,6 +314,20 @@ def execute_query(
             text_width=text_width,
             plot_width=plot_width,
         )
+        if verify:
+            payload["queryresult"].setdefault("evidence", {})["formal_verification"] = {
+                "status": "unsupported",
+                "verified": False,
+                "reason": (
+                    "Retrieved provider data is source-backed input, not a formal premise; "
+                    "Lean does not verify the external source's factual truth."
+                ),
+            }
+            payload["queryresult"]["qualification"] = (
+                "The provider value is source-backed retrieved data. Lean verification was "
+                "not performed because external factual claims require a formalized premise."
+            )
+        return payload
     remaining_seconds = deadline - perf_counter()
     if remaining_seconds <= 0:
         return _symbolic_timeout_response(
@@ -412,6 +486,15 @@ def execute_query(
         )
 
     result_text = str(symbolic.get("result", ""))
+    formal_verification = None
+    if verify:
+        formal_verification = _verify_query_computation(
+            interpreted,
+            symbolic_request,
+            result_text,
+            proof_timeout_seconds,
+        )
+        elapsed = perf_counter() - started
     result_image = None
     plot_svg = symbolic.get("plot_svg")
     if "image" in formats and isinstance(plot_svg, str):
@@ -426,11 +509,13 @@ def execute_query(
     input_image = None
     if "image" in formats:
         input_image = mathml_image(
-            input_mathml, input_display, max_width=text_width
+            input_mathml, input_display, max_width=max_image_width,
+            magnification=magnification,
         ) or _svg_text_image(input_display, width=text_width)
     if "image" in formats and result_image is None:
         result_image = mathml_image(
-            symbolic.get("result_mathml"), result_text, max_width=text_width
+            symbolic.get("result_mathml"), result_text, max_width=max_image_width,
+            magnification=magnification,
         )
         if result_image is None:
             result_image = _svg_text_image(result_text, width=text_width)
@@ -473,6 +558,32 @@ def execute_query(
     filtered = _select_pods(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
     )
+    evidence = symbolic.get("evidence", {
+        "kind": "symbolic_result", "engine": "sympy", "verified": False
+    })
+    qualification = interpreted.get(
+        "qualification", "Symbolic computation is not a Lean proof."
+    )
+    if formal_verification is not None:
+        evidence = {
+            **evidence,
+            "kind": "symbolic_result_with_lean_verification",
+            "verified": formal_verification["verified"],
+            "verification_scope": (
+                "checks the selected typed interpretation and computed result; it does not "
+                "prove that a natural-language phrase was translated faithfully"
+            ),
+            "formal_verification": formal_verification,
+        }
+        if formal_verification["status"] == "checked":
+            qualification = (
+                "Lean checked the computation theorem for the selected interpretation. "
+                "The theorem source and assumption choices are included in the response."
+            )
+        else:
+            qualification = (
+                f"The symbolic result is not Lean-verified: {formal_verification['reason']}"
+            )
     payload = _query_envelope(
         success=True,
         error=False,
@@ -484,15 +595,143 @@ def execute_query(
         assumptions=interpreted["assumptions"],
         interpretation=interpreted["interpretation"],
         classification=interpreted["classification"],
-        evidence=symbolic.get("evidence", {
-            "kind": "symbolic_result", "engine": "sympy", "verified": False
-        }),
-        qualification=interpreted.get(
-            "qualification", "Symbolic computation is not a Lean proof."
-        ),
+        evidence=evidence,
+        qualification=qualification,
     )
     payload["queryresult"]["input"] = input_text
     return payload
+
+
+def _verify_query_computation(
+    interpreted: dict[str, Any],
+    request: SymbolicRequest,
+    query_result: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    code = _query_computation_code(request)
+    if code is None:
+        return {
+            "status": "unsupported",
+            "verified": False,
+            "reason": "This operation is outside the bounded Lean computation fragment.",
+        }
+
+    proof_deadline = perf_counter() + max(0.001, min(timeout_seconds, 180.0))
+    computation = prepare_computation(
+        code,
+        max(0.001, min(timeout_seconds, 60.0)),
+    )
+    if computation is None:
+        return {
+            "status": "unsupported",
+            "verified": False,
+            "reason": (
+                "The selected interpretation is not a bounded rational polynomial or "
+                "supported calculus expression."
+            ),
+        }
+    if computation.timed_out:
+        return {
+            "status": "timeout",
+            "verified": False,
+            "reason": "Symbolic candidate generation exceeded the proof-stage time budget.",
+        }
+    if computation.backend_error is not None:
+        return {
+            "status": "backend_error",
+            "verified": False,
+            "reason": computation.backend_error,
+        }
+
+    query_normalized = _canonical_formula(query_result)
+    candidate_normalized = _canonical_formula(computation.display_result)
+    if query_normalized is None or candidate_normalized is None or query_normalized != candidate_normalized:
+        return {
+            "status": "candidate_mismatch",
+            "verified": False,
+            "reason": (
+                "The Lean proof candidate did not match the result pod, so no proof was attached."
+            ),
+            "query_result": query_result,
+            "proof_candidate": computation.display_result,
+        }
+
+    remaining = proof_deadline - perf_counter()
+    if remaining <= 0.001:
+        return {
+            "status": "timeout",
+            "verified": False,
+            "reason": "The proof-stage time budget expired before Lean checking began.",
+        }
+    lean_result = check_computation(computation, remaining)
+    verification: dict[str, Any] = {
+        "status": lean_result.status,
+        "verified": lean_result.status == "checked",
+        "claim_type": _query_claim_type(request, code),
+        "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
+        "assumptions": interpreted.get("assumptions", []),
+        "scope": (
+            "checks the exact selected formula and result; it does not verify the English "
+            "language-to-formula translation"
+        ),
+        "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
+        "lean_source": lean_result.source,
+        "result_match": True,
+    }
+    if lean_result.status == "checked":
+        verification["axiom_audit"] = {
+            "status": "passed",
+            "dependencies": list(lean_result.axioms),
+        }
+    elif lean_result.diagnostics:
+        verification["reason"] = lean_result.diagnostics
+    return verification
+
+
+def _query_computation_code(request: SymbolicRequest) -> str | None:
+    if request.operation in {"simplify", "expand", "factor"} and request.expression is not None:
+        return f"{request.operation.title()}[{request.expression}]"
+    if request.operation == "differentiate" and request.expression is not None and request.variable:
+        return f"D[{request.expression}, {request.variable}]"
+    if request.operation == "identity" and request.lhs is not None and request.rhs is not None:
+        return f"Simplify[({request.lhs}) - ({request.rhs})]"
+    if (
+        request.operation == "integrate"
+        and request.expression is not None
+        and request.variable is not None
+        and request.expression.strip() == request.variable
+        and request.lower is not None
+        and request.upper is not None
+        and _bounded_integer_literal(request.lower) is not None
+        and _bounded_integer_literal(request.upper) is not None
+    ):
+        return (
+            f"Integrate[{request.variable}, "
+            f"{{{request.variable}, {request.lower}, {request.upper}}}]"
+        )
+    return None
+
+
+def _query_claim_type(request: SymbolicRequest, code: str) -> str:
+    if request.operation == "differentiate":
+        return "HasDerivAt"
+    if code.startswith("Integrate["):
+        return "definite_integral_equality"
+    if request.operation == "identity":
+        return "polynomial_difference_equals_result"
+    return "polynomial_equality"
+
+
+def _canonical_formula(source: str) -> str | None:
+    try:
+        parsed = parse_math_input(source)
+        exact = _normalize_decimal_literals(parsed.expression)
+        if exact is None:
+            return None
+        node = ast.parse(exact, mode="eval").body
+    except (MathInputError, SyntaxError, RecursionError, ValueError):
+        return None
+    return ast.dump(node, annotate_fields=True, include_attributes=False)
 
 
 def validate_query(
@@ -672,6 +911,41 @@ def _provider_request(
             "location, latlong, and units are currently supported for weather queries"
         )
 
+    capital = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|tell\s+me)\s+)?(?:the\s+)?"
+        r"capital(?:\s+city)?\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    capital_possessive = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's)\s+)?(.+?)(?:'s|’s)\s+capital\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if capital or capital_possessive:
+        query = (capital or capital_possessive).group(1).strip()
+        if query.casefold() in {"of", "in"}:
+            raise ProviderContextNeeded("capital lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P36",
+            query=query, max_results=3,
+        )
+
+    population = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|give\s+me)\s+)?(?:the\s+)?"
+        r"population\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if population:
+        query = population.group(1).strip()
+        if query.casefold() in {"of", "in"}:
+            raise ProviderContextNeeded("population lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P1082",
+            query=query, max_results=3,
+        )
+
     entity = re.fullmatch(r"\s*(?:entity|wikidata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
     if entity:
         query = entity.group(1).strip()
@@ -776,7 +1050,7 @@ def _execute_provider_query(
                 else "Current weather"
             ),
             "nist_codata": "Physical constant",
-            "wikidata": "Entity matches",
+            "wikidata": _wikidata_async_descriptor(request)[0],
             "dbnomics": "Economic time series",
             "geonames": "Place matches",
         }
@@ -831,7 +1105,7 @@ def _execute_provider_query(
             else ("Current weather", "Weather", "Weather")
         ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "ScientificConstant"),
-        "wikidata": ("Entity matches", "EntitySearch", "Entity"),
+        "wikidata": _wikidata_provider_presentation(request),
         "dbnomics": ("Economic time series", "EconomicSeries", "Economics"),
         "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
@@ -889,6 +1163,10 @@ def _execute_provider_query(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
     )
     elapsed = perf_counter() - started
+    wikidata_property_id = _wikidata_property_id(request)
+    wikidata_property_name = {"P1082": "population", "P36": "capital"}.get(
+        wikidata_property_id
+    )
     payload = _query_envelope(
         success=True,
         error=False,
@@ -909,12 +1187,21 @@ def _execute_provider_query(
         },
         classification={
             "name": "deterministic_provider_router",
-            "method": "explicit query pattern or supported constant alias",
+            "method": (
+                "Wikidata label search; ranked entity candidates are retained"
+                if request.provider == "wikidata" and _wikidata_property_id(request) is not None
+                else "explicit query pattern or supported constant alias"
+            ),
             "ranks_candidates_only": True,
             "selection_authority": False,
         },
         evidence=knowledge["evidence"],
-        qualification=knowledge["qualification"],
+        qualification=(
+            "Wikidata's ranked entity matches are returned as candidates. "
+            f"{wikidata_property_name.capitalize()} statements are retrieved data, not a formal proof."
+            if wikidata_property_name is not None
+            else knowledge["qualification"]
+        ),
         sources=knowledge["sources"],
         retrieved_at=knowledge["retrieved_at"],
         data=knowledge["data"],
@@ -947,6 +1234,85 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             description = entity.get("description")
             rows.append(f"{label} [{identifier}]: {description}" if description else f"{label} [{identifier}]")
         return "\n".join(rows) if rows else "No matching entities were found."
+    if (
+        provider == "wikidata"
+        and isinstance(data, dict)
+        and data.get("property_id") == "P1082"
+    ):
+        matches = data.get("matches")
+        rows = []
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                label = str(match.get("label") or match.get("id") or "Entity")
+                identifier = str(match.get("id") or "")
+                prefix = f"{label} [{identifier}]" if identifier else label
+                description = match.get("description")
+                if isinstance(description, str) and description:
+                    prefix += f" — {description}"
+                values = match.get("population")
+                statements = []
+                if isinstance(values, list):
+                    for value in values:
+                        if not isinstance(value, dict):
+                            continue
+                        amount = _display_wikidata_amount(value.get("amount"))
+                        lower = _display_wikidata_amount(value.get("lowerBound"))
+                        upper = _display_wikidata_amount(value.get("upperBound"))
+                        if lower is not None and upper is not None:
+                            population = f"between {lower} and {upper} people"
+                        elif amount is not None:
+                            population = f"{amount} people"
+                        else:
+                            population = "population reported"
+                        point_in_time = value.get("point_in_time")
+                        if isinstance(point_in_time, str):
+                            date = point_in_time.removeprefix("+").split("T", 1)[0]
+                            population += f" (as of {date})"
+                        statements.append(population)
+                detail = "; ".join(statements) or "no usable population statement found"
+                rows.append(f"{prefix}: {detail}")
+        return "\n".join(rows) if rows else "No Wikidata entity matches were found."
+    if (
+        provider == "wikidata"
+        and isinstance(data, dict)
+        and data.get("property_id") == "P36"
+    ):
+        matches = data.get("matches")
+        rows = []
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                label = str(match.get("label") or match.get("id") or "Entity")
+                identifier = str(match.get("id") or "")
+                prefix = f"{label} [{identifier}]" if identifier else label
+                description = match.get("description")
+                if isinstance(description, str) and description:
+                    prefix += f" — {description}"
+                capitals = match.get("capitals")
+                values = []
+                if isinstance(capitals, list):
+                    for capital in capitals:
+                        if not isinstance(capital, dict):
+                            continue
+                        place = str(capital.get("label") or capital.get("id") or "Unknown")
+                        if capital.get("id"):
+                            place += f" [{capital['id']}]"
+                        interval = []
+                        for key, caption in (("start_time", "from"), ("end_time", "until")):
+                            time_value = capital.get(key)
+                            if isinstance(time_value, str):
+                                interval.append(
+                                    f"{caption} {time_value.removeprefix('+').split('T', 1)[0]}"
+                                )
+                        if interval:
+                            place += f" ({', '.join(interval)})"
+                        values.append(place)
+                detail = "; ".join(values) if values else "no capital statement found"
+                rows.append(f"{prefix}: {detail}")
+        return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     if provider == "geonames" and isinstance(data, list):
         rows = []
         for place in data:
@@ -996,6 +1362,20 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             if blocks:
                 return "\n\n".join(blocks)
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _display_wikidata_amount(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    try:
+        number = Decimal(value.removeprefix("+"))
+    except InvalidOperation:
+        return value.removeprefix("+")
+    if not number.is_finite() or abs(number.adjusted()) > 100:
+        return value.removeprefix("+")
+    if number == number.to_integral_value():
+        return f"{int(number):,}"
+    return format(number.normalize(), "f")
 
 
 def _prepare_query(
@@ -1216,15 +1596,15 @@ def _request_from_natural_language_plan(
 
 
 def _parse_operation_call(query: str) -> SymbolicRequest | None:
-    try:
-        node = ast.parse(query, mode="eval").body
-    except SyntaxError:
-        call = _split_operation_call(query)
-        if call is None:
-            return None
+    call = _split_operation_call(query)
+    if call is not None:
         operation_name, arguments = call
         variable = arguments[1] if len(arguments) > 1 else None
         return _operation_request(operation_name, arguments, variable)
+    try:
+        node = ast.parse(query, mode="eval").body
+    except SyntaxError:
+        return None
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
         return None
     operation_name = node.func.id.lower()
@@ -1874,7 +2254,7 @@ def _wolfram_expression(source: str) -> str | None:
 def _wolfram_quantity(typed_ast: dict[str, Any]) -> str | None:
     value = _wolfram_expression(str(typed_ast.get("magnitude", "")))
     unit = typed_ast.get("wolfram_unit")
-    if value is None or unit not in {"Meters", "MinimsUS", "Minutes"}:
+    if value is None or unit not in SUPPORTED_WOLFRAM_UNIT_NAMES:
         return None
     return f"Quantity[{value}, {json.dumps(unit)}]"
 

@@ -55,7 +55,9 @@ from .natural_language import (
     NaturalLanguageLeanRequest,
     generate_lean,
     generator_configuration,
+    lean_statement_signature,
 )
+from .physical_units import SUPPORTED_UNIT_NAMES, UNIT_ALIAS_TO_NAME
 from .reasoner import analyze
 from .symbolic import SymbolicRequest, run_symbolic
 
@@ -134,7 +136,9 @@ def capabilities() -> dict[str, object]:
             "model": generator_configuration()["model"],
             "fragment": "Lean 4 theorem generation from natural-language mathematical problems",
             "formalization_fidelity": "not independently verified against the natural-language input",
+            "checked_outcome": "proof_checked; this does not establish natural-language fidelity",
             "proof_verification": "the generated theorem is compiled by Lean and axiom-audited",
+            "repair_policy": "one repair attempt follows Lean rejection; the formal theorem signature must remain unchanged",
         },
         "counterexample_models": {
             "witness_replay": "exact integer and rational arithmetic",
@@ -168,6 +172,18 @@ def capabilities() -> dict[str, object]:
                 "range": [100, 1600],
                 "scope": "text-oriented images; plots and graphics use plotwidth",
             },
+            "object_max_width": {
+                "query_parameter": "maxwidth",
+                "default": 500,
+                "range": [100, 1600],
+                "scope": "structural mathematical images; text fallbacks use width and plots use plotwidth",
+            },
+            "magnification": {
+                "query_parameter": "mag",
+                "default": 1.0,
+                "range": [0.5, 2.0],
+                "scope": "content inside structural mathematical images; provider and plot images are unchanged",
+            },
             "typesetting": "bounded structural math rendering with escaped-text fallback for unsupported expressions",
         },
         "symbolic_series": {
@@ -191,9 +207,18 @@ def capabilities() -> dict[str, object]:
         },
         "symbolic_named_units": {
             "status": "implemented_initial_slice",
-            "unit_names": ["meter", "minute", "us_minim"],
+            "unit_names": list(SUPPORTED_UNIT_NAMES),
             "request_field": "named_units",
             "dimension_checks": "incompatible unit dimensions in addition are rejected",
+        },
+        "symbolic_quantity_literals": {
+            "status": "implemented_initial_slice",
+            "unit_aliases": "curated common length, time, mass, volume, angle, and derived SI units",
+            "aliases": dict(UNIT_ALIAS_TO_NAME),
+            "ambiguous_abbreviation": "m returns typed alternatives for meters, US minims, and minutes",
+            "single_letter_alias_policy": "other one-letter forms keep existing symbolic/list interpretations; use full unit names or named_units",
+            "input_example": "5 km",
+            "proof_status": "typed quantity interpretation uses SymPy; it is not a Lean proof",
         },
         "symbolic_input_formats": {
             "native": "bounded safe expression syntax",
@@ -220,7 +245,7 @@ def capabilities() -> dict[str, object]:
             "classifier_selects_assumptions": False,
         },
         "factual_sources": {
-            "wikidata": {"coverage": "entity search and entity records", "status": "implemented"},
+            "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36) and population (P1082) property retrieval with ranked candidates", "status": "implemented_initial_slice"},
             "dbnomics": {"coverage": "individual time series", "status": "implemented"},
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},
@@ -241,6 +266,8 @@ def capabilities() -> dict[str, object]:
                     "explicit seven-day weather forecast queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",
+                    "natural-language population lookups using Wikidata",
+                    "natural-language capital relationship lookups using Wikidata",
                     "explicit GeoNames place searches",
                     "explicit DBnomics time-series requests",
                 ],
@@ -254,14 +281,32 @@ def capabilities() -> dict[str, object]:
                     "symbolic_backend": "SymPy",
                     "sum_product_bounds": "integer literals only",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "query results are not Lean-checked; use /v1/natural-language/prove",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial computations; unsupported operations remain unverified",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
                 "weather_outputs": ["current conditions", "seven-day forecast", "daily forecast chart"],
                 "weather_chart_width": "controlled by plotwidth",
                 "text_width": {"query_parameter": "width", "default": 500, "range": [100, 1600]},
-                "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
+                "query_controls": {
+                    "ignorecase": True,
+                    "reinterpret": False,
+                    "translation": False,
+                    "verify": "optional Lean check for supported exact polynomial computations",
+                },
+                "formal_verification": {
+                    "query_parameter": "verify=true",
+                    "proof_timeout_parameter": "prooftimeout",
+                    "proof_timeout_default_seconds": 60,
+                    "proof_timeout_range_seconds": [1, 180],
+                    "supported": [
+                        "exact polynomial evaluation, simplify, factor, expand, and differentiation",
+                        "polynomial identities expressed as a difference",
+                        "definite integral of x with integer bounds",
+                    ],
+                    "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
+                    "retrieved_data": "provider values are not Lean-verified",
+                },
                 "time_controls": {
                     "parsetimeout": {
                         "status": "implemented_initial_slice",
@@ -276,6 +321,13 @@ def capabilities() -> dict[str, object]:
                         "minimum_seconds": 0.1,
                         "maximum_seconds": 30,
                         "scope": "monotonic deadline for symbolic worker execution and provider request sequences",
+                    },
+                    "prooftimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 60,
+                        "minimum_seconds": 1,
+                        "maximum_seconds": 180,
+                        "scope": "separate optional Lean compilation and axiom-audit stage after a supported symbolic result",
                     },
                     "podtimeout": {
                         "status": "implemented_initial_slice",
@@ -321,10 +373,31 @@ def capabilities() -> dict[str, object]:
             "wolfram_language_compute": {
                 "path": "/api/cag/v1/WolframLanguageCompute",
                 "status": "allowlisted_subset",
-                "expressions": ["Sin[Pi]", "TrigExpand@Sin[2x]", "Integrate[x, {x, a, b}]"]
-            }
+                "operations": [
+                    "exact rational arithmetic", "Simplify", "Expand", "Factor",
+                    "D for bounded polynomial differentiation",
+                ],
+                "polynomial_limits": {
+                    "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
+                    "maximum_nodes": 256,
+                    "maximum_depth": 32,
+                    "maximum_power": 16,
+                    "maximum_numeric_component_bits": 256,
+                    "variable_domain": "complex numbers for polynomial identities; real numbers for D derivatives",
+                },
+                "derivative": {
+                    "syntax": "D[polynomial_expression, variable]",
+                    "proof": "Lean HasDerivAt theorem with axiom audit",
+                    "assumptions": "all variables are real; differentiation variable is unrestricted",
+                },
+                "special_cases": [
+                    "Sin[Pi]", "TrigExpand@Sin[2x]", "Integrate[x, {x, integer, integer}]"
+                ],
+                "proof_status": "each returned result is compiled and axiom-audited by Lean",
+            },
         },
         "outcomes": [
+            "proof_checked",
             "verified",
             "solver_unsat",
             "counterexample_found",
@@ -358,6 +431,7 @@ def prove_formula(request: FormulaProofRequest) -> dict[str, object]:
 
 @app.post("/v1/natural-language/prove", dependencies=[Depends(require_api_token)])
 def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, object]:
+    generation_started = monotonic()
     try:
         model, lean_source = generate_lean(
             request.problem,
@@ -384,16 +458,61 @@ def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, obj
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+    lean_started = monotonic()
     lean_result = run_generated_source(
         lean_source,
         timeout_seconds=request.lean_timeout_seconds,
     )
+    proof_repair: dict[str, object] = {"attempted": False, "status": "not_needed"}
+    generation_attempts = 1
+    if lean_result.status == "rejected":
+        remaining_generation = request.budget.wall_seconds - (monotonic() - generation_started)
+        if remaining_generation > 0.1:
+            proof_repair = {"attempted": True, "status": "requested"}
+            try:
+                _, repaired_source = generate_lean(
+                    request.problem,
+                    timeout_seconds=min(remaining_generation, request.budget.wall_seconds / 2),
+                    previous_source=lean_source,
+                    diagnostics=lean_result.diagnostics or "Lean rejected the candidate",
+                )
+            except LeanGenerationError as exc:
+                proof_repair = {
+                    "attempted": True,
+                    "status": "generation_failed",
+                    "reason": str(exc),
+                }
+            else:
+                generation_attempts = 2
+                if lean_statement_signature(repaired_source) != lean_statement_signature(lean_source):
+                    proof_repair = {
+                        "attempted": True,
+                        "status": "statement_changed_discarded",
+                        "reason": "The repair candidate changed the formal theorem statement.",
+                    }
+                else:
+                    remaining_lean = request.lean_timeout_seconds - (monotonic() - lean_started)
+                    if remaining_lean > 0.1:
+                        lean_source = repaired_source
+                        lean_result = run_generated_source(repaired_source, remaining_lean)
+                        proof_repair = {
+                            "attempted": True,
+                            "status": lean_result.status,
+                        }
+                    else:
+                        proof_repair = {
+                            "attempted": True,
+                            "status": "timeout_before_recheck",
+                            "reason": "The Lean time budget expired before the repaired proof could be checked.",
+                        }
     verified = lean_result.status == "checked"
     evidence: dict[str, object] = {
         "kind": "lean_kernel_checked" if verified else "lean_generation_candidate",
         "engine": "Lean 4",
         "lean_status": lean_result.status,
         "verified": verified,
+        "generation_attempts": generation_attempts,
+        "proof_repair": proof_repair,
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
         "lean_source": lean_result.source,
     }
@@ -403,7 +522,8 @@ def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, obj
             "dependencies": list(lean_result.axioms),
         }
     return {
-        "outcome": "verified" if verified else lean_result.status,
+        "outcome": "proof_checked" if verified else lean_result.status,
+        "theorem_status": "checked" if verified else lean_result.status,
         "problem": request.problem,
         "formalization_fidelity": {
             "status": "unverified_against_natural_language",
@@ -472,6 +592,11 @@ def full_results_query(
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
     ignorecase: Annotated[bool, Query()] = False,
+    verify: Annotated[
+        bool,
+        Query(description="Attach a Lean proof when the selected computation is supported"),
+    ] = False,
+    prooftimeout: Annotated[float, Query(ge=1, le=180)] = 60.0,
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
     podtimeout: Annotated[float, Query(ge=0.1, le=30)] = 4.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
@@ -483,6 +608,22 @@ def full_results_query(
             description="Approximate width for text-oriented images; does not affect plots or graphics",
         ),
     ] = 500,
+    maxwidth: Annotated[
+        int,
+        Query(
+            ge=100,
+            le=1600,
+            description="Approximate maximum width for structural mathematical images",
+        ),
+    ] = 500,
+    mag: Annotated[
+        float,
+        Query(
+            ge=0.5,
+            le=2.0,
+            description="Magnification of content in structural mathematical images",
+        ),
+    ] = 1.0,
     plotwidth: Annotated[int, Query(ge=100, le=1600)] = 200,
     async_mode: Annotated[
         str,
@@ -533,7 +674,11 @@ def full_results_query(
                 pod_timeout_seconds=podtimeout,
                 total_timeout_seconds=totaltimeout,
                 text_width=width,
+                max_image_width=maxwidth,
+                magnification=mag,
                 plot_width=plotwidth,
+                verify=verify,
+                proof_timeout_seconds=prooftimeout,
             )
             if ignorecase:
                 result["queryresult"]["ignorecase"] = True
@@ -578,6 +723,7 @@ def full_results_query(
                     formats=formats,
                     text_width=width,
                     elapsed=monotonic() - job.created_at,
+                    verify_requested=verify,
                 )
                 pending = filter_response_pods(
                     pending, includepodid, excludepodid, podtitle, podindex, scanner
@@ -689,6 +835,8 @@ def full_results_async_pod(
             (item for item in queryresult.get("pods", []) if item.get("id") == job.pod_id),
             None,
         )
+        if pod is not None and queryresult.get("evidence") is not None:
+            pod["evidence"] = queryresult["evidence"]
         if pod is None:
             message = queryresult.get("error_detail", {}).get("msg")
             if not message:
@@ -769,7 +917,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "Only allowlisted expressions are compiled into generated Lean proofs."
+        "A bounded arithmetic and polynomial subset is computed and compiled into Lean proofs."
     ),
     openapi_extra={
         "requestBody": {
@@ -810,12 +958,40 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
         errors = "; ".join(error["msg"] for error in exc.errors())
         return _compat_response(400, f"Invalid request: {errors}", request_id)
 
-    computation = prepare_computation(compute_request.code)
+    import asyncio
+
+    effective_budget = compute_request.timeConstraint
+    evaluation_started = monotonic()
+    computation = await asyncio.to_thread(
+        prepare_computation,
+        compute_request.code,
+        float(effective_budget),
+    )
     if computation is None:
         return _compat_response(501, "This Wolfram Language expression is not supported", request_id)
-
-    effective_budget = min(compute_request.timeConstraint, 30)
-    lean_result = await _run_computation(computation, effective_budget)
+    if computation.backend_error is not None:
+        return _compat_response(
+            500,
+            "The symbolic computation backend failed",
+            request_id,
+            evidence={"stage": "symbolic", "diagnostic": computation.backend_error},
+        )
+    if computation.timed_out:
+        return _compat_response(
+            200,
+            f'Failure["EvaluationTimeExceeded", {effective_budget}]',
+            request_id,
+            success=True,
+        )
+    remaining_budget = effective_budget - (monotonic() - evaluation_started)
+    if remaining_budget <= 0:
+        return _compat_response(
+            200,
+            f'Failure["EvaluationTimeExceeded", {effective_budget}]',
+            request_id,
+            success=True,
+        )
+    lean_result = await _run_computation(computation, remaining_budget)
     if lean_result.status == "unavailable":
         return _compat_response(503, "Lean proof backend is not ready", request_id)
     if lean_result.status == "timeout":
@@ -853,7 +1029,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content=body)
 
 
-async def _run_computation(computation: Computation, timeout_seconds: int):
+async def _run_computation(computation: Computation, timeout_seconds: float):
     import asyncio
 
     return await asyncio.to_thread(check_computation, computation, timeout_seconds)

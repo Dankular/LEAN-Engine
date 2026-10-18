@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .input_syntax import MathInputError, parse_math_input
 from .lean_backend import LeanResult, run_generated_source
+from .symbolic import SymbolicRequest, run_symbolic
 
 
 class ComputeRequest(BaseModel):
@@ -22,16 +26,22 @@ class ComputeRequest(BaseModel):
 class Computation:
     display_result: str
     lean_source: str
+    timed_out: bool = False
+    backend_error: str | None = None
 
 
-def prepare_computation(code: str) -> Computation | None:
+_DECIMAL_LITERAL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
+)
+
+
+def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
     if re.fullmatch(r"\s*Sin\s*\[\s*Pi\s*\]\s*", code):
         source = """import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 
 theorem wolfram_language_compute : Real.sin Real.pi = 0 := by
   simp
 
-#print wolfram_language_compute
 #print axioms wolfram_language_compute
 """
         return Computation("0", source)
@@ -45,7 +55,6 @@ theorem wolfram_language_compute (x : ℝ) :
   rw [Real.sin_two_mul]
   ring
 
-#print wolfram_language_compute
 #print axioms wolfram_language_compute
 """
         return Computation("2*Cos[x]*Sin[x]", source)
@@ -56,6 +65,8 @@ theorem wolfram_language_compute (x : ℝ) :
     )
     if match:
         lower, upper = (int(value) for value in match.groups())
+        if max(abs(lower).bit_length(), abs(upper).bit_length()) > 256:
+            return None
         exact_value = Fraction(upper * upper - lower * lower, 2)
         rendered_value = str(exact_value.numerator)
         if exact_value.denominator != 1:
@@ -70,12 +81,361 @@ theorem wolfram_language_compute :
     (∫ x in {lean_lower}..{lean_upper}, x) = {lean_value} := by
   norm_num [intervalIntegral.integral_id]
 
-#print wolfram_language_compute
 #print axioms wolfram_language_compute
 """
         return Computation(rendered_value, source)
 
+    derivative = re.fullmatch(
+        r"(?is)\s*D\s*\[\s*(?P<expression>.*),\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*\]\s*",
+        code,
+    )
+    if derivative is not None:
+        return _prepare_polynomial_derivative(
+            derivative.group("expression"),
+            derivative.group("variable"),
+            time_limit_seconds,
+        )
+
+    return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_polynomial_derivative(
+    expression_source: str,
+    variable: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    exact_source = _normalize_decimal_literals(expression_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+        original_lean, symbols = _render_polynomial_lean(parsed.expression)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if original_lean is None:
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="differentiate",
+        expression=parsed.expression,
+        variable=variable,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or "Symbolic worker returned no result"
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    result = symbolic["result"]
+    try:
+        result_lean, result_symbols = _render_polynomial_lean(result)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if result_lean is None:
+        return None
+
+    function_variable = "deriv_var"
+    suffix = 0
+    while function_variable in symbols or function_variable == variable:
+        suffix += 1
+        function_variable = f"deriv_var{suffix}"
+    rendered = _render_polynomial_node(
+        tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: function_variable},
+    )
+    if rendered is None:
+        return None
+    proof = _derivative_proof_term(
+        tree.body,
+        variable,
+        function_variable,
+        variable,
+        {"nodes": 0},
+        0,
+    )
+    if proof is None:
+        return None
+
+    variables = sorted(set(symbols) | set(result_symbols) | {variable})
+    binders = " ".join(f"({name} : ℝ)" for name in variables)
+    theorem_binders = f" {binders}" if binders else ""
+    source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    HasDerivAt (fun {function_variable} : ℝ => {rendered}) {result_lean} {variable} := by
+  convert ({proof}) using 1
+  · ext {function_variable}
+    simp [id_eq] <;> ring
+  · simp [id_eq] <;> field_simp <;> ring
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(result.replace("**", "^"), source)
+
+
+def _prepare_polynomial_computation(
+    code: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    operation = "simplify"
+    expression_source = code.strip()
+    wrapper = re.fullmatch(
+        r"(?is)\s*(?P<operation>simplify|expand|factor)\s*\[(?P<expression>.*)\]\s*",
+        code,
+    )
+    if wrapper is not None:
+        operation = wrapper.group("operation").lower()
+        expression_source = wrapper.group("expression").strip()
+
+    try:
+        exact_source = _normalize_decimal_literals(expression_source)
+        if exact_source is None:
+            return None
+        parsed = parse_math_input(exact_source)
+        expression = parsed.expression
+        original_lean, symbols = _render_polynomial_lean(expression)
+    except (MathInputError, ValueError, SyntaxError):
+        return None
+    if original_lean is None:
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation=operation,
+        expression=expression,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or "Symbolic worker returned no result"
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    result = symbolic["result"]
+    try:
+        result_lean, result_symbols = _render_polynomial_lean(result)
+    except (MathInputError, ValueError, SyntaxError):
+        return None
+    if result_lean is None:
+        return None
+    variables = sorted(set(symbols) | set(result_symbols))
+    lean_source = _polynomial_equality_source(original_lean, result_lean, variables)
+    display_result = result.replace("**", "^")
+    return Computation(display_result, lean_source)
+
+
+def _render_polynomial_lean(source: str) -> tuple[str | None, set[str]]:
+    try:
+        tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return None, set()
+    state = {"nodes": 0}
+    names: set[str] = set()
+    rendered = _render_polynomial_node(tree.body, names, state, 0)
+    return rendered, names
+
+
+def _render_polynomial_node(
+    node: ast.AST,
+    names: set[str],
+    state: dict[str, int],
+    depth: int,
+    substitutions: dict[str, str] | None = None,
+) -> str | None:
+    state["nodes"] += 1
+    if state["nodes"] > 256 or depth > 32:
+        return None
+    if isinstance(node, ast.Constant):
+        value = _constant_fraction(node)
+        return _lean_fraction(value) if value is not None else None
+    if isinstance(node, ast.Name):
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id):
+            return None
+        names.add(node.id)
+        return (substitutions or {}).get(node.id, node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _render_polynomial_node(node.operand, names, state, depth + 1, substitutions)
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else f"(-{inner})"
+    if not isinstance(node, ast.BinOp):
+        return None
+
+    left = _render_polynomial_node(node.left, names, state, depth + 1, substitutions)
+    right = _render_polynomial_node(node.right, names, state, depth + 1, substitutions)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return f"({left} + {right})"
+    if isinstance(node.op, ast.Sub):
+        return f"({left} - {right})"
+    if isinstance(node.op, ast.Mult):
+        return f"({left} * {right})"
+    if isinstance(node.op, ast.Div):
+        denominator = _constant_fraction(node.right)
+        if denominator is None or denominator == 0:
+            return None
+        return f"({left} / {right})"
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return f"({left} ^ {exponent.numerator})"
     return None
+
+
+def _derivative_proof_term(
+    node: ast.AST,
+    variable: str,
+    function_variable: str,
+    point: str,
+    state: dict[str, int],
+    depth: int,
+) -> str | None:
+    state["nodes"] += 1
+    if state["nodes"] > 256 or depth > 32:
+        return None
+
+    constant = _constant_fraction(node)
+    if constant is not None:
+        rendered_constant = _lean_rational(constant)
+        return f"(hasDerivAt_const {point} {rendered_constant})"
+    if isinstance(node, ast.Name):
+        if node.id == variable:
+            return f"(hasDerivAt_id {point})"
+        return f"(hasDerivAt_const {point} {node.id})"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _derivative_proof_term(
+            node.operand, variable, function_variable, point, state, depth + 1
+        )
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else f"({inner}).neg"
+    if not isinstance(node, ast.BinOp):
+        return None
+
+    left = _derivative_proof_term(
+        node.left, variable, function_variable, point, state, depth + 1
+    )
+    if left is None:
+        return None
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return f"({left}).pow {exponent.numerator}"
+    if isinstance(node.op, ast.Div):
+        denominator = _constant_fraction(node.right)
+        if denominator is None or denominator == 0:
+            return None
+        return f"({left}).div_const {_lean_rational(denominator)}"
+
+    right = _derivative_proof_term(
+        node.right, variable, function_variable, point, state, depth + 1
+    )
+    if right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return f"({left}).add ({right})"
+    if isinstance(node.op, ast.Sub):
+        return f"({left}).sub ({right})"
+    if isinstance(node.op, ast.Mult):
+        return f"({left}).mul ({right})"
+    return None
+
+
+def _constant_fraction(node: ast.AST) -> Fraction | None:
+    if isinstance(node, ast.Constant):
+        if type(node.value) is int:
+            if abs(node.value).bit_length() > 256:
+                return None
+            return Fraction(node.value)
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _constant_fraction(node.operand)
+        if value is None:
+            return None
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _constant_fraction(node.left)
+    right = _constant_fraction(node.right)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        value = left + right
+    elif isinstance(node.op, ast.Sub):
+        value = left - right
+    elif isinstance(node.op, ast.Mult):
+        value = left * right
+    elif isinstance(node.op, ast.Div) and right:
+        value = left / right
+    elif isinstance(node.op, ast.Pow) and right.denominator == 1 and 0 <= right <= 16:
+        value = left ** right.numerator
+    else:
+        return None
+    if value.numerator.bit_length() > 4096 or value.denominator.bit_length() > 4096:
+        return None
+    return value
+
+
+def _lean_fraction(value: Fraction) -> str:
+    if value.denominator == 1:
+        return str(value.numerator)
+    return f"({value.numerator} / {value.denominator})"
+
+
+def _normalize_decimal_literals(source: str) -> str | None:
+    invalid = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal invalid
+        token = match.group(0)
+        try:
+            decimal = Decimal(token)
+            _, digits, exponent = decimal.as_tuple()
+            if len(digits) > 1233 or abs(exponent) > 1233:
+                invalid = True
+                return token
+            if exponent >= 0 and len(digits) + exponent > 1233:
+                invalid = True
+                return token
+            value = Fraction(decimal)
+        except (InvalidOperation, ValueError, OverflowError):
+            invalid = True
+            return token
+        if value.numerator.bit_length() > 256 or value.denominator.bit_length() > 256:
+            invalid = True
+            return token
+        if value.denominator == 1:
+            return str(value.numerator)
+        return f"({value.numerator}/{value.denominator})"
+
+    normalized = _DECIMAL_LITERAL.sub(replace, source)
+    return None if invalid else normalized
+
+
+def _polynomial_equality_source(lhs: str, rhs: str, variables: list[str]) -> str:
+    binders = " ".join(f"({name} : ℂ)" for name in variables)
+    if variables:
+        proposition = f"{lhs} = {rhs}"
+    else:
+        proposition = f"({lhs} : ℂ) = ({rhs} : ℂ)"
+    declaration = f"theorem wolfram_language_compute {binders} : {proposition} := by\n  ring"
+    return (
+        "import Mathlib.Data.Complex.Basic\n"
+        "import Mathlib.Tactic.Ring\n\n"
+        f"{declaration}\n\n"
+        "#print axioms wolfram_language_compute\n"
+    )
 
 
 def check_computation(computation: Computation, timeout_seconds: float) -> LeanResult:

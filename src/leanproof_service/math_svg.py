@@ -33,13 +33,19 @@ def mathml_image(
     alt: str,
     *,
     max_width: int = 500,
+    magnification: float = 1.0,
 ) -> dict[str, object] | None:
     """Render allowlisted presentation MathML to an inline SVG image.
 
     Unsupported or oversized MathML returns ``None`` so callers can use their
     escaped-text rendering fallback.
     """
-    if not source or len(source) > _MAX_SOURCE_CHARS:
+    if (
+        not source
+        or len(source) > _MAX_SOURCE_CHARS
+        or not math.isfinite(magnification)
+        or not 0.5 <= magnification <= 2.0
+    ):
         return None
     if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", source, re.IGNORECASE):
         return None
@@ -64,16 +70,20 @@ def mathml_image(
     scale = min(1.0, output_width / natural_width)
     output_height = max(24, math.ceil(natural_height * scale))
     baseline = padding_y + box.ascent
+    center_x = natural_width / 2
+    center_y = natural_height / 2
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{output_width}" '
         f'height="{output_height}" viewBox="0 0 {natural_width} {natural_height}" '
         'preserveAspectRatio="xMidYMid meet" role="img" '
         f'aria-label="{title}"><title>{title}</title>'
         '<rect width="100%" height="100%" fill="#ffffff"/>'
+        f'<g transform="translate({center_x:g} {center_y:g}) '
+        f'scale({magnification:g}) translate({-center_x:g} {-center_y:g})">'
         '<g fill="#111827" stroke="#111827" stroke-width="1.5" '
         'font-family="Cambria Math,STIX Two Math,DejaVu Serif,serif">'
         f'<g transform="translate({padding_x} {baseline})">{box.body}</g>'
-        '</g></svg>'
+        '</g></g></svg>'
     )
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return {

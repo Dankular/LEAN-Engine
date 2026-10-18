@@ -23,6 +23,13 @@ if (-not $env:API_BEARER_TOKEN) {
     $env:API_BEARER_TOKEN = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
 }
 
+if (-not $env:KIMINA_BASE_URL) {
+    $env:KIMINA_BASE_URL = 'http://127.0.0.1:8081/v1'
+}
+if (-not $env:KIMINA_MODEL) {
+    $env:KIMINA_MODEL = 'Kimina-Prover-RL-0.6B.i1-Q6_K.gguf'
+}
+
 Write-Host "Starting the LEAN Engine API at http://127.0.0.1:$Port"
 Write-Host "The local development token is stored in .dev-api-token (git-ignored)."
 
