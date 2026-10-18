@@ -1031,6 +1031,10 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         "integrate": "integrate",
         "integral": "integrate",
         "limit": "limit",
+        "sum": "sum",
+        "summation": "sum",
+        "product": "product",
+        "prod": "product",
         "solve": "solve",
         "identity": "identity",
     }
@@ -1053,7 +1057,9 @@ def _operation_request(
     aliases = {
         "simplify": "simplify", "factor": "factor", "expand": "expand",
         "differentiate": "differentiate", "diff": "differentiate",
-        "integrate": "integrate", "integral": "integrate", "limit": "limit", "solve": "solve",
+        "integrate": "integrate", "integral": "integrate", "limit": "limit",
+        "sum": "sum", "summation": "sum", "product": "product", "prod": "product",
+        "solve": "solve",
         "identity": "identity",
     }
     operation = aliases.get(operation_name.lower())
@@ -1090,6 +1096,25 @@ def _operation_request(
             point=arguments[2],
             time_limit_seconds=5,
         )
+    if operation in {"sum", "product"}:
+        if len(arguments) != 4 or variable is None or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
+        ):
+            raise InterpretationError(
+                f"{operation} requires an expression, variable, lower bound, and upper bound"
+            )
+        if any(not _is_bounded_integer_literal(bound) for bound in arguments[2:]):
+            raise InterpretationError(
+                f"{operation} query calls require integer literal bounds; use /v1/symbolic for declared symbolic bounds"
+            )
+        return SymbolicRequest(
+            operation=operation,
+            expression=arguments[0],
+            variable=variable,
+            lower=arguments[2],
+            upper=arguments[3],
+            time_limit_seconds=5,
+        )
     if len(arguments) not in {2, 4} or variable is None or not re.fullmatch(
         r"[A-Za-z][A-Za-z0-9_]{0,31}", variable
     ):
@@ -1104,6 +1129,27 @@ def _operation_request(
         upper=arguments[3] if len(arguments) == 4 else None,
         time_limit_seconds=5,
     )
+
+
+def _is_bounded_integer_literal(source: str) -> bool:
+    if len(source) > 90:
+        return False
+    try:
+        node = ast.parse(source, mode="eval").body
+    except SyntaxError:
+        return False
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        value = node.value
+    elif (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and type(node.operand.value) is int
+    ):
+        value = node.operand.value if isinstance(node.op, ast.UAdd) else -node.operand.value
+    else:
+        return False
+    return abs(value).bit_length() <= 256
 
 
 def _split_operation_call(query: str) -> tuple[str, list[str]] | None:
@@ -1454,6 +1500,12 @@ def _wolfram_input_for_query(
         upper = _wolfram_expression(request.upper)
         if lower is not None and upper is not None:
             return f"Integrate[{rendered_expression}, {{{variable}, {lower}, {upper}}}]"
+    if request.operation in {"sum", "product"} and rendered_expression is not None and variable:
+        lower = _wolfram_expression(request.lower or "")
+        upper = _wolfram_expression(request.upper or "")
+        if lower is not None and upper is not None:
+            function = "Sum" if request.operation == "sum" else "Product"
+            return f"{function}[{rendered_expression}, {{{variable}, {lower}, {upper}}}]"
     if request.operation == "limit" and rendered_expression is not None and variable:
         point = _wolfram_expression(request.point or "")
         if point is not None:

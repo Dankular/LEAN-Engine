@@ -128,8 +128,15 @@ def capabilities() -> dict[str, object]:
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
         "symbolic_operations": [
-            "validate", "simplify", "factor", "expand", "differentiate", "integrate", "limit", "solve", "identity"
+            "validate", "simplify", "factor", "expand", "differentiate", "integrate",
+            "limit", "sum", "product", "solve", "identity",
         ],
+        "symbolic_discrete_aggregations": {
+            "query_bounds": "inclusive integer literals",
+            "maximum_bound_size_bits": 256,
+            "symbolic_bounds": "inclusive symbolic bounds must be declared integer in /v1/symbolic assumptions",
+            "proof_status": "symbolic result, not a Lean proof",
+        },
         "symbolic_limit": {
             "semantics": "two-sided limit over the real line",
             "finite_points": "both one-sided limits are checked; symbolic points must be declared real in /v1/symbolic",
@@ -182,7 +189,7 @@ def capabilities() -> dict[str, object]:
                 "query_classes": [
                     "safe symbolic expressions",
                     "presentation LaTeX and MathML expressions",
-                    "simplify/factor/expand/differentiate/integrate/limit/solve/identity calls",
+                    "simplify/factor/expand/differentiate/integrate/limit/sum/product/solve/identity calls",
                     "weather location queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",

@@ -22,7 +22,8 @@ AssumptionName = Literal[
 ]
 UnitName = Literal["meter", "minute", "us_minim"]
 SymbolicOperation = Literal[
-    "validate", "simplify", "factor", "expand", "differentiate", "integrate", "limit", "solve", "identity"
+    "validate", "simplify", "factor", "expand", "differentiate", "integrate",
+    "limit", "sum", "product", "solve", "identity",
 ]
 
 
@@ -55,15 +56,19 @@ class SymbolicRequest(StrictModel):
                 raise ValueError("validate does not accept a variable or integration bounds")
             if self.assumptions:
                 raise ValueError("validate does not accept symbolic assumptions")
-        if self.operation in {"differentiate", "integrate", "limit", "solve"} and self.variable is None:
+        variable_operations = {"differentiate", "integrate", "limit", "sum", "product", "solve"}
+        if self.operation in variable_operations and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
-        if self.operation not in {"differentiate", "integrate", "limit", "solve"} and self.variable is not None:
-            raise ValueError("variable is only used by differentiate, integrate, limit, or solve")
+        if self.operation not in variable_operations and self.variable is not None:
+            raise ValueError("variable is only used by differentiate, integrate, limit, sum, product, or solve")
         if self.operation == "integrate":
             if (self.lower is None) != (self.upper is None):
                 raise ValueError("definite integration requires both lower and upper")
+        elif self.operation in {"sum", "product"}:
+            if self.lower is None or self.upper is None:
+                raise ValueError(f"{self.operation} requires lower and upper bounds")
         elif self.lower is not None or self.upper is not None:
-            raise ValueError("lower and upper are only supported by integrate")
+            raise ValueError("lower and upper are only supported by integrate, sum, or product")
         if self.operation == "limit":
             if self.point is None:
                 raise ValueError("limit requires a point")
@@ -73,6 +78,8 @@ class SymbolicRequest(StrictModel):
             raise ValueError("assumption lists cannot contain duplicates")
         if set(self.assumptions) & set(self.named_units):
             raise ValueError("a name cannot be both a symbolic assumption and a unit")
+        if self.operation in {"sum", "product"} and self.variable in self.named_units:
+            raise ValueError("sum/product variables cannot be bound to named physical units")
         return self
 
 
@@ -218,6 +225,17 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             result = sp.integrate(expression, (variable, lower, upper))
         else:
             result = sp.integrate(expression, variable)
+    elif request.operation in {"sum", "product"}:
+        lower = parser.parse(request.lower or "")
+        upper = parser.parse(request.upper or "")
+        if lower.is_integer is not True or upper.is_integer is not True:
+            raise SymbolicInputError(
+                f"{request.operation} bounds must be known integers; declare symbolic bounds as integer"
+            )
+        if request.operation == "sum":
+            result = sp.summation(expression, (variable, lower, upper))
+        else:
+            result = sp.product(expression, (variable, lower, upper))
     else:
         result = sp.solve(expression, variable, dict=True)
         result = [
