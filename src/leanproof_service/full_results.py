@@ -28,7 +28,7 @@ from .symbolic import SymbolicRequest, run_symbolic
 
 
 _API_VERSION = "2.0"
-_SUPPORTED_FORMATS = {"plaintext", "mathml"}
+_SUPPORTED_FORMATS = {"plaintext", "minput", "moutput", "mathml"}
 _KNOWN_FORMATS = {
     "image", "imagemap", "plaintext", "minput", "moutput", "cell", "mathml", "sound", "wav"
 }
@@ -138,7 +138,19 @@ def execute_query(
     elapsed = perf_counter() - started
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
-    pods = _initial_pods(input_text, expression, None, formats, input_mathml=input_mathml)
+    input_minput = _wolfram_input_for_query(
+        expression,
+        symbolic_request,
+        is_explicit_operation=(interpreted["interpretation"].get("kind") == "typed_symbolic_operation"),
+    )
+    pods = _initial_pods(
+        input_text,
+        expression,
+        None,
+        formats,
+        input_mathml=input_mathml,
+        input_minput=input_minput,
+    )
     warnings = _format_warnings(formats)
     if symbolic.get("timed_out"):
         payload = _query_envelope(
@@ -175,6 +187,8 @@ def execute_query(
         formats,
         input_mathml=input_mathml,
         result_mathml=symbolic.get("result_mathml"),
+        input_minput=input_minput,
+        result_moutput=_wolfram_value(symbolic.get("result")),
     )
     filtered = _select_pods(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
@@ -479,7 +493,7 @@ def _execute_provider_query(
         elapsed=elapsed,
         parse_timing=parse_timing,
         datatypes=datatype,
-        warnings=_format_warnings(formats),
+        warnings=_format_warnings(formats, {"plaintext", "mathml"}),
         assumptions=[],
         interpretation={
             "kind": "typed_data_request",
@@ -871,6 +885,8 @@ def _initial_pods(
     *,
     input_mathml: str | None = None,
     result_mathml: str | None = None,
+    input_minput: str | None = None,
+    result_moutput: str | None = None,
 ) -> list[dict[str, Any]]:
     selected_formats = formats or ["plaintext"]
     subpod_input: dict[str, Any] = {"title": ""}
@@ -883,6 +899,10 @@ def _initial_pods(
         subpod_input["mathml"] = input_mathml or _mathml(expression)
         if result_text is not None:
             subpod_result["mathml"] = result_mathml or _mathml(result_text)
+    if "minput" in selected_formats and input_minput is not None:
+        subpod_input["minput"] = input_minput
+    if "moutput" in selected_formats and result_moutput is not None:
+        subpod_result["moutput"] = result_moutput
     return [
         {
             "title": "Input interpretation",
@@ -907,14 +927,152 @@ def _initial_pods(
     ]
 
 
-def _format_warnings(formats: list[str]) -> list[dict[str, str]]:
-    omitted = [name for name in formats if name not in _SUPPORTED_FORMATS]
+def _format_warnings(
+    formats: list[str], supported_formats: set[str] | None = None
+) -> list[dict[str, str]]:
+    supported = supported_formats or _SUPPORTED_FORMATS
+    omitted = [name for name in formats if name not in supported]
     if not omitted:
         return []
     return [{
-        "text": "This service does not currently render these requested formats: "
+        "text": "These requested formats are not available for this query: "
         + ", ".join(omitted)
     }]
+
+
+def _wolfram_input_for_query(
+    expression: str,
+    request: SymbolicRequest,
+    *,
+    is_explicit_operation: bool,
+) -> str | None:
+    if not is_explicit_operation:
+        return _wolfram_expression(expression)
+
+    rendered_expression = _wolfram_expression(request.expression or "")
+    variable = _wolfram_symbol(request.variable or "")
+    if request.operation == "simplify" and rendered_expression is not None:
+        return f"Simplify[{rendered_expression}]"
+    if request.operation == "differentiate" and rendered_expression is not None and variable:
+        return f"D[{rendered_expression}, {variable}]"
+    if request.operation == "solve" and rendered_expression is not None and variable:
+        return f"Solve[{rendered_expression} == 0, {variable}]"
+    if request.operation == "integrate" and rendered_expression is not None and variable:
+        if request.lower is None or request.upper is None:
+            return f"Integrate[{rendered_expression}, {variable}]"
+        lower = _wolfram_expression(request.lower)
+        upper = _wolfram_expression(request.upper)
+        if lower is not None and upper is not None:
+            return f"Integrate[{rendered_expression}, {{{variable}, {lower}, {upper}}}]"
+    if request.operation == "identity":
+        lhs = _wolfram_expression(request.lhs or "")
+        rhs = _wolfram_expression(request.rhs or "")
+        if lhs is not None and rhs is not None:
+            return f"FullSimplify[{lhs} == {rhs}]"
+    return None
+
+
+def _wolfram_expression(source: str) -> str | None:
+    try:
+        node = ast.parse(source, mode="eval").body
+        return _render_wolfram_node(node)
+    except (SyntaxError, TypeError, ValueError):
+        return None
+
+
+def _render_wolfram_node(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        constants = {
+            "pi": "Pi",
+            "E": "E",
+            "I": "I",
+            "oo": "Infinity",
+            "zoo": "ComplexInfinity",
+            "nan": "Indeterminate",
+        }
+        return constants.get(node.id, _wolfram_symbol(node.id))
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return "True" if node.value else "False"
+        if isinstance(node.value, (int, float)):
+            return _wolfram_number(node.value)
+        if isinstance(node.value, str):
+            return json.dumps(node.value, ensure_ascii=False)
+        raise TypeError("unsupported Wolfram output literal")
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        sign = "+" if isinstance(node.op, ast.UAdd) else "-"
+        return f"({sign}{_render_wolfram_node(node.operand)})"
+    if isinstance(node, ast.BinOp):
+        operators = {
+            ast.Add: "+",
+            ast.Sub: "-",
+            ast.Mult: "*",
+            ast.Div: "/",
+            ast.Pow: "^",
+        }
+        operator = operators.get(type(node.op))
+        if operator is None:
+            raise TypeError("unsupported Wolfram output operator")
+        left = _render_wolfram_node(node.left)
+        right = _render_wolfram_node(node.right)
+        return f"({left} {operator} {right})"
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
+        functions = {
+            "sin": "Sin", "cos": "Cos", "tan": "Tan",
+            "asin": "ArcSin", "acos": "ArcCos", "atan": "ArcTan",
+            "sinh": "Sinh", "cosh": "Cosh", "tanh": "Tanh",
+            "exp": "Exp", "log": "Log", "sqrt": "Sqrt",
+            "Abs": "Abs", "abs": "Abs", "floor": "Floor", "ceiling": "Ceiling",
+        }
+        function = functions.get(node.func.id)
+        if function is None:
+            raise TypeError("unsupported Wolfram output function")
+        args = [_render_wolfram_node(arg) for arg in node.args]
+        if function == "Log" and len(args) == 2:
+            args.reverse()
+        return f"{function}[{', '.join(args)}]"
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return "{" + ", ".join(_render_wolfram_node(item) for item in node.elts) + "}"
+    raise TypeError("unsupported Wolfram output expression")
+
+
+def _wolfram_symbol(name: str) -> str:
+    if re.fullmatch(r"[A-Za-z$][A-Za-z0-9$]*", name):
+        return name
+    return f"Symbol[{json.dumps(name, ensure_ascii=False)}]"
+
+
+def _wolfram_number(value: int | float) -> str:
+    if isinstance(value, int):
+        return str(value)
+    number = format(value, ".17g")
+    return re.sub(r"[eE]([+-]?\d+)$", r"*^\1", number)
+
+
+def _wolfram_value(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        return _wolfram_number(value)
+    if isinstance(value, str):
+        return _wolfram_expression(value)
+    if isinstance(value, list):
+        if all(isinstance(solution, dict) for solution in value):
+            rendered = []
+            for solution in value:
+                rules = []
+                for name, result in solution.items():
+                    value_expression = _wolfram_value(result)
+                    if value_expression is None:
+                        return None
+                    rules.append(f"{_wolfram_symbol(str(name))} -> {value_expression}")
+                rendered.append("{" + ", ".join(rules) + "}")
+            return "{" + ", ".join(rendered) + "}"
+        rendered_items = [_wolfram_value(item) for item in value]
+        if any(item is None for item in rendered_items):
+            return None
+        return "{" + ", ".join(item for item in rendered_items if item is not None) + "}"
+    return None
 
 
 def _select_pods(

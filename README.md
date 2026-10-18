@@ -132,7 +132,7 @@ The Wolfram|Alpha Full Results API reference is saved as [HTML](WolframAlpha-API
 
 ## Full Results-style computation API
 
-`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner supports the safe symbolic expression grammar described below, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml` returns available textual and MathML representations. Other documented Wolfram formats are recognized but omitted with a warning until a local renderer exists.
+`GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner supports the safe symbolic expression grammar described below, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
 
 ```bash
 curl -G http://127.0.0.1:8000/v2/query \
