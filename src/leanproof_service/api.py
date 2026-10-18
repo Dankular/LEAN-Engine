@@ -147,6 +147,7 @@ def capabilities() -> dict[str, object]:
                 ],
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
+                "query_controls": {"ignorecase": True, "reinterpret": False, "translation": False},
                 "pod_states": [
                     "DecimalApproximation__More digits",
                     "DecimalApproximation__Fewer digits",
@@ -234,6 +235,7 @@ def full_results_query(
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
+    ignorecase: Annotated[bool, Query()] = False,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -265,6 +267,7 @@ def full_results_query(
             pod_titles=podtitle,
             pod_indexes=podindex,
             scanners=scanner,
+            ignorecase=ignorecase,
         )
     except (AssumptionSelectionError, FullResultsRequestError) as exc:
         response = render_response(query_error(input, str(exc)), selected_output)
@@ -277,6 +280,8 @@ def full_results_query(
         )
         response.status_code = exc.status_code
         return response
+    if ignorecase:
+        payload["queryresult"]["ignorecase"] = True
     return render_response(payload, selected_output)
 
 
@@ -288,6 +293,7 @@ def full_results_validatequery(
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
+    ignorecase: Annotated[bool, Query()] = False,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -305,7 +311,8 @@ def full_results_validatequery(
         return response
     try:
         payload = validate_query(
-            input, assumption, location=location, latlong=latlong, units=units
+            input, assumption, location=location, latlong=latlong, units=units,
+            ignorecase=ignorecase,
         )
     except AssumptionSelectionError as exc:
         response = render_response(validate_error(input, str(exc)), selected_output)
@@ -315,6 +322,8 @@ def full_results_validatequery(
         response = render_response(validate_error(input, str(exc)), selected_output)
         response.status_code = status.HTTP_400_BAD_REQUEST
         return response
+    if ignorecase:
+        payload["validatequeryresult"]["ignorecase"] = True
     return render_response(payload, selected_output)
 
 

@@ -134,6 +134,8 @@ The Wolfram|Alpha Full Results API reference is saved as [HTML](WolframAlpha-API
 
 `GET /v2/query` returns a `queryresult` envelope in XML by default. Set `output=json` for JSON. The planner accepts native formulas and the bounded presentation-LaTeX or MathML subsets described above, with explicit `simplify(expr)`, `differentiate(expr, variable)`, `integrate(expr, variable[, lower, upper])`, `solve(expr, variable)`, and `identity(lhs, rhs)` forms. It returns input interpretation and result pods. Each result includes source/evidence metadata; SymPy results are explicitly marked as not formally verified. `format=plaintext,mathml,minput,moutput` requests textual, MathML, Wolfram Language input, and Wolfram Language output forms for mathematical pods. Image, imagemap, cell, sound, and wav formats are recognized but omitted with a warning; data pods can omit MInput/MOutput when no meaningful Wolfram expression exists.
 
+The `ignorecase=true` query parameter case-folds mathematical input before parsing. Provider request patterns are matched without case sensitivity while case-sensitive provider identifiers are preserved. The original input remains in the response, and the result records `ignorecase=true`. Case folding also folds formula variable names, so use it only when case should not distinguish symbols. The same control is available on `/v2/validatequery`. Translation and query reinterpretation are not implemented.
+
 ```bash
 curl -G http://127.0.0.1:8000/v2/query \
   -H "Authorization: Bearer replace-with-a-long-random-token" \

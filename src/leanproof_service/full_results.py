@@ -93,8 +93,10 @@ def execute_query(
     pod_titles: list[str] | None = None,
     pod_indexes: list[str] | None = None,
     scanners: list[str] | None = None,
+    ignorecase: bool = False,
 ) -> dict[str, Any]:
     started = perf_counter()
+    planning_input = input_text.casefold() if ignorecase else input_text
     requested_pod_states = _split_values(pod_states or [])
     if pod_states is not None and not requested_pod_states:
         raise FullResultsRequestError("podstate must contain a supported state input")
@@ -129,7 +131,7 @@ def execute_query(
         )
     try:
         interpreted, symbolic_request = _prepare_query(
-            input_text,
+            planning_input,
             assumptions or [],
             validate_only=False,
             numeric_precision=numeric_precision,
@@ -247,8 +249,10 @@ def validate_query(
     location: str | None = None,
     latlong: str | None = None,
     units: str | None = None,
+    ignorecase: bool = False,
 ) -> dict[str, Any]:
     started = perf_counter()
+    planning_input = input_text.casefold() if ignorecase else input_text
     try:
         provider_request = _provider_request(input_text, location, latlong, units)
         if provider_request is not None:
@@ -276,7 +280,7 @@ def validate_query(
                     },
                 }
             }
-        interpreted, _ = _prepare_query(input_text, assumptions or [], validate_only=True)
+        interpreted, _ = _prepare_query(planning_input, assumptions or [], validate_only=True)
     except ProviderContextNeeded as exc:
         elapsed = perf_counter() - started
         return {
