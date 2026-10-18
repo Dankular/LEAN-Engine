@@ -224,7 +224,7 @@ def capabilities() -> dict[str, object]:
             "dbnomics": {"coverage": "individual time series", "status": "implemented"},
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},
-            "open_meteo": {"coverage": "current weather by location or coordinates", "status": "implemented"},
+            "open_meteo": {"coverage": "current weather and seven-day forecasts by location or coordinates; forecast chart included", "status": "implemented"},
         },
         "compatibility": {
             "wolfram_alpha_full_results": {
@@ -236,6 +236,7 @@ def capabilities() -> dict[str, object]:
                     "safe symbolic expressions",
                     "presentation LaTeX and MathML expressions",
                     "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
+                    "bounded natural-language symbolic instructions",
                     "weather location queries",
                     "explicit seven-day weather forecast queries",
                     "supported CODATA constants",
@@ -243,6 +244,18 @@ def capabilities() -> dict[str, object]:
                     "explicit GeoNames place searches",
                     "explicit DBnomics time-series requests",
                 ],
+                "natural_language_math": {
+                    "status": "bounded_initial_slice",
+                    "operations": [
+                        "evaluate", "simplify", "factor", "expand", "differentiate",
+                        "integrate", "solve", "limit", "series", "sum", "product", "plot",
+                    ],
+                    "parser": "deterministic allowlisted templates; no model ranking",
+                    "symbolic_backend": "SymPy",
+                    "sum_product_bounds": "integer literals only",
+                    "ambiguous_function_scope": "requires explicit parentheses",
+                    "proofs": "query results are not Lean-checked; use /v1/natural-language/prove",
+                },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
                 "weather_outputs": ["current conditions", "seven-day forecast", "daily forecast chart"],
@@ -291,6 +304,19 @@ def capabilities() -> dict[str, object]:
                     "DecimalApproximation__Fewer digits",
                 ],
                 "validation_path": "/v2/validatequery",
+                "natural_language_queries": {
+                    "status": "bounded_initial_slice",
+                    "operations": [
+                        "evaluate", "simplify", "factor", "expand", "differentiate",
+                        "integrate", "solve", "limit", "series", "sum", "product", "plot",
+                    ],
+                    "parser": "deterministic phrase templates; no free-form model generation",
+                    "validation": "bounded mathematical input parser and SymPy validation",
+                    "variable_policy": "infer only one unambiguous free symbol; otherwise return clarification",
+                    "assumption_policy": "evaluation phrases use the existing typed assumption registry; operation phrases do not infer assumptions",
+                    "result_metadata": "interpretation.natural_language_plan and queryresult.classification",
+                    "validatequery_support": True,
+                },
             },
             "wolfram_language_compute": {
                 "path": "/api/cag/v1/WolframLanguageCompute",

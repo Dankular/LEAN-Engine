@@ -31,6 +31,11 @@ from .knowledge import (
     supported_nist_constants,
 )
 from .math_svg import mathml_image
+from .natural_language_query import (
+    NaturalLanguageClarification,
+    NaturalLanguageOperation,
+    plan_natural_language_operation,
+)
 from .symbolic import SymbolicRequest, run_symbolic
 from .weather_svg import forecast_chart_image, forecast_plaintext
 
@@ -1004,11 +1009,51 @@ def _prepare_query(
     pod_timeout_seconds: float | None = None,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
+    natural_language_plan: NaturalLanguageOperation | None = None
     try:
         operation_request = _parse_operation_call(input_text)
+        if operation_request is None:
+            natural_language_plan = plan_natural_language_operation(input_text)
+            if natural_language_plan is not None and natural_language_plan.operation != "evaluate":
+                operation_request = _request_from_natural_language_plan(natural_language_plan)
+    except NaturalLanguageClarification as exc:
+        raise InterpretationError(str(exc)) from exc
     except ValidationError as exc:
         raise InterpretationError("symbolic operation arguments are invalid") from exc
     if operation_request is None:
+        if natural_language_plan is not None and natural_language_plan.operation == "evaluate":
+            interpreted = query_with_interpretations(
+                natural_language_plan.expression,
+                assumptions,
+                compute=not validate_only,
+                numeric_precision=numeric_precision,
+                time_limit_seconds=time_limit_seconds,
+                parse_timeout_seconds=parse_timeout_seconds,
+                pod_timeout_seconds=pod_timeout_seconds,
+                deadline=deadline,
+            )
+            interpreted["input"] = input_text
+            interpreted["interpretation"]["natural_language_plan"] = {
+                "rule_id": natural_language_plan.rule_id,
+                "candidate_count": 1,
+                "selected_candidate": {
+                    "operation": "evaluate",
+                    "expression": natural_language_plan.expression,
+                },
+                "selection_source": "deterministic_template",
+            }
+            interpreted["classification"]["query_intent"] = {
+                "operation": "evaluate",
+                "method": "deterministic_template_match",
+                "model_ranked": False,
+            }
+            symbolic_request = SymbolicRequest(
+                operation="simplify",
+                expression=str(interpreted["interpretation"]["expression"]),
+                time_limit_seconds=time_limit_seconds,
+                numeric_precision=numeric_precision,
+            )
+            return interpreted, symbolic_request
         interpreted = query_with_interpretations(
             input_text,
             assumptions,
@@ -1109,14 +1154,65 @@ def _prepare_query(
             "variable": operation_request.variable,
             "solver_route": "sympy",
             **({"input_formats": sorted(input_formats - {"native"})} if input_formats - {"native"} else {}),
+            **({
+                "natural_language_plan": {
+                    "rule_id": natural_language_plan.rule_id,
+                    "candidate_count": 1,
+                    "selected_candidate": {
+                        "operation": operation,
+                        **typed_ast,
+                    },
+                    "selection_source": "deterministic_template",
+                    **({"variable_source": natural_language_plan.variable_source}
+                       if natural_language_plan.variable_source else {}),
+                }
+            } if natural_language_plan is not None else {}),
         },
-        "classification": {
-            "name": "not_applicable",
-            "method": "explicit operation syntax",
-            "ranks_candidates_only": True,
-        },
+        "classification": (
+            {
+                "name": operation,
+                "method": "deterministic_template_match",
+                "candidate_count": 1,
+                "model_ranked": False,
+            }
+            if natural_language_plan is not None
+            else {
+                "name": "not_applicable",
+                "method": "explicit operation syntax",
+                "ranks_candidates_only": True,
+            }
+        ),
     }
     return interpreted, operation_request
+
+
+def _request_from_natural_language_plan(
+    plan: NaturalLanguageOperation,
+) -> SymbolicRequest:
+    arguments = [plan.expression]
+    if plan.operation in {"differentiate", "solve", "integrate", "limit", "series", "sum", "product", "plot"}:
+        if plan.variable is None:
+            raise InterpretationError(f"{plan.operation} requires an explicit variable")
+        arguments.append(plan.variable)
+    if plan.operation == "integrate":
+        if plan.lower is not None and plan.upper is not None:
+            arguments.extend((plan.lower, plan.upper))
+    elif plan.operation == "limit":
+        if plan.point is None:
+            raise InterpretationError("limit requires a point")
+        arguments.append(plan.point)
+    elif plan.operation == "series":
+        if plan.point is None or plan.order is None:
+            raise InterpretationError("series requires an expansion point and order")
+        arguments.extend((plan.point, str(plan.order)))
+    elif plan.operation in {"sum", "product", "plot"}:
+        if plan.lower is None or plan.upper is None:
+            raise InterpretationError(f"{plan.operation} requires lower and upper bounds")
+        arguments.extend((plan.lower, plan.upper))
+    request = _operation_request(plan.operation, arguments, plan.variable)
+    if request is None:
+        raise InterpretationError("natural-language operation did not produce a supported query")
+    return request
 
 
 def _parse_operation_call(query: str) -> SymbolicRequest | None:
