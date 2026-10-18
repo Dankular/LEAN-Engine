@@ -82,6 +82,7 @@ def execute_query(
     *,
     location: str | None = None,
     latlong: str | None = None,
+    units: str | None = None,
     include_pod_ids: list[str] | None = None,
     exclude_pod_ids: list[str] | None = None,
     pod_titles: list[str] | None = None,
@@ -91,7 +92,7 @@ def execute_query(
     started = perf_counter()
     provider_parse_started = perf_counter()
     try:
-        provider_request = _provider_request(input_text, location, latlong)
+        provider_request = _provider_request(input_text, location, latlong, units)
     except ProviderContextNeeded as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     provider_parse_timing = perf_counter() - provider_parse_started
@@ -219,10 +220,11 @@ def validate_query(
     *,
     location: str | None = None,
     latlong: str | None = None,
+    units: str | None = None,
 ) -> dict[str, Any]:
     started = perf_counter()
     try:
-        provider_request = _provider_request(input_text, location, latlong)
+        provider_request = _provider_request(input_text, location, latlong, units)
         if provider_request is not None:
             if assumptions:
                 raise AssumptionSelectionError(
@@ -302,7 +304,11 @@ def _provider_request(
     input_text: str,
     location: str | None,
     latlong: str | None,
+    units: str | None,
 ) -> KnowledgeRequest | None:
+    unit_system = units.strip().lower() if units is not None else None
+    if unit_system is not None and unit_system not in {"metric", "nonmetric"}:
+        raise FullResultsRequestError("units must be either 'metric' or 'nonmetric'")
     weather = re.fullmatch(
         r"\s*(?:(?:what\s+is|what's)\s+)?(?:the\s+)?(?:current\s+)?weather"
         r"(?:\s+(?:in|at|for)\s+(.+?))?\s*[?.!]*\s*",
@@ -319,11 +325,13 @@ def _provider_request(
             raise FullResultsRequestError("location and latlong cannot be combined")
         if embedded_location:
             return _knowledge_request(
-                provider="open_meteo", operation="weather", location=embedded_location
+                provider="open_meteo", operation="weather", location=embedded_location,
+                units=unit_system,
             )
         if location:
             return _knowledge_request(
-                provider="open_meteo", operation="weather", location=location.strip()
+                provider="open_meteo", operation="weather", location=location.strip(),
+                units=unit_system,
             )
         if latlong:
             pieces = latlong.split(",")
@@ -338,13 +346,16 @@ def _provider_request(
                 operation="weather",
                 latitude=latitude,
                 longitude=longitude,
+                units=unit_system,
             )
         raise ProviderContextNeeded(
             "weather needs an explicit location; use input='weather in <place>', location, or latlong"
         )
 
-    if location is not None or latlong is not None:
-        raise FullResultsRequestError("location and latlong are currently supported for weather queries")
+    if location is not None or latlong is not None or unit_system is not None:
+        raise FullResultsRequestError(
+            "location, latlong, and units are currently supported for weather queries"
+        )
 
     entity = re.fullmatch(r"\s*(?:entity|wikidata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
     if entity:

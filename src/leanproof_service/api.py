@@ -130,6 +130,7 @@ def capabilities() -> dict[str, object]:
                     "explicit DBnomics time-series requests",
                 ],
                 "location_parameters": ["location", "latlong"],
+                "supported_weather_parameters": ["location", "latlong", "units"],
                 "validation_path": "/v2/validatequery",
             },
             "wolfram_language_compute": {
@@ -211,6 +212,7 @@ def full_results_query(
     scanner: Annotated[list[str] | None, Query()] = None,
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
+    units: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -235,6 +237,7 @@ def full_results_query(
             formats,
             location=location,
             latlong=latlong,
+            units=units,
             include_pod_ids=includepodid,
             exclude_pod_ids=excludepodid,
             pod_titles=podtitle,
@@ -262,6 +265,7 @@ def full_results_validatequery(
     assumption: Annotated[list[str] | None, Query()] = None,
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
+    units: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
         selected_output = normalize_output(output)
@@ -278,7 +282,9 @@ def full_results_validatequery(
         response.status_code = status.HTTP_400_BAD_REQUEST
         return response
     try:
-        payload = validate_query(input, assumption, location=location, latlong=latlong)
+        payload = validate_query(
+            input, assumption, location=location, latlong=latlong, units=units
+        )
     except AssumptionSelectionError as exc:
         response = render_response(validate_error(input, str(exc)), selected_output)
         response.status_code = status.HTTP_400_BAD_REQUEST

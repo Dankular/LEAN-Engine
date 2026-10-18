@@ -23,14 +23,12 @@ if (-not $env:API_BEARER_TOKEN) {
     $env:API_BEARER_TOKEN = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
 }
 
-Write-Host "Starting the LEAN Engine project watcher at http://127.0.0.1:$Port"
-Write-Host "Watching project source and build inputs under $projectRoot"
-Write-Host "Python source is compiled on change; Lean files are type-checked before restart."
+Write-Host "Starting the LEAN Engine API at http://127.0.0.1:$Port"
 Write-Host "The local development token is stored in .dev-api-token (git-ignored)."
 
 Push-Location $projectRoot
 try {
-    & $pythonExe (Join-Path $PSScriptRoot 'watch_api.py') --port $Port
+    & $pythonExe -m uvicorn leanproof_service.api:app --app-dir src --host 127.0.0.1 --port $Port
     exit $LASTEXITCODE
 } finally {
     Pop-Location

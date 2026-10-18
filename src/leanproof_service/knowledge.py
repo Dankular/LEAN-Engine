@@ -26,6 +26,7 @@ class KnowledgeRequest(StrictModel):
     location: str | None = Field(default=None, min_length=1, max_length=200)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    units: Literal["metric", "nonmetric"] | None = None
     language: str = Field(default="en", pattern=r"^[a-z]{2}$")
     max_results: int = Field(default=5, ge=1, le=10)
     timeout_seconds: int = Field(default=10, ge=1, le=20)
@@ -60,6 +61,8 @@ class KnowledgeRequest(StrictModel):
                 raise ValueError("Open-Meteo requires both latitude and longitude")
             if not (has_lat and has_lon) and self.location is None:
                 raise ValueError("Open-Meteo requires a location or coordinates")
+        if self.provider != "open_meteo" and self.units is not None:
+            raise ValueError("units are currently supported only for Open-Meteo weather")
         return self
 
 
@@ -225,6 +228,18 @@ def _open_meteo(request: KnowledgeRequest) -> tuple[object, dict[str, str]]:
         "current": "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,showers,snowfall,weather_code,wind_speed_10m",
         "timezone": "auto",
     }
+    if request.units == "nonmetric":
+        params.update({
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "precipitation_unit": "inch",
+        })
+    elif request.units == "metric":
+        params.update({
+            "temperature_unit": "celsius",
+            "wind_speed_unit": "kmh",
+            "precipitation_unit": "mm",
+        })
     data = _request_json(f"https://api.open-meteo.com/v1/forecast?{urlencode(params)}", request.timeout_seconds)
     source = {
         "name": "Open-Meteo Forecast API",
