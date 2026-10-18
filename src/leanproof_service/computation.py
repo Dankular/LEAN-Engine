@@ -120,7 +120,9 @@ def _prepare_definite_real_integral(
     try:
         parsed = parse_math_input(exact_source)
         expression_tree = ast.parse(parsed.expression, mode="eval")
-        integrand_lean, integrand_symbols = _render_real_calculus_lean(parsed.expression)
+        integrand_lean, integrand_symbols = _render_real_calculus_lean(
+            parsed.expression, allow_variable_denominators=True
+        )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if integrand_lean is None:
@@ -149,7 +151,9 @@ def _prepare_definite_real_integral(
     antiderivative = symbolic["result"]
     try:
         antiderivative_tree = ast.parse(antiderivative, mode="eval")
-        antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(antiderivative)
+        antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(
+            antiderivative, allow_variable_denominators=True
+        )
     except (ValueError, SyntaxError, RecursionError):
         return None
     if antiderivative_lean is None:
@@ -175,7 +179,10 @@ def _prepare_definite_real_integral(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
     definite_result = definite_symbolic["result"]
     try:
-        definite_result_lean, definite_result_symbols = _render_real_calculus_lean(definite_result)
+        definite_result_tree = ast.parse(definite_result, mode="eval")
+        definite_result_lean, definite_result_symbols = _render_real_calculus_lean(
+            definite_result, allow_variable_denominators=True
+        )
     except (ValueError, SyntaxError, RecursionError):
         return None
     if definite_result_lean is None:
@@ -196,6 +203,38 @@ def _prepare_definite_real_integral(
     integration_variable = fresh_name("integral_var", used_names)
     point_variable = fresh_name("integral_point", used_names)
     function_variable = fresh_name("deriv_var", used_names)
+    lean_lower = _lean_rational(lower)
+    lean_upper = _lean_rational(upper)
+
+    domain_expressions: list[ast.AST] = []
+    seen_domain_expressions: set[str] = set()
+    import sympy as _sympy
+
+    for expression_root in (expression_tree.body, antiderivative_tree.body):
+        domain_candidates = [
+            *_variable_denominators(expression_root),
+            *_log_arguments(expression_root),
+        ]
+        tangent_cosines = _tan_cosine_arguments(expression_root)
+        if tangent_cosines is None:
+            return None
+        domain_candidates.extend(tangent_cosines)
+        for candidate in domain_candidates:
+            key = ast.dump(candidate, include_attributes=False)
+            if key in seen_domain_expressions:
+                continue
+            constant = _constant_fraction(candidate)
+            if constant is not None:
+                if constant == 0:
+                    return None
+                continue
+            seen_domain_expressions.add(key)
+            domain_expressions.append(candidate)
+
+    inverse_trig_arguments = _inverse_trig_arguments(antiderivative_tree.body)
+    positive_sqrt_arguments = _positive_sqrt_arguments(antiderivative_tree.body)
+    if inverse_trig_arguments is None or positive_sqrt_arguments is None:
+        return None
 
     integrand_at_integral_var = _render_real_calculus_node(
         expression_tree.body,
@@ -203,6 +242,7 @@ def _prepare_definite_real_integral(
         {"nodes": 0},
         0,
         substitutions={variable: integration_variable},
+        allow_variable_denominators=True,
     )
     integrand_at_point = _render_real_calculus_node(
         expression_tree.body,
@@ -210,6 +250,7 @@ def _prepare_definite_real_integral(
         {"nodes": 0},
         0,
         substitutions={variable: point_variable},
+        allow_variable_denominators=True,
     )
     antiderivative_at_integral_var = _render_real_calculus_node(
         antiderivative_tree.body,
@@ -217,7 +258,189 @@ def _prepare_definite_real_integral(
         {"nodes": 0},
         0,
         substitutions={variable: integration_variable},
+        allow_variable_denominators=True,
     )
+    if (
+        integrand_at_integral_var is None
+        or integrand_at_point is None
+        or antiderivative_at_integral_var is None
+    ):
+        return None
+
+    domain_hypotheses: dict[str, str] = {}
+    positive_hypotheses: dict[str, str] = {}
+    interval_domain_binders: list[str] = []
+    interval_domain_proofs: list[str] = []
+    domain_conditions: list[str] = []
+    domain_condition_sympy_expressions: list[object] = []
+    for index, domain_expression in enumerate(domain_expressions):
+        key = ast.dump(domain_expression, include_attributes=False)
+        rendered_domain = _render_real_calculus_node(
+            domain_expression,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        if rendered_domain is None:
+            return None
+        hypothesis_name = fresh_name(f"h_interval_domain_{index}", used_names)
+        domain_hypotheses[key] = f"{hypothesis_name} {point_variable} hpoint"
+        interval_domain_binders.append(
+            f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
+            f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+            f"{rendered_domain} ≠ 0)"
+        )
+        interval_domain_proofs.append(
+            f"{hypothesis_name} {point_variable} hpoint"
+        )
+        if (
+            isinstance(domain_expression, ast.Call)
+            and isinstance(domain_expression.func, ast.Name)
+            and domain_expression.func.id == "cos"
+        ):
+            source_expression = (
+                f"Cos[{ast.unparse(domain_expression.args[0]).replace('**', '^')}]"
+            )
+        else:
+            source_expression = ast.unparse(domain_expression).replace("**", "^")
+        sympy_domain_expression = _real_sympy_expression(domain_expression)
+        duplicate_condition = False
+        if (
+            sympy_domain_expression is not None
+            and len(domain_condition_sympy_expressions) < 32
+        ):
+            duplicate_condition = any(
+                _sympy.simplify(sympy_domain_expression - existing) == 0
+                or _sympy.simplify(sympy_domain_expression + existing) == 0
+                for existing in domain_condition_sympy_expressions
+            )
+            if not duplicate_condition:
+                domain_condition_sympy_expressions.append(sympy_domain_expression)
+        if not duplicate_condition:
+            domain_conditions.append(
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, "
+                f"{source_expression} ≠ 0"
+            )
+
+    for index, argument in enumerate(inverse_trig_arguments):
+        rendered_argument = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        if rendered_argument is None:
+            return None
+        lower_name = fresh_name(f"h_interval_inverse_lower_{index}", used_names)
+        upper_name = fresh_name(f"h_interval_inverse_upper_{index}", used_names)
+        lower_key = _inverse_trig_hypothesis_key(argument, "lower")
+        upper_key = _inverse_trig_hypothesis_key(argument, "upper")
+        domain_hypotheses[lower_key] = f"{lower_name} {point_variable} hpoint"
+        domain_hypotheses[upper_key] = f"{upper_name} {point_variable} hpoint"
+        interval_domain_binders.extend(
+            [
+                f"({lower_name} : ∀ {point_variable} : ℝ, "
+                f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+                f"-1 < {rendered_argument})",
+                f"({upper_name} : ∀ {point_variable} : ℝ, "
+                f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+                f"{rendered_argument} < 1)",
+            ]
+        )
+        interval_domain_proofs.extend(
+            [
+                f"{lower_name} {point_variable} hpoint",
+                f"{upper_name} {point_variable} hpoint",
+            ]
+        )
+        source_expression = ast.unparse(argument).replace("**", "^")
+        domain_conditions.extend(
+            [
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, "
+                f"-1 < {source_expression}",
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, "
+                f"{source_expression} < 1",
+            ]
+        )
+
+    for index, argument in enumerate(positive_sqrt_arguments):
+        key = ast.dump(argument, include_attributes=False)
+        rendered_argument = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        if rendered_argument is None:
+            return None
+        hypothesis_name = fresh_name(f"h_interval_positive_{index}", used_names)
+        positive_hypotheses[key] = f"{hypothesis_name} {point_variable} hpoint"
+        interval_domain_binders.append(
+            f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
+            f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+            f"0 < {rendered_argument})"
+        )
+        interval_domain_proofs.append(
+            f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+        )
+        source_expression = ast.unparse(argument).replace("**", "^")
+        domain_conditions.append(
+            f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+            f"and {_fraction_text(upper)}, "
+            f"{source_expression} > 0"
+        )
+
+    rendered_log_arguments: list[tuple[str, object]] = []
+    log_sources = (
+        (antiderivative_tree.body, {variable: lower}),
+        (antiderivative_tree.body, {variable: upper}),
+        (definite_result_tree.body, {}),
+    )
+    for log_root, substitutions in log_sources:
+        for argument in _log_arguments(log_root):
+            sympy_argument = _real_sympy_expression(argument, substitutions)
+            rendered_argument = _render_real_calculus_node(
+                argument,
+                set(),
+                {"nodes": 0},
+                0,
+                substitutions={
+                    name: _lean_rational(value)
+                    for name, value in substitutions.items()
+                },
+                allow_variable_denominators=True,
+            )
+            if sympy_argument is None or rendered_argument is None:
+                continue
+            if all(source != rendered_argument for source, _ in rendered_log_arguments):
+                rendered_log_arguments.append((rendered_argument, sympy_argument))
+
+    log_equivalence_lemmas: list[tuple[str, str, str]] = []
+    seen_log_equivalences: set[frozenset[str]] = set()
+    if len(rendered_log_arguments) <= 32:
+        for index, (left_source, left_expression) in enumerate(rendered_log_arguments):
+            for right_source, right_expression in rendered_log_arguments[index + 1:]:
+                equivalence_key = frozenset((left_source, right_source))
+                if equivalence_key in seen_log_equivalences:
+                    continue
+                if _sympy.simplify(left_expression + right_expression) != 0:
+                    continue
+                seen_log_equivalences.add(equivalence_key)
+                lemma_name = fresh_name(
+                    f"h_log_sign_{len(log_equivalence_lemmas)}",
+                    used_names,
+                )
+                log_equivalence_lemmas.append((lemma_name, left_source, right_source))
+
     proof = _derivative_proof_term(
         antiderivative_tree.body,
         variable,
@@ -225,27 +448,47 @@ def _prepare_definite_real_integral(
         point_variable,
         {"nodes": 0},
         0,
+        domain_hypotheses=domain_hypotheses,
+        positive_hypotheses=positive_hypotheses,
     )
-    if (
-        integrand_at_integral_var is None
-        or integrand_at_point is None
-        or antiderivative_at_integral_var is None
-        or proof is None
-    ):
+    if proof is None:
         return None
 
+    field_simp_arguments = (
+        f" [{', '.join(interval_domain_proofs)}]" if interval_domain_proofs else ""
+    )
+    log_lemma_names = [name for name, _, _ in log_equivalence_lemmas]
+    log_lemma_source = "\n".join(
+        f"  have {name} : Real.log ({left}) = Real.log ({right}) := by\n"
+        f"    rw [show ({left}) = -({right}) by ring]\n"
+        f"    exact Real.log_neg_eq_log ({right})"
+        for name, left, right in log_equivalence_lemmas
+    )
+    if log_lemma_source:
+        log_lemma_source = "\n" + log_lemma_source
+    log_lemma_simplifier = (
+        f"simp only [{', '.join(log_lemma_names)}] <;> "
+        if log_lemma_names
+        else ""
+    )
+
     binders = " ".join(
-        f"({name} : ℝ)" for name in sorted(symbol_names - {variable})
+        [
+            *(f"({name} : ℝ)" for name in sorted(symbol_names - {variable})),
+            *interval_domain_binders,
+        ]
     )
     theorem_binders = f" {binders}" if binders else ""
-    lean_lower = _lean_rational(lower)
-    lean_upper = _lean_rational(upper)
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.MeasureTheory.Integral.IntervalIntegral.FundThmCalculus
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.FunProp
@@ -261,18 +504,26 @@ theorem wolfram_language_compute{theorem_binders} :
     convert ({proof}) using 1
     · ext {function_variable}
       simp [F, id_eq] <;> ring
-    · simp [F, id_eq] <;> field_simp <;> ring
+    · simp [F, id_eq] <;> field_simp{field_simp_arguments} <;> ring
+  have hcont : ContinuousOn
+      (fun {integration_variable} : ℝ => {integrand_at_integral_var})
+      (Set.uIcc {lean_lower} {lean_upper}) := by
+    fun_prop
   have hint : IntervalIntegrable
       (fun {integration_variable} : ℝ => {integrand_at_integral_var})
       MeasureTheory.volume {lean_lower} {lean_upper} := by
-    apply Continuous.intervalIntegrable
-    fun_prop
+    exact hcont.intervalIntegrable
   rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
-  norm_num [F] <;> field_simp <;> ring
+{log_lemma_source}
+  norm_num [F] <;> {log_lemma_simplifier}field_simp <;> ring
 
 #print axioms wolfram_language_compute
 """
-    return Computation(definite_result.replace("**", "^"), source)
+    return Computation(
+        definite_result.replace("**", "^"),
+        source,
+        domain_conditions=tuple(domain_conditions),
+    )
 
 
 def _prepare_real_antiderivative(
@@ -995,6 +1246,70 @@ def _constant_sympy_expression(node: ast.AST):
             "sinh": _sympy.sinh,
             "cosh": _sympy.cosh,
             "log": _sympy.log,
+        }.get(node.func.id)
+        return function(argument) if function is not None else None
+    return None
+
+
+def _real_sympy_expression(
+    node: ast.AST,
+    substitutions: dict[str, Fraction] | None = None,
+):
+    import sympy as _sympy
+
+    fraction = _constant_fraction(node)
+    if fraction is not None:
+        return _sympy.Rational(fraction.numerator, fraction.denominator)
+    if isinstance(node, ast.Name):
+        if node.id == "pi":
+            return _sympy.pi
+        if node.id == "E":
+            return _sympy.E
+        value = (substitutions or {}).get(node.id)
+        if value is not None:
+            return _sympy.Rational(value.numerator, value.denominator)
+        return _sympy.Symbol(node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _real_sympy_expression(node.operand, substitutions)
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else -inner
+    if isinstance(node, ast.BinOp):
+        left = _real_sympy_expression(node.left, substitutions)
+        right = _real_sympy_expression(node.right, substitutions)
+        if left is None or right is None:
+            return None
+        operation = {
+            ast.Add: lambda: left + right,
+            ast.Sub: lambda: left - right,
+            ast.Mult: lambda: left * right,
+            ast.Div: lambda: left / right if right != 0 else None,
+            ast.Pow: lambda: left ** right,
+        }.get(type(node.op))
+        return operation() if operation is not None else None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        argument = _real_sympy_expression(node.args[0], substitutions)
+        if argument is None:
+            return None
+        function = {
+            "abs": _sympy.Abs,
+            "Abs": _sympy.Abs,
+            "sin": _sympy.sin,
+            "cos": _sympy.cos,
+            "tan": _sympy.tan,
+            "asin": _sympy.asin,
+            "acos": _sympy.acos,
+            "atan": _sympy.atan,
+            "exp": _sympy.exp,
+            "sinh": _sympy.sinh,
+            "cosh": _sympy.cosh,
+            "log": _sympy.log,
+            "sqrt": _sympy.sqrt,
         }.get(node.func.id)
         return function(argument) if function is not None else None
     return None
