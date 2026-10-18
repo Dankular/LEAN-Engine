@@ -158,6 +158,12 @@ def capabilities() -> dict[str, object]:
             "plot_width": {"query_parameter": "plotwidth", "default": 200, "range": [100, 1600]},
             "proof_status": "sampled visualization, not a formal proof",
         },
+        "symbolic_images": {
+            "ordinary_math": "escaped plaintext as inline SVG in Input, Result, and DecimalApproximation subpods",
+            "plots": "sampled graph SVG with bounded dimensions",
+            "provider_data": "escaped provider plaintext as SVG; no provider-specific chart or map rendering",
+            "typesetting": "ordinary mathematical images are not structurally typeset",
+        },
         "symbolic_series": {
             "order_range": [1, 32],
             "expansion_point": "explicit expression",

@@ -89,7 +89,7 @@ def normalize_async(value: str) -> float | None:
 
 def normalize_formats(values: list[str] | None) -> tuple[list[str], list[str]]:
     if not values:
-        return ["plaintext"], []
+        return ["plaintext", "image"], []
     formats = _split_values(values)
     if not formats:
         raise FullResultsRequestError("format must contain at least one format name")
@@ -135,7 +135,10 @@ def async_query_payload(
     formats: list[str],
     elapsed: float,
 ) -> dict[str, Any]:
-    input_pod = _initial_pods(input_text, input_text, None, formats)[0]
+    input_image = _svg_text_image(input_text) if "image" in formats else None
+    input_pod = _initial_pods(
+        input_text, input_text, None, formats, input_image=input_image
+    )[0]
     pending_pod = {
         "title": pod_title,
         "scanner": scanner,
@@ -154,7 +157,10 @@ def async_query_payload(
         elapsed=elapsed,
         parse_timing=0.0,
         datatypes="Mathematical" if scanner == "Mathematical" else "Data",
-        warnings=_format_warnings(formats),
+        warnings=_format_warnings(
+            formats,
+            _SUPPORTED_FORMATS | ({"image"} if input_image is not None else set()),
+        ),
         assumptions=[],
         evidence={"kind": "asynchronous_query", "verified": False},
         qualification=(
@@ -400,9 +406,16 @@ def execute_query(
             "width": plot_width,
             "height": round(plot_width * 2 / 3),
         }
+    input_image = _svg_text_image(input_display) if "image" in formats else None
+    if "image" in formats and result_image is None:
+        result_image = _svg_text_image(result_text)
+    approximation_image = None
+    if "image" in formats and numeric_approximation is not None:
+        approximation_image = _svg_text_image(str(numeric_approximation["value"]))
+    has_image_output = any((input_image, result_image, approximation_image))
     warnings = _format_warnings(
         formats,
-        _SUPPORTED_FORMATS | ({"image"} if result_image is not None else set()),
+        _SUPPORTED_FORMATS | ({"image"} if has_image_output else set()),
     )
     if is_typed_quantity:
         result_moutput = quantity_expression
@@ -423,7 +436,9 @@ def execute_query(
         result_mathml=symbolic.get("result_mathml"),
         input_minput=input_minput,
         result_moutput=result_moutput,
+        input_image=input_image,
         result_image=result_image,
+        approximation_image=approximation_image,
         result_scanner="Date" if is_typed_date else "Mathematical",
         numeric_approximation=numeric_approximation,
         decimal_state_level=decimal_state_level,
@@ -722,8 +737,20 @@ def _execute_provider_query(
             "dbnomics": "Economic time series",
             "geonames": "Place matches",
         }
-        pods = _initial_pods(input_text, input_text, None, formats)[:1]
+        input_image = _svg_text_image(input_text) if "image" in formats else None
+        pods = _initial_pods(
+            input_text, input_text, None, formats, input_image=input_image
+        )[:1]
         pod_timed_out = deadline - perf_counter() > 0.001
+        timeout_warnings = _format_warnings(
+            formats,
+            _SUPPORTED_FORMATS | ({"image"} if input_image is not None else set()),
+        )
+        timeout_warnings.append({"text": (
+            "The data result pod exceeded its per-pod execution time limit."
+            if pod_timed_out
+            else "The data retrieval exceeded the total query time limit."
+        )})
         payload = _query_envelope(
             success=False,
             error=False,
@@ -731,11 +758,7 @@ def _execute_provider_query(
             elapsed=perf_counter() - started,
             parse_timing=parse_timing,
             datatypes="Data",
-            warnings=[{"text": (
-                "The data result pod exceeded its per-pod execution time limit."
-                if pod_timed_out
-                else "The data retrieval exceeded the total query time limit."
-            )}],
+            warnings=timeout_warnings,
             assumptions=[],
             timedout="Data",
             timedoutpods=provider_titles[request.provider],
@@ -766,6 +789,8 @@ def _execute_provider_query(
     title, pod_id, datatype = provider_presentation[request.provider]
     plaintext = _provider_plaintext(request.provider, knowledge["data"])
     selected_formats = formats or ["plaintext"]
+    input_image = _svg_text_image(input_text) if "image" in selected_formats else None
+    result_image = _svg_text_image(plaintext) if "image" in selected_formats else None
     input_subpod: dict[str, Any] = {"title": ""}
     result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
     if "plaintext" in selected_formats:
@@ -774,6 +799,10 @@ def _execute_provider_query(
     if "mathml" in selected_formats:
         input_subpod["mathml"] = _mathml(input_text)
         result_subpod["mathml"] = _mathml(plaintext)
+    if input_image is not None:
+        input_subpod["img"] = input_image
+    if result_image is not None:
+        result_subpod["img"] = result_image
     pods = [
         {
             "title": "Input interpretation",
@@ -807,7 +836,10 @@ def _execute_provider_query(
         elapsed=elapsed,
         parse_timing=parse_timing,
         datatypes=datatype,
-        warnings=_format_warnings(formats, {"plaintext", "mathml"}),
+        warnings=_format_warnings(
+            formats,
+            {"plaintext", "mathml"} | ({"image"} if input_image or result_image else set()),
+        ),
         assumptions=[],
         interpretation={
             "kind": "typed_data_request",
@@ -1325,14 +1357,21 @@ def _symbolic_timeout_response(
     *,
     parse_timing: float,
 ) -> dict[str, Any]:
+    input_image = _svg_text_image(input_text) if "image" in formats else None
     payload = _query_envelope(
         success=False,
         error=False,
-        pods=_initial_pods(input_text, input_text, None, formats),
+        pods=_initial_pods(input_text, input_text, None, formats, input_image=input_image),
         elapsed=perf_counter() - started,
         parse_timing=parse_timing,
         datatypes="Mathematical",
-        warnings=[{"text": "The query exceeded its total execution time limit."}],
+        warnings=[
+            *_format_warnings(
+                formats,
+                _SUPPORTED_FORMATS | ({"image"} if input_image is not None else set()),
+            ),
+            {"text": "The query exceeded its total execution time limit."},
+        ],
         assumptions=[],
         timedout="Mathematical",
         timedoutpods="Result",
@@ -1451,7 +1490,9 @@ def _initial_pods(
     result_mathml: str | None = None,
     input_minput: str | None = None,
     result_moutput: str | None = None,
+    input_image: dict[str, Any] | None = None,
     result_image: dict[str, Any] | None = None,
+    approximation_image: dict[str, Any] | None = None,
     result_scanner: str = "Mathematical",
     numeric_approximation: dict[str, Any] | None = None,
     decimal_state_level: int = 0,
@@ -1471,6 +1512,8 @@ def _initial_pods(
         subpod_input["minput"] = input_minput
     if "moutput" in selected_formats and result_moutput is not None:
         subpod_result["moutput"] = result_moutput
+    if "image" in selected_formats and input_image is not None:
+        subpod_input["img"] = input_image
     if "image" in selected_formats and result_image is not None:
         subpod_result["img"] = result_image
     pods = [
@@ -1502,6 +1545,8 @@ def _initial_pods(
             approximation_subpod["plaintext"] = approximation
         if "mathml" in selected_formats:
             approximation_subpod["mathml"] = _mathml(approximation)
+        if "image" in selected_formats and approximation_image is not None:
+            approximation_subpod["img"] = approximation_image
         pods.append({
             "title": "Decimal approximation",
             "scanner": "Numeric",
@@ -1515,6 +1560,87 @@ def _initial_pods(
             "precision": int(numeric_approximation.get("precision", 50)),
         })
     return pods
+
+
+def _svg_text_image(text: str, *, width: int = 500) -> dict[str, Any] | None:
+    """Render bounded plaintext as an escaped, self-contained SVG image."""
+    if not text:
+        return None
+
+    safe_text = _xml_safe_text(text)
+    max_chars = 4000
+    truncated = len(safe_text) > max_chars
+    visible_text = safe_text[:max_chars]
+    if truncated:
+        visible_text += "..."
+
+    font_size = 16
+    line_height = 22
+    horizontal_padding = 20
+    max_columns = max(12, int((width - horizontal_padding * 2) / (font_size * 0.58)))
+    max_lines = 80
+    lines: list[str] = []
+    for paragraph in visible_text.splitlines() or [visible_text]:
+        if len(lines) >= max_lines:
+            truncated = True
+            break
+        if not paragraph:
+            lines.append("")
+            continue
+        remaining = paragraph
+        while len(remaining) > max_columns:
+            split_at = remaining.rfind(" ", 0, max_columns + 1)
+            if split_at <= 0:
+                split_at = max_columns
+            lines.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip()
+            if len(lines) >= max_lines:
+                truncated = True
+                break
+        if len(lines) >= max_lines:
+            break
+        lines.append(remaining)
+    if not lines:
+        return None
+    if truncated:
+        last = lines[-1]
+        lines[-1] = (last[: max_columns - 3] + "...") if len(last) >= max_columns else last + "..."
+
+    height = 24 + len(lines) * line_height
+    title_text = safe_text[:240] + ("..." if len(safe_text) > 240 else "")
+    title = html.escape(title_text, quote=True)
+    text_elements = "".join(
+        f'<text x="{horizontal_padding}" y="{26 + index * line_height}">'
+        f'{html.escape(line, quote=False)}</text>'
+        for index, line in enumerate(lines)
+    )
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="{title}">'
+        f'<title>{title}</title>'
+        '<style>text{font:16px "Cambria Math","STIX Two Math",serif;fill:#111827}'
+        '</style><rect width="100%" height="100%" fill="#ffffff"/>'
+        f'{text_elements}</svg>'
+    )
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return {
+        "src": f"data:image/svg+xml;base64,{encoded}",
+        "alt": title_text,
+        "title": title_text,
+        "width": width,
+        "height": height,
+    }
+
+
+def _xml_safe_text(text: str) -> str:
+    return "".join(
+        char
+        for char in text
+        if char in "\t\n\r"
+        or 0x20 <= ord(char) <= 0xD7FF
+        or 0xE000 <= ord(char) <= 0xFFFD
+        or 0x10000 <= ord(char) <= 0x10FFFF
+    )
 
 
 def _format_warnings(
