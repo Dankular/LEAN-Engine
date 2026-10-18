@@ -230,7 +230,7 @@ def validate_query(
                         "kind": "typed_data_request",
                         "provider": provider_name,
                         "operation": provider_request.operation,
-                        "location": provider_request.location,
+                        "request": provider_request.model_dump(exclude_none=True),
                     },
                 }
             }
@@ -339,6 +339,31 @@ def _provider_request(
             raise FullResultsRequestError("entity search needs a non-empty query")
         return _knowledge_request(provider="wikidata", operation="search", query=query)
 
+    place = re.fullmatch(r"\s*(?:place|geonames)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
+    if place:
+        query = place.group(1).strip()
+        if not query:
+            raise FullResultsRequestError("place search needs a non-empty query")
+        return _knowledge_request(provider="geonames", operation="search", query=query)
+
+    series = re.fullmatch(
+        r"\s*(?:series|dbnomics)\s*:\s*([^/\s]+)/([^/\s]+)/([^/\s]+)\s*[?.!]*\s*",
+        input_text,
+        re.I,
+    )
+    if series:
+        return _knowledge_request(
+            provider="dbnomics",
+            operation="series",
+            provider_code=series.group(1),
+            dataset_code=series.group(2),
+            series_code=series.group(3).rstrip("?!"),
+        )
+    if re.match(r"\s*(?:series|dbnomics)\s*:", input_text, re.I):
+        raise ProviderContextNeeded(
+            "DBnomics series syntax is series: provider/dataset/series"
+        )
+
     explicit_constant = re.fullmatch(r"\s*(?:constant|codata)\s*:\s*(.+?)\s*[?.!]*\s*", input_text, re.I)
     if explicit_constant:
         constant = re.sub(r"[^a-z0-9]+", "_", explicit_constant.group(1).lower()).strip("_")
@@ -407,6 +432,8 @@ def _execute_provider_query(
         "open_meteo": ("Current weather", "Weather", "Weather"),
         "nist_codata": ("Physical constant", "PhysicalConstant", "ScientificConstant"),
         "wikidata": ("Entity matches", "EntitySearch", "Entity"),
+        "dbnomics": ("Economic time series", "EconomicSeries", "Economics"),
+        "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
     title, pod_id, datatype = provider_presentation[request.provider]
     plaintext = _provider_plaintext(request.provider, knowledge["data"])
@@ -500,6 +527,54 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             description = entity.get("description")
             rows.append(f"{label} [{identifier}]: {description}" if description else f"{label} [{identifier}]")
         return "\n".join(rows) if rows else "No matching entities were found."
+    if provider == "geonames" and isinstance(data, list):
+        rows = []
+        for place in data:
+            if not isinstance(place, dict):
+                continue
+            name = str(place.get("name") or "Unknown place")
+            location = ", ".join(
+                str(value)
+                for value in (place.get("adminName1"), place.get("countryName"))
+                if value
+            )
+            coordinates = ", ".join(
+                str(value) for value in (place.get("lat"), place.get("lng")) if value is not None
+            )
+            details = [value for value in (location, coordinates) if value]
+            population = place.get("population")
+            if population:
+                details.append(f"population {population}")
+            rows.append(f"{name} ({'; '.join(details)})" if details else name)
+        return "\n".join(rows) if rows else "No matching places were found."
+    if provider == "dbnomics" and isinstance(data, dict):
+        documents = data.get("docs")
+        if isinstance(documents, list):
+            blocks = []
+            for document in documents[:10]:
+                if not isinstance(document, dict):
+                    continue
+                code = document.get("series_code")
+                name = document.get("series_name") or code or "Economic series"
+                periods = document.get("period")
+                values = document.get("value")
+                if not isinstance(periods, list) or not isinstance(values, list):
+                    blocks.append(f"{name} [{code}]" if code else str(name))
+                    continue
+                observations = list(zip(periods, values))
+                visible = observations[-20:]
+                lines = [f"{name} [{code}]" if code else str(name)]
+                lines.extend(
+                    f"{period}: {value if value is not None else 'NA'}"
+                    for period, value in visible
+                )
+                if len(observations) > len(visible):
+                    lines.append(
+                        f"Showing the latest {len(visible)} of {len(observations)} observations."
+                    )
+                blocks.append("\n".join(lines))
+            if blocks:
+                return "\n\n".join(blocks)
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
 

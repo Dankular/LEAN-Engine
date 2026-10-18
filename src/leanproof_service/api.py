@@ -126,6 +126,8 @@ def capabilities() -> dict[str, object]:
                     "weather location queries",
                     "supported CODATA constants",
                     "explicit Wikidata entity searches",
+                    "explicit GeoNames place searches",
+                    "explicit DBnomics time-series requests",
                 ],
                 "location_parameters": ["location", "latlong"],
                 "validation_path": "/v2/validatequery",

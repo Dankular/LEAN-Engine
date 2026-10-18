@@ -20,11 +20,11 @@ Wolfram documents the Full Results API as a GET service with `appid` and `input`
 
 | Project endpoint | Current scope | Parity implication |
 |---|---|---|
-| `GET /v2/query` | Local `queryresult` JSON/XML envelope, Input and Result pods, symbolic expression results, AngleUnit/LogBase assumptions, pod filters, plaintext/MathML, and a few source-backed data query patterns | Partial protocol and query coverage; `/v1/interpret` retains the project-specific interpretation response |
+| `GET /v2/query` | Local `queryresult` JSON/XML envelope, Input, Result, and selected Data pods, symbolic expression results, AngleUnit/LogBase assumptions, pod filters, plaintext/MathML, and explicit routes to five factual providers | Partial protocol and query coverage; `/v1/interpret` retains the project-specific interpretation response |
 | `GET /v2/validatequery` | Safe parsing and candidate assumption discovery without the symbolic simplification step | Initial validatequery behavior; not a natural-language scanner |
 | `GET /v2/assumptions` | Service-owned, versioned angle-unit and logarithm-base IDs | Initial `AngleUnit` and `LogBase` slices; other WA assumption families remain |
 | `POST /v1/symbolic` | Bounded SymPy grammar and operations | Computation building block, not a general free-form query interpreter |
-| `POST /v1/knowledge/query` | Explicit Wikidata, DBnomics, CODATA subset, GeoNames, and Open-Meteo operations | Provider adapters; `/v2/query` currently wraps a limited weather, CODATA, and explicit entity-search subset as source-backed pods |
+| `POST /v1/knowledge/query` | Explicit Wikidata, DBnomics, CODATA subset, GeoNames, and Open-Meteo operations | Provider adapters; `/v2/query` wraps explicit weather, CODATA, Wikidata entity, GeoNames place, and DBnomics series requests as source-backed pods |
 | `POST /api/cag/v1/WolframLanguageCompute` | Small allowlisted expressions checked by Lean | Separate Wolfram Language Compute-shaped endpoint; not Full Results API compatibility |
 
 The current interpretation endpoint and assumption slice are described in [README.md](README.md#candidate-meanings-and-assumptions), while supported operations and factual providers are listed in [features.json](features.json).
@@ -47,7 +47,7 @@ The documented parameter groups are:
 | Presentation sizing | `width`, `maxwidth`, `plotwidth`, `mag` | Not implemented | P2 |
 | Time controls | `scantimeout`, `podtimeout`, `formattimeout`, `parsetimeout`, `totaltimeout`; `async` partial results and recalculate URL | Local wall-clock caps exist; no scan/format stages, async pod delivery, or recalculate operation | P2 |
 | Query interpretation controls | `reinterpret`, `translation`, `ignorecase`; `validatequery` parses without full result computation | `/v2/validatequery` parses supported symbolic expressions and recognizes provider request patterns without retrieval; translation, spelling repair, and reinterpretation are not implemented | P1 |
-| Classification | Clash assumptions and `datatypes`; pod `scanner` helps identify result subject | Candidate ranking covers angle units and logarithm bases; a deterministic router handles selected weather, constant, and explicit entity patterns; no general query classifier | P1/P3 |
+| Classification | Clash assumptions and `datatypes`; pod `scanner` helps identify result subject | Candidate ranking covers angle units and logarithm bases; a deterministic router handles selected weather, constant, entity, place, and series patterns; no general query classifier | P1/P3 |
 | Informational elements | `assumptions`, `sources`, `warnings`, `infos`, `generalization`, `didyoumeans`, `tips`, `spellcheck`, `translation`, `reinterpret`, `examplepage`, `futuretopic`, `languagemsg`, and errors | Query results include assumptions, provider sources, warnings, tips, and errors; other informational element families remain absent | P1 |
 | Error semantics | Distinguishes invalid requests/internal errors (`error=true`) from unrecognized queries (`success=false`); pod errors can be local | FastAPI errors and WLC compatibility errors are separate shapes; no queryresult-compatible semantics | P0 |
 | Forward compatibility | Clients should tolerate new result elements and attributes | No generic pod schema/parser yet | P1 |
@@ -86,7 +86,7 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 ### P3 — broaden independently sourced coverage
 
-Build coverage around licensed and attributable providers, measuring query-class recall and source freshness. The initial weather, CODATA, and explicit Wikidata routes now appear as Full Results-style pods; next broaden entity relationships, economics, geography, units, and weather controls. Do not describe provider coverage as full Wolfram|Alpha parity; preserve provider, license/attribution, retrieval time, and whether the value is computed, retrieved, solver-derived, or kernel-checked.
+Build coverage around licensed and attributable providers, measuring query-class recall and source freshness. The initial weather, CODATA, Wikidata entity, GeoNames place, and DBnomics series routes now appear as Full Results-style pods; next broaden entity relationships, economic series discovery, geography, units, and weather controls. Do not describe provider coverage as full Wolfram|Alpha parity; preserve provider, license/attribution, retrieval time, and whether the value is computed, retrieved, solver-derived, or kernel-checked.
 
 ## Acceptance checklist for a parity release
 
