@@ -39,6 +39,10 @@ _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>Sin|Cos|Tan|ArcSin|ArcCos|ArcTan|Sqrt|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
+_REAL_POLYNOMIAL_SOLVE = re.compile(
+    r"(?is)\s*Solve\s*\[\s*(?P<lhs>.+?)\s*==\s*(?P<rhs>.+?)\s*,\s*"
+    r"(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*Reals\s*\]\s*"
+)
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -101,6 +105,14 @@ theorem wolfram_language_compute (x : ℝ) :
             derivative.group("expression"),
             derivative.group("variable"),
             time_limit_seconds,
+        )
+
+    real_polynomial_solve = _REAL_POLYNOMIAL_SOLVE.fullmatch(code)
+    if real_polynomial_solve is not None:
+        return _prepare_real_polynomial_solve(
+            real_polynomial_solve.group("lhs"),
+            real_polynomial_solve.group("rhs"),
+            real_polynomial_solve.group("variable"),
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
@@ -1127,6 +1139,175 @@ def _prepare_polynomial_computation(
     lean_source = _polynomial_equality_source(original_lean, result_lean, variables)
     display_result = result.replace("**", "^")
     return Computation(display_result, lean_source)
+
+
+def _prepare_real_polynomial_solve(
+    lhs_source: str,
+    rhs_source: str,
+    variable: str,
+) -> Computation | None:
+    import sympy as _sympy
+
+    try:
+        parsed_lhs = parse_math_input(lhs_source)
+        parsed_rhs = parse_math_input(rhs_source)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    exact_lhs = _normalize_decimal_literals(parsed_lhs.expression)
+    exact_rhs = _normalize_decimal_literals(parsed_rhs.expression)
+    if exact_lhs is None or exact_rhs is None:
+        return None
+    try:
+        lhs_tree = ast.parse(exact_lhs, mode="eval")
+        rhs_tree = ast.parse(exact_rhs, mode="eval")
+    except (ValueError, SyntaxError, RecursionError):
+        return None
+    lhs_degree = _bounded_polynomial_degree(lhs_tree.body, variable)
+    rhs_degree = _bounded_polynomial_degree(rhs_tree.body, variable)
+    if lhs_degree is None or rhs_degree is None or max(lhs_degree, rhs_degree) > 2:
+        return None
+
+    lhs_lean, lhs_symbols = _render_polynomial_lean(exact_lhs)
+    rhs_lean, rhs_symbols = _render_polynomial_lean(exact_rhs)
+    if (
+        lhs_lean is None
+        or rhs_lean is None
+        or (lhs_symbols | rhs_symbols) - {variable}
+    ):
+        return None
+
+    lhs_expression = _real_sympy_expression(lhs_tree.body)
+    rhs_expression = _real_sympy_expression(rhs_tree.body)
+    if lhs_expression is None or rhs_expression is None:
+        return None
+    symbol = _sympy.Symbol(variable)
+    try:
+        polynomial = _sympy.Poly(lhs_expression - rhs_expression, symbol, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return None
+    if polynomial.is_zero or polynomial.degree() > 2:
+        return None
+    for coefficient in polynomial.all_coeffs():
+        if (
+            abs(int(coefficient.p)).bit_length() > 256
+            or int(coefficient.q).bit_length() > 256
+        ):
+            return None
+
+    roots: list[Fraction] = []
+    if polynomial.degree() > 0:
+        roots_with_multiplicity = _sympy.roots(polynomial.as_expr(), symbol)
+        if (
+            sum(roots_with_multiplicity.values()) != polynomial.degree()
+            or any(not root.is_Rational for root in roots_with_multiplicity)
+        ):
+            return None
+        for root in roots_with_multiplicity:
+            root_fraction = Fraction(int(root.p), int(root.q))
+            if (
+                abs(root_fraction.numerator).bit_length() > 256
+                or root_fraction.denominator.bit_length() > 256
+            ):
+                return None
+            roots.append(root_fraction)
+        roots = sorted(set(roots))
+
+    polynomial_lean = f"({lhs_lean}) - ({rhs_lean})"
+    proof_source = _real_polynomial_solve_proof_source(
+        polynomial_lean,
+        variable,
+        roots,
+    )
+    if roots:
+        solution_values = ", ".join(
+            f"{{{variable} -> {_fraction_text(root)}}}" for root in roots
+        )
+        display_result = "{" + solution_values + "}"
+    else:
+        display_result = "{}"
+    return Computation(display_result, proof_source)
+
+
+def _bounded_polynomial_degree(node: ast.AST, variable: str) -> int | None:
+    if _constant_fraction(node) is not None:
+        return 0
+    if isinstance(node, ast.Name):
+        return 1 if node.id == variable else 0
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _bounded_polynomial_degree(node.operand, variable)
+    if not isinstance(node, ast.BinOp):
+        return None
+    left_degree = _bounded_polynomial_degree(node.left, variable)
+    if left_degree is None:
+        return None
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return min(3, left_degree * exponent.numerator)
+    right_degree = _bounded_polynomial_degree(node.right, variable)
+    if right_degree is None:
+        return None
+    if isinstance(node.op, (ast.Add, ast.Sub)):
+        return max(left_degree, right_degree)
+    if isinstance(node.op, ast.Mult):
+        return min(3, left_degree + right_degree)
+    if isinstance(node.op, ast.Div) and _constant_fraction(node.right) not in (None, Fraction(0)):
+        return left_degree
+    return None
+
+
+def _real_polynomial_solve_proof_source(
+    polynomial: str,
+    variable: str,
+    roots: list[Fraction],
+) -> str:
+    rendered_roots = [_lean_rational(root) for root in roots]
+    if not rendered_roots:
+        result_proposition = "False"
+        proof = """  constructor
+  · intro hzero
+    norm_num at hzero
+  · intro hfalse
+    exact False.elim hfalse"""
+    elif len(rendered_roots) == 1:
+        result_proposition = f"{variable} = {rendered_roots[0]}"
+        proof = f"""  constructor
+  · intro hzero
+    nlinarith [hzero]
+  · intro hsolution
+    subst {variable}
+    norm_num"""
+    else:
+        result_proposition = " ∨ ".join(
+            f"{variable} = {root}" for root in rendered_roots
+        )
+        factors = " * ".join(
+            f"({variable} - {root})" for root in rendered_roots
+        )
+        proof = f"""  constructor
+  · intro hzero
+    have hfactor : {factors} = 0 := by nlinarith [hzero]
+    rcases mul_eq_zero.mp hfactor with hleft | hright
+    · left
+      nlinarith [hleft]
+    · right
+      nlinarith [hright]
+  · rintro (hsolution | hsolution)
+    · subst {variable}
+      norm_num
+    · subst {variable}
+      norm_num"""
+    return f"""import Mathlib.Data.Real.Basic
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute ({variable} : ℝ) :
+    (({polynomial}) : ℝ) = 0 ↔ {result_proposition} := by
+{proof}
+
+#print axioms wolfram_language_compute
+"""
 
 
 def _normalize_wolfram_real_functions(source: str) -> str:

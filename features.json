@@ -21,6 +21,7 @@
     {"id": "compat.wolfram_arctan_calculus", "state": "implemented_initial_slice", "scope": "D[ArcTan[f(x)],x] supports bounded expressions in the real calculus grammar; indefinite Integrate supports ArcTan[x] and 1/(1+x^2) when Lean checks the resulting HasDerivAt proof; any generated domain conditions are returned in evidence"},
     {"id": "compat.wolfram_inverse_trig_derivatives", "state": "implemented_initial_slice", "scope": "Lean-checked ArcSin and ArcCos derivatives for bounded real expressions with explicit strict argument bounds -1 < argument < 1; out-of-range constant inputs are rejected rather than treated as real-valued"},
     {"id": "compat.wolfram_sqrt_calculus", "state": "implemented_initial_slice", "scope": "Lean-checked Sqrt derivatives require a positive variable argument; selected antiderivatives such as Integrate[1/Sqrt[x],x] return explicit positivity and denominator conditions"},
+    {"id": "compat.wolfram_solve_real_polynomial", "state": "implemented_initial_slice", "scope": "POST /api/cag/v1/WolframLanguageCompute accepts Solve[lhs == rhs, variable, Reals] for univariate rational-coefficient polynomials of degree at most two with exact rational roots, plus nonzero constant equations; Lean proves the returned solution set is equivalent to the submitted equation over the reals; systems, complex-domain solving, higher degrees, and irrational or complex roots remain unsupported"},
     {"id": "fixture_contracts", "state": "planned", "scope": "no contract fixtures have been run"}
   ]
 }

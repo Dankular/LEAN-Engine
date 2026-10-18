@@ -380,6 +380,7 @@ def capabilities() -> dict[str, object]:
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
+                    "Solve for univariate degree-at-most-two polynomial equations over Reals with rational roots",
                 ],
                 "polynomial_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
@@ -404,11 +405,17 @@ def capabilities() -> dict[str, object]:
                     "limits": "bounded exact expressions; selected variable-denominator, logarithmic, square-root, and tangent antiderivatives are accepted only when Lean checks the result, with required domain conditions returned",
                     "domain_conditions": "submitted Log and variable Sqrt arguments require positivity; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
                 },
+                "solve": {
+                    "syntax": "Solve[lhs == rhs, variable, Reals]",
+                    "domain": "univariate rational-coefficient polynomials of degree at most two with exact rational roots, plus nonzero constant equations",
+                    "proof": "Lean proves the returned solution set is equivalent to the submitted equation over the reals and audits axioms",
+                    "unsupported": ["complex-domain solving", "systems", "degree above two", "irrational or complex roots"],
+                },
                 "definite_integral": {
                     "syntax": "Integrate[expression, {variable, lower, upper}]",
                     "proof": "Lean-checked antiderivative plus the interval fundamental theorem of calculus; axiom audit",
                     "bounds": "exact rational numeric expressions",
-                    "limits": "bounded real-calculus grammar with exact rational bounds; definite integration does not yet support variable denominators; other free variables are real parameters",
+                    "limits": "bounded real-calculus grammar with exact rational bounds; selected variable-denominator cases are supported and unresolved interval-wide nonzero conditions are returned; other free variables are real parameters",
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
