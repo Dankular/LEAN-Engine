@@ -281,7 +281,7 @@ def capabilities() -> dict[str, object]:
                     "symbolic_backend": "SymPy",
                     "sum_product_bounds": "integer literals only",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial computations; unsupported operations remain unverified",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial and real-calculus computations; unsupported operations remain unverified",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
@@ -292,7 +292,7 @@ def capabilities() -> dict[str, object]:
                     "ignorecase": True,
                     "reinterpret": False,
                     "translation": False,
-                    "verify": "optional Lean check for supported exact polynomial computations",
+                    "verify": "optional Lean check for supported exact polynomial and real-calculus computations",
                 },
                 "formal_verification": {
                     "query_parameter": "verify=true",
@@ -301,7 +301,10 @@ def capabilities() -> dict[str, object]:
                     "proof_timeout_range_seconds": [1, 180],
                     "supported": [
                         "exact polynomial evaluation, simplify, factor, expand, and differentiation",
+                        "real differentiation using sin, cos, exp, sinh, and cosh",
+                        "indefinite antiderivatives using sin, cos, exp, sinh, and cosh when SymPy returns a supported expression",
                         "polynomial identities expressed as a difference",
+                        "indefinite polynomial antiderivatives",
                         "definite integral of x with integer bounds",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
@@ -375,8 +378,8 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
-                    "D for bounded polynomial differentiation",
-                    "Integrate for bounded polynomial antiderivatives",
+                    "D for bounded polynomial or supported real-function differentiation",
+                    "Integrate for bounded polynomial or supported real-function antiderivatives",
                 ],
                 "polynomial_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
@@ -387,15 +390,25 @@ def capabilities() -> dict[str, object]:
                     "variable_domain": "complex numbers for polynomial identities; real numbers for D derivatives",
                 },
                 "derivative": {
-                    "syntax": "D[polynomial_expression, variable]",
+                    "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
+                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
                 },
                 "indefinite_integral": {
-                    "syntax": "Integrate[polynomial_expression, variable]",
+                    "syntax": "Integrate[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "result_semantics": "one antiderivative representative; additive constant omitted",
-                    "limits": "bounded rational polynomial expressions only",
+                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
+                    "limits": "bounded exact expressions with rational constant denominators; function integrals are accepted only when SymPy returns a result in this grammar",
+                },
+                "real_calculus_limits": {
+                    "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^ with integer exponent 0–16"],
+                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
+                    "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
+                    "maximum_nodes": 256,
+                    "maximum_depth": 32,
+                    "unsupported_examples": ["variable denominators", "Tan", "Log", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]", "Integrate[x, {x, integer, integer}]"
@@ -924,7 +937,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic, polynomial-calculus, and special-case subset is computed and "
+        "A bounded arithmetic, real-calculus, and special-case subset is computed and "
         "compiled into Lean proofs."
     ),
     openapi_extra={

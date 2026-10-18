@@ -27,6 +27,22 @@ def lake_executable() -> str | None:
     configured = os.environ.get("LAKE_BIN")
     if configured:
         return shutil.which(configured) or (configured if Path(configured).is_file() else None)
+
+    project_dir = Path(
+        os.environ.get("LEAN_PROJECT_DIR", str(Path(__file__).resolve().parents[2] / "lean"))
+    )
+    toolchain_file = project_dir / "lean-toolchain"
+    if toolchain_file.is_file():
+        toolchain = toolchain_file.read_text(encoding="utf-8").strip()
+        toolchain_dir_name = toolchain.replace("/", "--").replace(":", "---")
+        elan_home = Path(os.environ.get("ELAN_HOME") or (Path.home() / ".elan"))
+        executable_name = "lake.exe" if os.name == "nt" else "lake"
+        installed_lake = (
+            elan_home / "toolchains" / toolchain_dir_name / "bin" / executable_name
+        )
+        if installed_lake.is_file():
+            return str(installed_lake)
+
     elan_lake = Path.home() / ".elan" / "bin" / ("lake.exe" if os.name == "nt" else "lake")
     if elan_lake.is_file():
         return str(elan_lake)

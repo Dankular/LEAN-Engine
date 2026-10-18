@@ -33,6 +33,10 @@ class Computation:
 _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
+_WOLFRAM_REAL_FUNCTION = re.compile(
+    r"\b(?P<function>Sin|Cos|Exp|Sinh|Cosh)\s*\[(?P<argument>[^\[\]]*)\]",
+    re.IGNORECASE,
+)
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -91,7 +95,7 @@ theorem wolfram_language_compute :
         code,
     )
     if indefinite_integral is not None:
-        return _prepare_polynomial_antiderivative(
+        return _prepare_real_antiderivative(
             indefinite_integral.group("expression"),
             indefinite_integral.group("variable"),
             time_limit_seconds,
@@ -102,7 +106,7 @@ theorem wolfram_language_compute :
         code,
     )
     if derivative is not None:
-        return _prepare_polynomial_derivative(
+        return _prepare_real_derivative(
             derivative.group("expression"),
             derivative.group("variable"),
             time_limit_seconds,
@@ -111,17 +115,18 @@ theorem wolfram_language_compute :
     return _prepare_polynomial_computation(code, time_limit_seconds)
 
 
-def _prepare_polynomial_antiderivative(
+def _prepare_real_antiderivative(
     expression_source: str,
     variable: str,
     time_limit_seconds: float,
 ) -> Computation | None:
-    exact_source = _normalize_decimal_literals(expression_source)
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
     if exact_source is None:
         return None
     try:
         parsed = parse_math_input(exact_source)
-        integrand_lean, integrand_symbols = _render_polynomial_lean(parsed.expression)
+        integrand_lean, integrand_symbols = _render_real_calculus_lean(parsed.expression)
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if integrand_lean is None:
@@ -144,7 +149,7 @@ def _prepare_polynomial_antiderivative(
     antiderivative = symbolic["result"]
     try:
         tree = ast.parse(antiderivative, mode="eval")
-        antiderivative_lean, antiderivative_symbols = _render_polynomial_lean(
+        antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(
             antiderivative
         )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
@@ -159,7 +164,7 @@ def _prepare_polynomial_antiderivative(
     ):
         suffix += 1
         function_variable = f"deriv_var{suffix}"
-    rendered = _render_polynomial_node(
+    rendered = _render_real_calculus_node(
         tree.body,
         set(),
         {"nodes": 0},
@@ -183,6 +188,9 @@ def _prepare_polynomial_antiderivative(
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring
 
@@ -198,18 +206,19 @@ theorem wolfram_language_compute{theorem_binders} :
     return Computation(antiderivative.replace("**", "^"), source)
 
 
-def _prepare_polynomial_derivative(
+def _prepare_real_derivative(
     expression_source: str,
     variable: str,
     time_limit_seconds: float,
 ) -> Computation | None:
-    exact_source = _normalize_decimal_literals(expression_source)
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
     if exact_source is None:
         return None
     try:
         parsed = parse_math_input(exact_source)
         tree = ast.parse(parsed.expression, mode="eval")
-        original_lean, symbols = _render_polynomial_lean(parsed.expression)
+        original_lean, symbols = _render_real_calculus_lean(parsed.expression)
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if original_lean is None:
@@ -229,7 +238,7 @@ def _prepare_polynomial_derivative(
 
     result = symbolic["result"]
     try:
-        result_lean, result_symbols = _render_polynomial_lean(result)
+        result_lean, result_symbols = _render_real_calculus_lean(result)
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if result_lean is None:
@@ -240,7 +249,7 @@ def _prepare_polynomial_derivative(
     while function_variable in symbols or function_variable == variable:
         suffix += 1
         function_variable = f"deriv_var{suffix}"
-    rendered = _render_polynomial_node(
+    rendered = _render_real_calculus_node(
         tree.body,
         set(),
         {"nodes": 0},
@@ -266,6 +275,9 @@ def _prepare_polynomial_derivative(
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring
 
@@ -329,6 +341,109 @@ def _prepare_polynomial_computation(
     lean_source = _polynomial_equality_source(original_lean, result_lean, variables)
     display_result = result.replace("**", "^")
     return Computation(display_result, lean_source)
+
+
+def _normalize_wolfram_real_functions(source: str) -> str:
+    normalized = re.sub(r"\bPi\b", "pi", source, flags=re.IGNORECASE)
+    for _ in range(64):
+        normalized, replacements = _WOLFRAM_REAL_FUNCTION.subn(
+            lambda match: f"{match.group('function').lower()}({match.group('argument')})",
+            normalized,
+        )
+        if replacements == 0:
+            break
+    if "\\" not in normalized:
+        normalized = normalized.replace("^", "**")
+    return normalized
+
+
+def _render_real_calculus_lean(source: str) -> tuple[str | None, set[str]]:
+    try:
+        tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return None, set()
+    names: set[str] = set()
+    rendered = _render_real_calculus_node(tree.body, names, {"nodes": 0}, 0)
+    return rendered, names
+
+
+def _render_real_calculus_node(
+    node: ast.AST,
+    names: set[str],
+    state: dict[str, int],
+    depth: int,
+    substitutions: dict[str, str] | None = None,
+) -> str | None:
+    state["nodes"] += 1
+    if state["nodes"] > 256 or depth > 32:
+        return None
+    if isinstance(node, ast.Constant):
+        value = _constant_fraction(node)
+        return _lean_fraction(value) if value is not None else None
+    if isinstance(node, ast.Name):
+        if node.id == "pi":
+            return "Real.pi"
+        if node.id == "E":
+            return "(Real.exp 1)"
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id):
+            return None
+        names.add(node.id)
+        return (substitutions or {}).get(node.id, node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _render_real_calculus_node(
+            node.operand, names, state, depth + 1, substitutions
+        )
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else f"(-{inner})"
+    if isinstance(node, ast.Call):
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.keywords
+            or len(node.args) != 1
+        ):
+            return None
+        function_name = {
+            "sin": "Real.sin",
+            "cos": "Real.cos",
+            "exp": "Real.exp",
+            "sinh": "Real.sinh",
+            "cosh": "Real.cosh",
+        }.get(node.func.id)
+        if function_name is None:
+            return None
+        argument = _render_real_calculus_node(
+            node.args[0], names, state, depth + 1, substitutions
+        )
+        return f"({function_name} {argument})" if argument is not None else None
+    if not isinstance(node, ast.BinOp):
+        return None
+
+    left = _render_real_calculus_node(
+        node.left, names, state, depth + 1, substitutions
+    )
+    right = _render_real_calculus_node(
+        node.right, names, state, depth + 1, substitutions
+    )
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return f"({left} + {right})"
+    if isinstance(node.op, ast.Sub):
+        return f"({left} - {right})"
+    if isinstance(node.op, ast.Mult):
+        return f"({left} * {right})"
+    if isinstance(node.op, ast.Div):
+        denominator = _constant_fraction(node.right)
+        if denominator is None or denominator == 0:
+            return None
+        return f"({left} / {right})"
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return f"({left} ^ {exponent.numerator})"
+    return None
 
 
 def _render_polynomial_lean(source: str) -> tuple[str | None, set[str]]:
@@ -410,7 +525,31 @@ def _derivative_proof_term(
     if isinstance(node, ast.Name):
         if node.id == variable:
             return f"(hasDerivAt_id {point})"
+        if node.id == "pi":
+            return f"(hasDerivAt_const {point} Real.pi)"
+        if node.id == "E":
+            return f"(hasDerivAt_const {point} (Real.exp 1))"
         return f"(hasDerivAt_const {point} {node.id})"
+    if isinstance(node, ast.Call):
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.keywords
+            or len(node.args) != 1
+        ):
+            return None
+        derivative_method = {
+            "sin": "sin",
+            "cos": "cos",
+            "exp": "exp",
+            "sinh": "sinh",
+            "cosh": "cosh",
+        }.get(node.func.id)
+        if derivative_method is None:
+            return None
+        inner = _derivative_proof_term(
+            node.args[0], variable, function_variable, point, state, depth + 1
+        )
+        return f"({inner}).{derivative_method}" if inner is not None else None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         inner = _derivative_proof_term(
             node.operand, variable, function_variable, point, state, depth + 1

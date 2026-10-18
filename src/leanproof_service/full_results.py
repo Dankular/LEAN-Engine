@@ -650,7 +650,9 @@ def _verify_query_computation(
         }
 
     query_normalized = _canonical_formula(query_result)
-    candidate_normalized = _canonical_formula(computation.display_result)
+    candidate_normalized = _canonical_formula(
+        computation.display_result.replace("^", "**")
+    )
     if query_normalized is None or candidate_normalized is None or query_normalized != candidate_normalized:
         return {
             "status": "candidate_mismatch",
