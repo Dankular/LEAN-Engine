@@ -1,6 +1,6 @@
 # Lean Proof and Computation Service
 
-A service for LLM clients that separates symbolic computation, constraint solving, formal proof checking, and retrieval from factual data providers. It does not translate natural language into a theorem: callers submit a typed claim or a bounded symbolic expression, and each response identifies what kind of evidence it contains.
+A service for LLM clients that separates symbolic computation, constraint solving, formal proof checking, and retrieval from factual data providers. It does not translate natural language into a theorem: callers submit a typed claim or a bounded polynomial formula with declared variable sorts, and each response identifies what kind of evidence it contains.
 
 ## Current coverage
 
@@ -104,6 +104,18 @@ For example, encode `x² ≥ 0` with a `pow` term:
   }
 }
 ```
+
+For a shorter formula-text request, use `POST /v1/prove-formula`. Declare each variable's arithmetic sort explicitly; the service parses a bounded polynomial comparison and returns the same Z3 and Lean evidence as `/v1/prove`.
+
+```json
+{
+  "formula": "x^2 >= 0",
+  "variables": [{"name": "x", "sort": "Real"}],
+  "assumptions": []
+}
+```
+
+It accepts one comparison per formula, exact integer/decimal constants, `+`, `-`, `*`, powers using `^` or `**`, and division by nonzero numeric constants. Each assumption is another comparison, conjoined with the others. Formula text is limited to 4,000 characters, 256 syntax nodes, and 32 levels of nesting. It does not parse natural language, function calls, chained comparisons, or division by a variable. Every variable in the claim or assumptions must be declared; a claim uses one shared `Int` or `Real` sort.
 
 ## Symbolic mathematics
 

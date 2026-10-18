@@ -130,6 +130,10 @@ def term_to_z3(term: Term, variables: dict[str, Any], sort: Sort) -> Any:
             return z3.IntVal(value.numerator)
         return z3.RealVal(f"{value.numerator}/{value.denominator}")
     if isinstance(term, PowerTerm):
+        if term.exponent == 0:
+            return z3.IntVal(1) if sort is Sort.INT else z3.RealVal(1)
+        if term.exponent == 1:
+            return term_to_z3(term.base, variables, sort)
         return term_to_z3(term.base, variables, sort) ** term.exponent
     if isinstance(term, BinaryTerm):
         left = term_to_z3(term.left, variables, sort)

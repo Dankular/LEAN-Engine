@@ -39,6 +39,10 @@ def render_term(term: Term, sort: Sort) -> str:
     if isinstance(term, NumberTerm):
         return _lean_number(term, sort)
     if isinstance(term, PowerTerm):
+        if term.exponent == 0:
+            return f"(1 : {sort.value})"
+        if term.exponent == 1:
+            return render_term(term.base, sort)
         return f"({render_term(term.base, sort)} ^ {term.exponent})"
     if isinstance(term, BinaryTerm):
         op = {"add": "+", "sub": "-", "mul": "*"}[term.kind]

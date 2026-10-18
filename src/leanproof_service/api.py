@@ -38,6 +38,7 @@ from .full_results import (
     validate_error,
     validate_query,
 )
+from .formula_input import FormulaInputError, FormulaProofRequest, compile_formula
 from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
@@ -104,10 +105,19 @@ def readyz() -> dict[str, object]:
 def capabilities() -> dict[str, object]:
     registry = assumption_registry()
     return {
-        "formalization": "caller_supplied_typed_specification",
+        "formalization": "caller_supplied_typed_specification_or_bounded_polynomial_formula",
         "sorts": ["Int", "Real"],
         "fragment": "bounded polynomial arithmetic with equality and ordered comparisons",
         "polynomial_limits": {"maximum_degree": 32, "maximum_power_exponent": 16},
+        "formula_input": {
+            "path": "/v1/prove-formula",
+            "arithmetic": ["+", "-", "*", "division by nonzero numeric constants", "^", "**"],
+            "constants": "exact integers, decimals, and rational ratios up to 256 bits",
+            "comparisons": ["==", "!=", "<", "<=", ">", ">="],
+            "variables": "must be declared and all use one shared Int or Real sort",
+            "syntax_limits": {"maximum_characters": 4000, "maximum_nodes": 256, "maximum_depth": 32},
+            "natural_language": False,
+        },
         "counterexample_models": {
             "witness_replay": "exact integer and rational arithmetic",
             "algebraic_real_witness": "unknown unless an exact rational witness is available",
@@ -244,6 +254,15 @@ def capabilities() -> dict[str, object]:
 @app.post("/v1/prove", dependencies=[Depends(require_api_token)])
 def prove(request: ClaimRequest) -> dict[str, object]:
     return analyze(request)
+
+
+@app.post("/v1/prove-formula", dependencies=[Depends(require_api_token)])
+def prove_formula(request: FormulaProofRequest) -> dict[str, object]:
+    try:
+        typed_claim = compile_formula(request)
+    except (FormulaInputError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return analyze(typed_claim)
 
 
 @app.post("/v1/counterexample", dependencies=[Depends(require_api_token)])

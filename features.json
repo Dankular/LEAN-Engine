@@ -1,7 +1,8 @@
 {
   "feature_matrix_version": 1,
   "features": [
-    {"id": "native.prove", "state": "implemented_initial_slice", "scope": "typed bounded integer/real polynomial arithmetic using addition, subtraction, multiplication, and powers up to 16 (maximum degree 32); nonlinear Lean checking uses nlinarith when supported and depends on local Mathlib setup"},
+    {"id": "native.prove", "state": "implemented_initial_slice", "scope": "typed bounded integer/real polynomial arithmetic and formula-text route /v1/prove-formula; supports addition, subtraction, multiplication, division by nonzero numeric constants, and powers up to 16 (maximum degree 32); nonlinear Lean checking uses nlinarith when supported and depends on local Mathlib setup"},
+    {"id": "native.formula_proof", "state": "implemented_initial_slice", "scope": "safe bounded polynomial comparison parser; variables require explicit Int/Real sorts; not natural-language formalization"},
     {"id": "native.counterexample", "state": "implemented", "scope": "Z3 polynomial witness independently replayed against the submitted AST with exact integer/rational arithmetic; algebraic irrational real models return unknown unless an exact rational witness is available"},
     {"id": "native.symbolic", "state": "implemented", "scope": "SymPy 1.14; bounded safe expression grammar; initial named_units subset binds meter, minute, or US minim symbols and rejects incompatible dimensions in additions; outputs are not formal proofs"},
     {"id": "native.symbolic_input_formats", "state": "implemented_initial_slice", "scope": "native expressions plus bounded presentation LaTeX and presentation MathML normalization; unsupported constructs are rejected; no arbitrary TeX or Content MathML"},
