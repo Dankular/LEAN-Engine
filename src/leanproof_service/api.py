@@ -392,9 +392,9 @@ def capabilities() -> dict[str, object]:
                 "derivative": {
                     "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh"],
+                    "functions": ["Sin", "Cos", "Exp", "Sinh", "Cosh", "Log"],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
-                    "domain_conditions": "variable denominators require explicit nonzero hypotheses, returned in evidence.domain_conditions",
+                    "domain_conditions": "variable denominators require nonzero conditions and real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
@@ -415,7 +415,7 @@ def capabilities() -> dict[str, object]:
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["variable-denominator integration", "Tan", "Log", "Sin[x^2] antiderivative"],
+                    "unsupported_examples": ["variable-denominator integration", "Tan", "logarithmic antiderivatives", "Sin[x^2] antiderivative"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"

@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Exp|Sinh|Cosh)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>Sin|Cos|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 
@@ -385,6 +385,9 @@ def _prepare_real_derivative(
         return None
     if original_lean is None:
         return None
+    positive_log_arguments = _positive_log_arguments(tree.body)
+    if positive_log_arguments is None:
+        return None
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="differentiate",
@@ -412,6 +415,7 @@ def _prepare_real_derivative(
     function_variable = _fresh_identifier("deriv_var", used_names)
     domain_denominators = _variable_denominators(tree.body)
     domain_hypotheses: dict[str, str] = {}
+    positive_hypotheses: dict[str, str] = {}
     domain_binders: list[str] = []
     domain_condition_names: list[str] = []
     domain_conditions: list[str] = []
@@ -434,6 +438,25 @@ def _prepare_real_derivative(
         denominator_source = ast.unparse(denominator).replace("**", "^")
         domain_conditions.append(f"{denominator_source} ≠ 0")
 
+    for index, argument in enumerate(positive_log_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        hypothesis_name = _fresh_identifier(f"h_positive_{index}", used_names)
+        positive_hypotheses[ast.dump(argument, include_attributes=False)] = (
+            hypothesis_name
+        )
+        domain_binders.append(f"({hypothesis_name} : 0 < {argument_lean})")
+        domain_condition_names.append(f"ne_of_gt {hypothesis_name}")
+        argument_source = ast.unparse(argument).replace("**", "^")
+        domain_conditions.append(f"{argument_source} > 0")
+
     rendered = _render_real_calculus_node(
         tree.body,
         set(),
@@ -452,6 +475,7 @@ def _prepare_real_derivative(
         {"nodes": 0},
         0,
         domain_hypotheses=domain_hypotheses,
+        positive_hypotheses=positive_hypotheses,
     )
     if proof is None:
         return None
@@ -469,6 +493,7 @@ import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
+import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Tactic.FieldSimp
@@ -579,6 +604,31 @@ def _variable_denominators(root: ast.AST) -> list[ast.AST]:
     return denominators
 
 
+def _positive_log_arguments(root: ast.AST) -> list[ast.AST] | None:
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "log"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        constant = _constant_fraction(argument)
+        if constant is not None:
+            if constant <= 0:
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
 def _render_real_calculus_lean(
     source: str,
     allow_variable_denominators: bool = False,
@@ -646,6 +696,7 @@ def _render_real_calculus_node(
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
+            "log": "Real.log",
         }.get(node.func.id)
         if function_name is None:
             return None
@@ -766,6 +817,7 @@ def _derivative_proof_term(
     state: dict[str, int],
     depth: int,
     domain_hypotheses: dict[str, str] | None = None,
+    positive_hypotheses: dict[str, str] | None = None,
 ) -> str | None:
     state["nodes"] += 1
     if state["nodes"] > 256 or depth > 32:
@@ -790,6 +842,31 @@ def _derivative_proof_term(
             or len(node.args) != 1
         ):
             return None
+        if node.func.id == "log":
+            argument = node.args[0]
+            constant_argument = _constant_fraction(argument)
+            if constant_argument is not None:
+                if constant_argument <= 0:
+                    return None
+                domain_proof = "by norm_num"
+            else:
+                hypothesis_name = (positive_hypotheses or {}).get(
+                    ast.dump(argument, include_attributes=False)
+                )
+                if hypothesis_name is None:
+                    return None
+                domain_proof = f"ne_of_gt {hypothesis_name}"
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            return f"({inner}).log ({domain_proof})" if inner is not None else None
         derivative_method = {
             "sin": "sin",
             "cos": "cos",
@@ -807,6 +884,7 @@ def _derivative_proof_term(
             state,
             depth + 1,
             domain_hypotheses,
+            positive_hypotheses,
         )
         return f"({inner}).{derivative_method}" if inner is not None else None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
@@ -818,6 +896,7 @@ def _derivative_proof_term(
             state,
             depth + 1,
             domain_hypotheses,
+            positive_hypotheses,
         )
         if inner is None:
             return None
@@ -833,6 +912,7 @@ def _derivative_proof_term(
         state,
         depth + 1,
         domain_hypotheses,
+        positive_hypotheses,
     )
     if left is None:
         return None
@@ -860,6 +940,7 @@ def _derivative_proof_term(
             state,
             depth + 1,
             domain_hypotheses,
+            positive_hypotheses,
         )
         if right is None:
             return None
@@ -873,6 +954,7 @@ def _derivative_proof_term(
         state,
         depth + 1,
         domain_hypotheses,
+        positive_hypotheses,
     )
     if right is None:
         return None
