@@ -282,7 +282,7 @@ def capabilities() -> dict[str, object]:
                     "sum_product_bounds": "integer literals only",
                     "sum_product_proof_bounds": "Lean proofs support rational-polynomial finite sums/products over inclusive integer ranges of up to 128 terms",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial, real-calculus, finite polynomial Sum/Product computations over up to 128 integer terms, and finite polynomial limits at exact rational points; unsupported operations remain unverified",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial, real-calculus, finite polynomial Sum/Product computations over up to 128 integer terms, and finite rational-function limits at exact rational points under explicit denominator conditions; unsupported operations remain unverified",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
@@ -293,7 +293,7 @@ def capabilities() -> dict[str, object]:
                     "ignorecase": True,
                     "reinterpret": False,
                     "translation": False,
-                    "verify": "optional Lean check for supported exact polynomial, real-calculus, finite polynomial Sum/Product computations, and polynomial limits at exact rational points",
+                    "verify": "optional Lean check for supported exact polynomial, real-calculus, finite polynomial Sum/Product computations, and rational-function limits at exact rational points under explicit denominator conditions",
                 },
                 "formal_verification": {
                     "query_parameter": "verify=true",
@@ -308,7 +308,7 @@ def capabilities() -> dict[str, object]:
                         "indefinite polynomial antiderivatives",
                         "definite integrals of supported expressions with exact rational bounds",
                         "finite sums and products of rational-coefficient polynomials over inclusive integer ranges of up to 128 terms",
-                        "finite limits of rational-coefficient polynomials at exact rational points",
+                        "finite limits of bounded rational functions at exact rational points when denominator values are proven nonzero or returned as explicit domain conditions",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
@@ -384,7 +384,7 @@ def capabilities() -> dict[str, object]:
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
-                    "Limit for rational-polynomial expressions at exact rational points",
+                    "Limit for bounded rational functions at exact rational points under explicit denominator conditions",
                     "Solve for univariate degree-at-most-two polynomial equations over Reals with rational roots",
                 ],
                 "finite_sum_product": {
@@ -399,17 +399,17 @@ def capabilities() -> dict[str, object]:
                 },
                 "limit": {
                     "syntax": "Limit[expression, {variable, point}]",
-                    "domain": "rational-coefficient polynomials with real parameters",
+                    "domain": "bounded rational functions with real parameters",
                     "point": "exact rational with numerator and denominator up to 256 bits",
-                    "proof": "Lean continuity at the point plus exact polynomial evaluation and axiom audit",
+                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero denominator values as explicit domain conditions; continuity and exact evaluation are checked under those conditions",
                 },
-                "polynomial_limits": {
-                    "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
+                "rational_function_limits": {
+                    "operators": ["+", "-", "*", "/", "^"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
                     "maximum_power": 16,
                     "maximum_numeric_component_bits": 256,
-                    "variable_domain": "complex numbers for polynomial identities; real numbers for D derivatives",
+                    "variable_domain": "real numbers; symbolic denominator values at the limit point are explicit proof conditions",
                 },
                 "derivative": {
                     "syntax": "D[expression, variable]",
@@ -980,7 +980,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
         "A bounded arithmetic, real-calculus, finite polynomial Sum/Product, "
-        "and special-case subset is computed and "
+        "rational-function limit, and special-case subset is computed and "
         "compiled into Lean proofs."
     ),
     openapi_extra={

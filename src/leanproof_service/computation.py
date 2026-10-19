@@ -53,7 +53,7 @@ _REAL_LINEAR_SYSTEM_SOLVE = re.compile(
     r"(?is)\s*Solve\s*\[\s*\{(?P<equations>.*?)\}\s*,\s*"
     r"\{(?P<variables>.*?)\}\s*,\s*Reals\s*\]\s*"
 )
-_REAL_POLYNOMIAL_LIMIT = re.compile(
+_REAL_RATIONAL_LIMIT = re.compile(
     r"(?is)\s*Limit\s*\[\s*(?P<expression>.+?)\s*,\s*"
     r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
     r"(?P<point>[^,{}]+?)\s*\}\s*\]\s*"
@@ -89,12 +89,12 @@ theorem wolfram_language_compute (x : ℝ) :
 """
         return Computation("2*Cos[x]*Sin[x]", source)
 
-    real_polynomial_limit = _REAL_POLYNOMIAL_LIMIT.fullmatch(code)
-    if real_polynomial_limit is not None:
-        return _prepare_real_polynomial_limit(
-            real_polynomial_limit.group("expression"),
-            real_polynomial_limit.group("variable"),
-            real_polynomial_limit.group("point"),
+    real_rational_limit = _REAL_RATIONAL_LIMIT.fullmatch(code)
+    if real_rational_limit is not None:
+        return _prepare_real_rational_limit(
+            real_rational_limit.group("expression"),
+            real_rational_limit.group("variable"),
+            real_rational_limit.group("point"),
             time_limit_seconds,
         )
 
@@ -285,7 +285,7 @@ def _lean_real_integer(value: int) -> str:
     return f"({value} : ℝ)"
 
 
-def _prepare_real_polynomial_limit(
+def _prepare_real_rational_limit(
     expression_source: str,
     variable: str,
     point_source: str,
@@ -297,7 +297,9 @@ def _prepare_real_polynomial_limit(
     try:
         parsed = parse_math_input(exact_source)
         expression_tree = ast.parse(parsed.expression, mode="eval")
-        expression_lean, expression_symbols = _render_polynomial_lean(parsed.expression)
+        expression_lean, expression_symbols = _render_rational_limit_lean(
+            parsed.expression
+        )
     except (MathInputError, ValueError, SyntaxError, RecursionError):
         return None
     if expression_lean is None:
@@ -327,20 +329,24 @@ def _prepare_real_polynomial_limit(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
 
     result = symbolic["result"]
-    result_lean, result_symbols = _render_polynomial_lean(result)
+    result_lean, result_symbols = _render_rational_limit_lean(result)
     if result_lean is None:
+        return None
+    try:
+        result_tree = ast.parse(result, mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
         return None
 
     used_names = set(expression_symbols) | set(result_symbols)
     limit_variable = _fresh_identifier("limit_variable", used_names)
-    limit_body = _render_polynomial_node(
+    limit_body = _render_rational_limit_node(
         expression_tree.body,
         set(),
         {"nodes": 0},
         0,
         substitutions={variable: limit_variable},
     )
-    value_at_point = _render_polynomial_node(
+    value_at_point = _render_rational_limit_node(
         expression_tree.body,
         set(),
         {"nodes": 0},
@@ -349,10 +355,19 @@ def _prepare_real_polynomial_limit(
     )
     if limit_body is None or value_at_point is None:
         return None
-    continuity_proof = _polynomial_continuity_proof(
+    continuity_state: dict[str, object] = {
+        "nodes": 0,
+        "denominator_assumptions": [],
+        "assumed_denominators": [],
+        "domain_binders": [],
+        "domain_conditions": [],
+        "used_names": used_names | {limit_variable},
+    }
+    continuity_proof = _rational_continuity_proof(
         expression_tree.body,
         variable,
-        {"nodes": 0},
+        point,
+        continuity_state,
         0,
     )
     if continuity_proof is None:
@@ -361,43 +376,122 @@ def _prepare_real_polynomial_limit(
     theorem_symbols = sorted(
         (expression_symbols | result_symbols) - {variable, limit_variable}
     )
-    binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
+    domain_binders = continuity_state["domain_binders"]
+    if not isinstance(domain_binders, list):
+        return None
+    binders = " ".join(
+        [*(f"({name} : ℝ)" for name in theorem_symbols), *domain_binders]
+    )
     theorem_binders = f" {binders}" if binders else ""
     point_lean = _lean_rational(point)
+    denominator_assumptions = continuity_state["denominator_assumptions"]
+    if not isinstance(denominator_assumptions, list):
+        return None
+    denominator_proofs = "\n".join(
+        f"  have {name} : {denominator} ≠ 0 := by norm_num"
+        for name, denominator in denominator_assumptions
+    )
+    denominator_proofs = f"{denominator_proofs}\n" if denominator_proofs else ""
+    assumed_denominators = continuity_state["assumed_denominators"]
+    if not isinstance(assumed_denominators, list):
+        return None
+    result_denominator_proofs: list[tuple[str, str, str]] = []
+    for result_denominator in _variable_denominators(result_tree.body):
+        denominator_value = _exact_rational_node_value(
+            result_denominator, variable, point
+        )
+        if denominator_value is not None:
+            if denominator_value == 0:
+                return None
+            continue
+        denominator_names: set[str] = set()
+        denominator_expression = _render_rational_limit_node(
+            result_denominator,
+            denominator_names,
+            {"nodes": 0},
+            0,
+        )
+        if denominator_expression is None or not assumed_denominators:
+            return None
+        used_hypothesis_names = continuity_state["used_names"]
+        if not isinstance(used_hypothesis_names, set):
+            return None
+        hypothesis_name = _fresh_identifier(
+            "h_result_denominator", used_hypothesis_names
+        )
+        proof_branches = "\n".join(
+            f"    | exact {assumption_name} (by nlinarith [h_zero])"
+            for assumption_name, _ in assumed_denominators
+        )
+        proof = (
+            f"have {hypothesis_name} : {denominator_expression} ≠ 0 := by\n"
+            "    intro h_zero\n"
+            "    first\n"
+            f"{proof_branches}"
+        )
+        result_denominator_proofs.append(
+            (hypothesis_name, denominator_expression, proof)
+        )
+    field_simp_names = [
+        *(name for name, _ in assumed_denominators),
+        *(name for name, _, _ in result_denominator_proofs),
+    ]
+    value_proof = (
+        f"field_simp [{', '.join(field_simp_names)}, add_comm] <;> ring"
+        if field_simp_names
+        else "ring"
+    )
+    result_denominator_source = "\n".join(
+        f"  {proof.replace(chr(10), chr(10) + '  ')}"
+        for _, _, proof in result_denominator_proofs
+    )
+    result_denominator_source = (
+        f"{result_denominator_source}\n" if result_denominator_source else ""
+    )
     source = f"""import Mathlib.Basic.Real.Basic
 import Mathlib.Topology.Instances.Real.Lemmas
 import Mathlib.Topology.Continuous
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.NormNum
 import Mathlib.Tactic.Ring
 
 theorem wolfram_language_compute{theorem_binders} :
     Filter.Tendsto (fun {limit_variable} : ℝ => {limit_body})
       (nhds {point_lean}) (nhds {result_lean}) := by
-  have hcont : ContinuousAt (fun {limit_variable} : ℝ => {limit_body})
+{denominator_proofs}  have hcont : ContinuousAt (fun {limit_variable} : ℝ => {limit_body})
       {point_lean} := {continuity_proof}
-  have hvalue : {value_at_point} = {result_lean} := by ring
+{result_denominator_source}  have hvalue : {value_at_point} = {result_lean} := by {value_proof}
   simpa only [hvalue] using hcont.tendsto
 
 #print axioms wolfram_language_compute
 """
-    return Computation(result.replace("**", "^"), source)
+    domain_conditions = continuity_state["domain_conditions"]
+    if not isinstance(domain_conditions, list):
+        return None
+    return Computation(
+        result.replace("**", "^"),
+        source,
+        domain_conditions=tuple(domain_conditions),
+    )
 
 
-def _polynomial_continuity_proof(
+def _rational_continuity_proof(
     node: ast.AST,
     variable: str,
-    state: dict[str, int],
+    point: Fraction,
+    state: dict[str, object],
     depth: int,
 ) -> str | None:
-    state["nodes"] += 1
-    if state["nodes"] > 256 or depth > 32:
+    state["nodes"] = int(state["nodes"]) + 1
+    if int(state["nodes"]) > 256 or depth > 32:
         return None
     if _constant_fraction(node) is not None:
         return "continuousAt_const"
     if isinstance(node, ast.Name):
         return "continuousAt_id" if node.id == variable else "continuousAt_const"
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        inner = _polynomial_continuity_proof(
-            node.operand, variable, state, depth + 1
+        inner = _rational_continuity_proof(
+            node.operand, variable, point, state, depth + 1
         )
         if inner is None:
             return None
@@ -405,7 +499,9 @@ def _polynomial_continuity_proof(
     if not isinstance(node, ast.BinOp):
         return None
 
-    left = _polynomial_continuity_proof(node.left, variable, state, depth + 1)
+    left = _rational_continuity_proof(
+        node.left, variable, point, state, depth + 1
+    )
     if left is None:
         return None
     if isinstance(node.op, ast.Pow):
@@ -417,11 +513,63 @@ def _polynomial_continuity_proof(
         return f"({left}).pow {exponent.numerator}"
     if isinstance(node.op, ast.Div):
         denominator = _constant_fraction(node.right)
-        if denominator is None or denominator == 0:
+        if denominator is not None:
+            if denominator == 0:
+                return None
+            return f"({left}).div_const {_lean_rational(denominator)}"
+        denominator_value = _exact_rational_node_value(node.right, variable, point)
+        if denominator_value == 0:
             return None
-        return f"({left}).div_const {_lean_rational(denominator)}"
+        right = _rational_continuity_proof(
+            node.right, variable, point, state, depth + 1
+        )
+        if right is None:
+            return None
+        names: set[str] = set()
+        denominator_at_point = _render_rational_limit_node(
+            node.right,
+            names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: _lean_rational(point)},
+        )
+        if denominator_at_point is None:
+            return None
+        used_names = state["used_names"]
+        denominator_proofs = state["denominator_assumptions"]
+        domain_binders = state["domain_binders"]
+        domain_conditions = state["domain_conditions"]
+        assumed_denominators = state["assumed_denominators"]
+        if (
+            not isinstance(used_names, set)
+            or not isinstance(denominator_proofs, list)
+            or not isinstance(domain_binders, list)
+            or not isinstance(domain_conditions, list)
+            or not isinstance(assumed_denominators, list)
+        ):
+            return None
+        hypothesis_name = _fresh_identifier("h_limit_denominator", used_names)
+        if denominator_value is None:
+            domain_binders.append(f"({hypothesis_name} : {denominator_at_point} ≠ 0)")
+            assumed_denominators.append((hypothesis_name, denominator_at_point))
+            denominator_source = ast.unparse(node.right).replace("**", "^")
+            if any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(node.right)
+            ):
+                condition = (
+                    f"{denominator_source} ≠ 0 at {variable} = {_fraction_text(point)}"
+                )
+            else:
+                condition = f"{denominator_source} ≠ 0"
+            domain_conditions.append(condition)
+        else:
+            denominator_proofs.append((hypothesis_name, denominator_at_point))
+        return f"({left}).div ({right}) {hypothesis_name}"
 
-    right = _polynomial_continuity_proof(node.right, variable, state, depth + 1)
+    right = _rational_continuity_proof(
+        node.right, variable, point, state, depth + 1
+    )
     if right is None:
         return None
     method = {
@@ -2561,6 +2709,111 @@ def _render_polynomial_lean(source: str) -> tuple[str | None, set[str]]:
     names: set[str] = set()
     rendered = _render_polynomial_node(tree.body, names, state, 0)
     return rendered, names
+
+
+def _render_rational_limit_lean(source: str) -> tuple[str | None, set[str]]:
+    try:
+        tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return None, set()
+    names: set[str] = set()
+    rendered = _render_rational_limit_node(tree.body, names, {"nodes": 0}, 0)
+    return rendered, names
+
+
+def _render_rational_limit_node(
+    node: ast.AST,
+    names: set[str],
+    state: dict[str, int],
+    depth: int,
+    substitutions: dict[str, str] | None = None,
+) -> str | None:
+    state["nodes"] += 1
+    if state["nodes"] > 256 or depth > 32:
+        return None
+    if isinstance(node, ast.Constant):
+        value = _constant_fraction(node)
+        return _lean_fraction(value) if value is not None else None
+    if isinstance(node, ast.Name):
+        if (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id)
+            or node.id in {"pi", "E", "I", "oo"}
+        ):
+            return None
+        names.add(node.id)
+        return (substitutions or {}).get(node.id, node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _render_rational_limit_node(
+            node.operand, names, state, depth + 1, substitutions
+        )
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else f"(-{inner})"
+    if not isinstance(node, ast.BinOp):
+        return None
+
+    left = _render_rational_limit_node(
+        node.left, names, state, depth + 1, substitutions
+    )
+    right = _render_rational_limit_node(
+        node.right, names, state, depth + 1, substitutions
+    )
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return f"({left} + {right})"
+    if isinstance(node.op, ast.Sub):
+        return f"({left} - {right})"
+    if isinstance(node.op, ast.Mult):
+        return f"({left} * {right})"
+    if isinstance(node.op, ast.Div):
+        denominator = _constant_fraction(node.right)
+        if denominator == 0:
+            return None
+        return f"({left} / {right})"
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return f"({left} ^ {exponent.numerator})"
+    return None
+
+
+def _exact_rational_node_value(
+    node: ast.AST,
+    variable: str,
+    point: Fraction,
+) -> Fraction | None:
+    constant = _constant_fraction(node)
+    if constant is not None:
+        return constant
+    if isinstance(node, ast.Name):
+        return point if node.id == variable else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _exact_rational_node_value(node.operand, variable, point)
+        if value is None:
+            return None
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _exact_rational_node_value(node.left, variable, point)
+    right = _exact_rational_node_value(node.right, variable, point)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return left + right
+    if isinstance(node.op, ast.Sub):
+        return left - right
+    if isinstance(node.op, ast.Mult):
+        return left * right
+    if isinstance(node.op, ast.Div):
+        return left / right if right != 0 else None
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        return left ** exponent.numerator
+    return None
 
 
 def _render_polynomial_node(

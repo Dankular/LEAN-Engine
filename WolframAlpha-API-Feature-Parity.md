@@ -48,10 +48,14 @@ with reversed ranges using the empty-sum value `0` and empty-product value `1`. 
 the finite `Finset.range` computation, and the query verifier attaches evidence only when
 that exact result matches the SymPy result.
 
-`Limit[expression, {variable, point}]` also receives Lean evidence when the expression is
-a rational-coefficient polynomial and the point is an exact rational number within the
-256-bit numeric limit. Lean proves continuity at the point and checks the exact value;
-other limit forms remain symbolic results without Lean evidence.
+`Limit[expression, {variable, point}]` also receives Lean evidence for bounded rational
+functions at exact rational points within the 256-bit numeric limit, when every
+denominator at the point is either proved nonzero or returned as an explicit domain
+condition. Lean proves continuity under those conditions and checks the exact value.
+Free real parameters are supported in numerators and symbolic denominators. On
+`/v2/query`, limits at poles and removable singularities remain symbolic results without
+Lean evidence; the CAG route returns its documented unsupported-expression status for
+those forms.
 
 The verified calculus subset also supports `D[ArcTan[2x], x]` and the
 `Integrate[1/(1+x^2), x]` and `Integrate[ArcTan[x], x]` cases. Results are returned only
