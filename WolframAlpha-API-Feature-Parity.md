@@ -110,6 +110,9 @@ the positivity condition and any separate denominator condition used by the proo
 The indefinite integral path also supports `Integrate[1/Sqrt[1-x^2], x]`, returning
 `asin(x)` after Lean checks its derivative. The response includes the strict inverse-sine
 argument bounds and the radicand and denominator conditions used by the proof.
+It also supports `Integrate[ArcSin[x], x] = x*asin(x) + sqrt(1 - x^2)` and
+`Integrate[ArcCos[x], x] = x*acos(x) - sqrt(1 - x^2)`; scaled arguments such as
+`Integrate[ArcSin[2x], x]` retain the corresponding strict argument bounds in evidence.
 
 ## Full Results API feature inventory
 

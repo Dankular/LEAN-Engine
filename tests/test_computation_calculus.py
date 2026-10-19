@@ -48,6 +48,22 @@ class InverseTrigonometricAntiderivativeTests(unittest.TestCase):
         self.assertIn("HasDerivAt", computation.lean_source)
         self.assertIn("#print axioms wolfram_language_compute", computation.lean_source)
 
+    def test_inverse_sine_and_cosine_integrands_are_supported(self) -> None:
+        cases = {
+            "Integrate[ArcSin[x], x]": "x*asin(x) + sqrt(1 - x^2)",
+            "Integrate[ArcCos[x], x]": "x*acos(x) - sqrt(1 - x^2)",
+            "Integrate[ArcSin[2x], x]": "x*asin(2*x) + sqrt(1 - 4*x^2)/2",
+        }
+        for code, expected_result in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected_result)
+                self.assertIn("-1 <", " ".join(computation.domain_conditions))
+                self.assertIn("< 1", " ".join(computation.domain_conditions))
+                self.assertIn("HasDerivAt", computation.lean_source)
+
 
 if __name__ == "__main__":
     unittest.main()
