@@ -35,11 +35,14 @@ _GREEK_UNICODE = {
 }
 _FUNCTIONS = {
     "sin", "cos", "tan", "asin", "acos", "atan", "arcsin", "arccos", "arctan",
+    "asinh", "arcsinh",
     "sinh", "cosh", "tanh", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
     "abs", "floor",
     "ceiling",
 }
-_FUNCTION_ALIASES = {"arcsin": "asin", "arccos": "acos", "arctan": "atan"}
+_FUNCTION_ALIASES = {
+    "arcsin": "asin", "arccos": "acos", "arctan": "atan", "arcsinh": "asinh",
+}
 
 
 class MathInputError(ValueError):
@@ -182,7 +185,8 @@ def _latex_command(command: str, source: str, after_command: int) -> tuple[str, 
         return "operator", operators[command]
     function_names = {
         "sin": "sin", "cos": "cos", "tan": "tan", "arcsin": "asin", "arccos": "acos",
-        "arctan": "atan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
+        "arctan": "atan", "arcsinh": "asinh", "asinh": "asinh",
+        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
         "sec": "sec", "csc": "csc", "cot": "cot", "log": "log", "ln": "ln", "abs": "abs",
         "floor": "floor", "ceiling": "ceiling",
     }

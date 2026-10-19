@@ -44,7 +44,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>"
-    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|Sqrt|Exp|Sinh|Cosh|Log"
+    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|Sqrt|Exp|Sinh|Cosh|Log"
     r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
@@ -2239,6 +2239,7 @@ import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Arsinh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -2464,6 +2465,7 @@ import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
+import Mathlib.Analysis.SpecialFunctions.Arsinh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -3153,6 +3155,7 @@ def _normalize_wolfram_real_functions(source: str) -> str:
                 "arcsin": "asin",
                 "arccos": "acos",
                 "arctan": "atan",
+                "arcsinh": "asinh",
             }.get(function_name, function_name)
             argument = match.group("argument")
             try:
@@ -3580,6 +3583,7 @@ def _render_real_calculus_node(
             "asin": "Real.arcsin",
             "acos": "Real.arccos",
             "atan": "Real.arctan",
+            "asinh": "Real.arsinh",
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
@@ -3988,6 +3992,7 @@ def _derivative_proof_term(
             "sin": "sin",
             "cos": "cos",
             "atan": "arctan",
+            "asinh": "arsinh",
             "exp": "exp",
             "sinh": "sinh",
             "cosh": "cosh",

@@ -1,6 +1,7 @@
 import unittest
 
 from leanproof_service.computation import prepare_computation
+from leanproof_service.input_syntax import parse_math_input
 from leanproof_service.symbolic import SymbolicRequest, run_symbolic
 
 
@@ -81,6 +82,35 @@ class ReciprocalTrigonometricAntiderivativeTests(unittest.TestCase):
                 self.assertIn(expected_condition, computation.domain_conditions)
                 self.assertIn("HasDerivAt", computation.lean_source)
                 self.assertIn("Real.sin_sq_add_cos_sq", computation.lean_source)
+
+
+class InverseHyperbolicCalculusTests(unittest.TestCase):
+    def test_inverse_hyperbolic_sine_derivative_and_integrals_are_planned(self) -> None:
+        self.assertEqual(
+            parse_math_input(r"\operatorname{arcsinh}(x)").expression,
+            "asinh(x)",
+        )
+        derivative = prepare_computation("D[ArcSinh[x], x]", 10)
+        self.assertIsNotNone(derivative)
+        assert derivative is not None
+        self.assertEqual(derivative.display_result, "1/sqrt(x^2 + 1)")
+        self.assertEqual(derivative.domain_conditions, ())
+        self.assertIn("SpecialFunctions.Arsinh", derivative.lean_source)
+        self.assertIn(".arsinh", derivative.lean_source)
+
+        cases = {
+            "Integrate[1/Sqrt[1+x^2], x]": "asinh(x)",
+            "Integrate[ArcSinh[x], x]": "x*asinh(x) - sqrt(x^2 + 1)",
+        }
+        for code, expected_result in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected_result)
+                self.assertIn("HasDerivAt", computation.lean_source)
+                if code == "Integrate[1/Sqrt[1+x^2], x]":
+                    self.assertIn("1 + x ^ 2 > 0", computation.domain_conditions)
 
 
 if __name__ == "__main__":

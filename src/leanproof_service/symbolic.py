@@ -604,7 +604,8 @@ def _symbolic_evidence(sympy: object) -> dict[str, object]:
 class _SafeParser:
     _functions = {
         "sin": "sin", "cos": "cos", "tan": "tan", "asin": "asin", "acos": "acos",
-        "atan": "atan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
+        "atan": "atan", "asinh": "asinh", "arcsinh": "asinh",
+        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
         "sec": "sec", "csc": "csc", "cot": "cot",
         "log": "log", "sqrt": "sqrt", "root": "root", "Abs": "Abs", "abs": "Abs", "floor": "floor",
         "ceiling": "ceiling",
