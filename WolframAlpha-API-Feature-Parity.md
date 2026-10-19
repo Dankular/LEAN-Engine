@@ -107,6 +107,10 @@ domain conditions `-1 < argument` and `argument < 1`. Constant arguments outside
 checked, including `Integrate[1/Sqrt[x], x] = 2*sqrt(x)`. The request evidence reports
 the positivity condition and any separate denominator condition used by the proof.
 
+The indefinite integral path also supports `Integrate[1/Sqrt[1-x^2], x]`, returning
+`asin(x)` after Lean checks its derivative. The response includes the strict inverse-sine
+argument bounds and the radicand and denominator conditions used by the proof.
+
 ## Full Results API feature inventory
 
 The documented parameter groups are:

@@ -2095,6 +2095,39 @@ def _prepare_real_antiderivative(
         argument_source = ast.unparse(argument).replace("**", "^")
         domain_conditions.append(f"{argument_source} > 0")
 
+    inverse_trig_arguments = _inverse_trig_arguments(tree.body)
+    if inverse_trig_arguments is None:
+        return None
+    for index, argument in enumerate(inverse_trig_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        lower_name = _fresh_identifier(f"h_inverse_lower_{index}", used_names)
+        upper_name = _fresh_identifier(f"h_inverse_upper_{index}", used_names)
+        domain_hypotheses[
+            _inverse_trig_hypothesis_key(argument, "lower")
+        ] = lower_name
+        domain_hypotheses[
+            _inverse_trig_hypothesis_key(argument, "upper")
+        ] = upper_name
+        domain_binders.extend(
+            [
+                f"({lower_name} : -1 < {argument_lean})",
+                f"({upper_name} : {argument_lean} < 1)",
+            ]
+        )
+        domain_condition_names.extend([lower_name, upper_name])
+        domain_conditions.extend(
+            [f"-1 < {argument_source}", f"{argument_source} < 1"]
+        )
+
     for index, domain_expression in enumerate(domain_expressions):
         key = ast.dump(domain_expression, include_attributes=False)
         if key in domain_hypotheses or key in positive_hypotheses:
@@ -2181,6 +2214,7 @@ import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring
 

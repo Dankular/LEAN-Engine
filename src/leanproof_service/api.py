@@ -429,9 +429,9 @@ def capabilities() -> dict[str, object]:
                     "syntax": "Integrate[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "result_semantics": "one antiderivative representative; additive constant omitted; generated real logarithms use log(abs(argument)) where required",
-                    "functions": ["Sin", "Cos", "Tan", "ArcTan", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
-                    "limits": "bounded exact expressions; selected variable-denominator, logarithmic, square-root, and tangent antiderivatives are accepted only when Lean checks the result, with required domain conditions returned",
-                    "domain_conditions": "submitted Log and variable Sqrt arguments require positivity; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
+                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
+                    "limits": "bounded exact expressions; selected variable-denominator, logarithmic, square-root, tangent, and inverse-trigonometric antiderivatives are accepted only when Lean checks the result, with required domain conditions returned",
+                    "domain_conditions": "submitted Log and variable Sqrt arguments require positivity; inverse-trigonometric results require strict argument bounds between -1 and 1; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
                 },
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",

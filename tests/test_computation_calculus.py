@@ -34,5 +34,20 @@ class ReciprocalTrigonometryTests(unittest.TestCase):
                 self.assertIsInstance(result.get("result"), str)
 
 
+class InverseTrigonometricAntiderivativeTests(unittest.TestCase):
+    def test_inverse_sine_antiderivative_carries_real_domain_conditions(self) -> None:
+        computation = prepare_computation("Integrate[1/Sqrt[1-x^2], x]", 10)
+
+        self.assertIsNotNone(computation)
+        assert computation is not None
+        self.assertEqual(computation.display_result, "asin(x)")
+        self.assertIn("-1 < x", computation.domain_conditions)
+        self.assertIn("x < 1", computation.domain_conditions)
+        self.assertIn("1 - x ^ 2 > 0", computation.domain_conditions)
+        self.assertIn("Real.hasDerivAt_arcsin", computation.lean_source)
+        self.assertIn("HasDerivAt", computation.lean_source)
+        self.assertIn("#print axioms wolfram_language_compute", computation.lean_source)
+
+
 if __name__ == "__main__":
     unittest.main()
