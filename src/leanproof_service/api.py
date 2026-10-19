@@ -390,7 +390,11 @@ def capabilities() -> dict[str, object]:
                         "default_seconds": 60,
                         "minimum_seconds": 1,
                         "maximum_seconds": 180,
-                        "scope": "separate optional Lean compilation and axiom-audit stage after a supported symbolic result",
+                        "scope": (
+                            "one separate monotonic deadline shared by result verification, "
+                            "identity counterexample search, and any Lean-certified "
+                            "nonzero interval check"
+                        ),
                     },
                     "podtimeout": {
                         "status": "implemented_initial_slice",

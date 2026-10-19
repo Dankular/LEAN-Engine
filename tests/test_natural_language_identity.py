@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 from fractions import Fraction
 from unittest.mock import patch
@@ -186,6 +187,56 @@ class NaturalLanguageIdentityTests(unittest.TestCase):
         self.assertIn("without a Lean proof", queryresult["qualification"])
         result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
         self.assertEqual(result["claim_status"], "not_established")
+
+    def test_identity_verification_stages_share_one_proof_deadline(self) -> None:
+        token = "natural-language-identity-contract-token"
+        observed: dict[str, float] = {}
+
+        def unsupported_verifier(*args: object, **kwargs: object) -> dict[str, object]:
+            observed["verifier_started"] = time.perf_counter()
+            observed["verifier_budget"] = float(kwargs.get("timeout_seconds", args[3]))
+            time.sleep(0.05)
+            return {"status": "unsupported", "verified": False, "reason": "test"}
+
+        def record_counterexample_deadline(request: object, proof_deadline: float) -> None:
+            observed["counterexample_deadline"] = proof_deadline
+            observed["counterexample_remaining"] = proof_deadline - time.perf_counter()
+            return None
+
+        def record_interval_deadline(request: object, proof_deadline: float) -> None:
+            observed["interval_deadline"] = proof_deadline
+            return None
+
+        with patch.dict(os.environ, {"API_BEARER_TOKEN": token}):
+            with patch(
+                "leanproof_service.full_results._verify_query_computation",
+                side_effect=unsupported_verifier,
+            ), patch(
+                "leanproof_service.full_results._find_identity_counterexample",
+                side_effect=record_counterexample_deadline,
+            ), patch(
+                "leanproof_service.full_results._certify_nonzero_identity_difference",
+                side_effect=record_interval_deadline,
+            ), TestClient(app) as client:
+                response = client.get(
+                    "/v2/query",
+                    params={
+                        "input": "Prove that x equals x",
+                        "verify": "true",
+                        "prooftimeout": "1",
+                        "output": "json",
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertLessEqual(observed["verifier_budget"], 1.0)
+        self.assertGreater(observed["counterexample_remaining"], 0.0)
+        self.assertLessEqual(observed["counterexample_remaining"], 1.0)
+        self.assertEqual(
+            observed["counterexample_deadline"],
+            observed["interval_deadline"],
+        )
 
 
 if __name__ == "__main__":

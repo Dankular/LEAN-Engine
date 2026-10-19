@@ -697,11 +697,12 @@ def execute_query(
     formal_verification = None
     if verify:
         proof_started = perf_counter()
+        proof_deadline = proof_started + proof_timeout_seconds
         formal_verification = _verify_query_computation(
             interpreted,
             symbolic_request,
             result_text,
-            proof_timeout_seconds,
+            max(0.001, proof_deadline - perf_counter()),
             symbolic_result=symbolic.get("result"),
         )
         if symbolic_request.operation == "identity":
@@ -716,7 +717,7 @@ def execute_query(
             if formal_verification["claim_status"] == "not_established":
                 counterexample = _find_identity_counterexample(
                     symbolic_request,
-                    proof_timeout_seconds,
+                    proof_deadline,
                 )
                 if counterexample is not None:
                     formal_verification["claim_status"] = "refuted"
@@ -728,7 +729,7 @@ def execute_query(
                 else:
                     nonzero_evidence = _certify_nonzero_identity_difference(
                         symbolic_request,
-                        proof_timeout_seconds,
+                        proof_deadline,
                     )
                     if nonzero_evidence is not None:
                         formal_verification["claim_status"] = "refuted"
@@ -1357,7 +1358,7 @@ def _identity_claim_status(difference: str, checked: bool) -> str:
 
 def _find_identity_counterexample(
     request: SymbolicRequest,
-    timeout_seconds: float,
+    proof_deadline: float,
 ) -> dict[str, Any] | None:
     """Find a rational polynomial witness and validate it by exact replay."""
     if request.operation != "identity" or request.lhs is None or request.rhs is None:
@@ -1383,6 +1384,9 @@ def _find_identity_counterexample(
     }
     if not names or names & {"e", "E", "I", "pi", "oo", "zoo", "nan"}:
         return None
+    remaining_seconds = proof_deadline - perf_counter()
+    if remaining_seconds < 1.0:
+        return None
 
     from .formula_input import FormulaInputError, FormulaProofRequest, compile_formula
     from .models import Budget, Sort, Variable
@@ -1392,7 +1396,7 @@ def _find_identity_counterexample(
         proof_request = FormulaProofRequest(
             formula=f"({request.lhs}) == ({request.rhs})",
             variables=[Variable(name=name, sort=Sort.REAL) for name in sorted(names)],
-            budget=Budget(wall_seconds=max(1, min(5, int(timeout_seconds)))),
+            budget=Budget(wall_seconds=min(5, int(remaining_seconds))),
         )
         claim_request = compile_formula(proof_request)
         response = analyze(claim_request, attempt_lean=False)
@@ -1417,16 +1421,19 @@ def _find_identity_counterexample(
 
 def _certify_nonzero_identity_difference(
     request: SymbolicRequest,
-    timeout_seconds: float,
+    proof_deadline: float,
 ) -> dict[str, Any] | None:
     """Use a Lean-certified approximation to refute a closed nonzero difference."""
     if request.operation != "identity" or request.lhs is None or request.rhs is None:
+        return None
+    remaining_seconds = proof_deadline - perf_counter()
+    if remaining_seconds <= 0.001:
         return None
     lhs = re.sub(r"\bpi\b", "Pi", request.lhs, flags=re.IGNORECASE)
     rhs = re.sub(r"\bpi\b", "Pi", request.rhs, flags=re.IGNORECASE)
     computation = prepare_computation(
         f"N[({lhs}) - ({rhs}), 50]",
-        max(0.001, min(float(timeout_seconds), 5.0)),
+        max(0.001, min(remaining_seconds, 5.0)),
     )
     if (
         computation is None
@@ -1443,9 +1450,12 @@ def _certify_nonzero_identity_difference(
     if distance_from_zero <= 0:
         return None
 
+    remaining_seconds = proof_deadline - perf_counter()
+    if remaining_seconds <= 0.001:
+        return None
     lean_result = check_computation(
         computation,
-        max(0.001, min(float(timeout_seconds), 60.0)),
+        min(remaining_seconds, 60.0),
     )
     if lean_result.status != "checked":
         return None
