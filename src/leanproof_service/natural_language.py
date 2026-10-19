@@ -7,6 +7,7 @@ from typing import Annotated
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from pydantic import Field, StringConstraints
 
@@ -196,7 +197,8 @@ def _sanitize_candidate(candidate: str) -> str:
     if ":=" not in theorem_source or not re.search(r"\bby\b", theorem_source):
         raise LeanGenerationError("Generated theorem must include a proof")
     theorem_name_match = re.match(
-        r"^(?:theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_']*)\b",
+        r"^(?:theorem|lemma)\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)\b",
         theorem_source,
     )
     if theorem_name_match is None:
@@ -205,11 +207,17 @@ def _sanitize_candidate(candidate: str) -> str:
         if line and not line[0].isspace():
             raise LeanGenerationError("Generated theorem cannot contain additional top-level commands")
 
+    audited_name = f"llm_natural_language_proof_{uuid4().hex}"
+    theorem_source = (
+        theorem_source[:theorem_name_match.start("name")]
+        + audited_name
+        + theorem_source[theorem_name_match.end("name"):]
+    )
     source_parts = [
         "import Mathlib",
         *prelude,
         theorem_source,
-        f"#print axioms {theorem_name_match.group(1)}",
+        f"#print axioms {audited_name}",
     ]
     return "\n\n".join(part for part in source_parts if part)
 
