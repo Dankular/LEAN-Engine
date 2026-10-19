@@ -442,6 +442,15 @@ def capabilities() -> dict[str, object]:
                     "variable_policy": "infer only one unambiguous free symbol; otherwise return clarification",
                     "assumption_policy": "evaluation phrases use the existing typed assumption registry; operation phrases do not infer assumptions",
                     "result_metadata": "interpretation.natural_language_plan and queryresult.classification",
+                    "identity_proof_evidence": {
+                        "claim_statuses": ["proved", "refuted", "not_established"],
+                        "refutation": (
+                            "nonzero rational constant difference or a Z3-generated exact "
+                            "rational counterexample independently replayed against bounded "
+                            "polynomial inputs"
+                        ),
+                        "lean_verification_status_is_separate": True,
+                    },
                     "validatequery_support": True,
                 },
             },

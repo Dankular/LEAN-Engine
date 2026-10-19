@@ -713,6 +713,18 @@ def execute_query(
                 "claim_scope",
                 "universal equality over real values of free variables in the supported fragment",
             )
+            if formal_verification["claim_status"] == "not_established":
+                counterexample = _find_identity_counterexample(
+                    symbolic_request,
+                    proof_timeout_seconds,
+                )
+                if counterexample is not None:
+                    formal_verification["claim_status"] = "refuted"
+                    formal_verification["claim_basis"] = (
+                        "A Z3-generated exact rational witness was independently replayed "
+                        "against both sides of the identity"
+                    )
+                    formal_verification["counterexample"] = counterexample
         # The Lean proof stage has its own prooftimeout, separate from the query
         # scan/format deadline. Preserve the full formatting budget after it ends.
         deadline += perf_counter() - proof_started
@@ -887,7 +899,16 @@ def execute_query(
             ),
             "formal_verification": formal_verification,
         }
-        if formal_verification["status"] == "checked":
+        if (
+            symbolic_request.operation == "identity"
+            and formal_verification.get("claim_status") == "refuted"
+            and isinstance(formal_verification.get("counterexample"), dict)
+        ):
+            qualification = (
+                "The selected identity is refuted by an exact rational counterexample "
+                "independently replayed by the service."
+            )
+        elif formal_verification["status"] == "checked":
             if symbolic_request.operation == "numeric":
                 approximation = formal_verification["numeric_approximation"]
                 qualification = (
@@ -1302,6 +1323,66 @@ def _identity_claim_status(difference: str, checked: bool) -> str:
     except (ValueError, ZeroDivisionError, OverflowError):
         return "not_established"
     return "refuted" if exact_difference else "proved"
+
+
+def _find_identity_counterexample(
+    request: SymbolicRequest,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    """Find a rational polynomial witness and validate it by exact replay."""
+    if request.operation != "identity" or request.lhs is None or request.rhs is None:
+        return None
+    try:
+        trees = [
+            ast.parse(source, mode="eval")
+            for source in (request.lhs, request.rhs)
+        ]
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    if any(
+        isinstance(node, ast.Call)
+        for tree in trees
+        for node in ast.walk(tree)
+    ):
+        return None
+    names = {
+        node.id
+        for tree in trees
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+    }
+    if not names or names & {"e", "E", "I", "pi", "oo", "zoo", "nan"}:
+        return None
+
+    from .formula_input import FormulaInputError, FormulaProofRequest, compile_formula
+    from .models import Budget, Sort, Variable
+    from .reasoner import analyze
+
+    try:
+        proof_request = FormulaProofRequest(
+            formula=f"({request.lhs}) == ({request.rhs})",
+            variables=[Variable(name=name, sort=Sort.REAL) for name in sorted(names)],
+            budget=Budget(wall_seconds=max(1, min(5, int(timeout_seconds)))),
+        )
+        claim_request = compile_formula(proof_request)
+        response = analyze(claim_request, attempt_lean=False)
+    except (FormulaInputError, ValidationError, ValueError, TypeError, OverflowError, RecursionError):
+        return None
+
+    witness = response.get("counterexample")
+    evidence = response.get("evidence")
+    if (
+        response.get("outcome") != "counterexample_found"
+        or not isinstance(witness, dict)
+        or not isinstance(evidence, dict)
+        or evidence.get("kind") != "validated_counterexample"
+    ):
+        return None
+    return {
+        "assignments": {str(name): str(value) for name, value in witness.items()},
+        "solver": "z3",
+        "validation": "independent_exact_rational_replay",
+    }
 
 
 def _canonical_formula(source: str) -> str | None:
@@ -3450,6 +3531,8 @@ def _attach_pod_provenance(
             claim_status = formal.get("claim_status")
             if isinstance(claim_status, str):
                 pod.setdefault("claim_status", claim_status)
+            if isinstance(formal.get("counterexample"), dict):
+                pod.setdefault("counterexample", formal["counterexample"])
 
 
 def _base_queryresult(

@@ -1,5 +1,6 @@
 import os
 import unittest
+from fractions import Fraction
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -83,6 +84,34 @@ class NaturalLanguageIdentityTests(unittest.TestCase):
         self.assertEqual(result["subpods"][0]["plaintext"], "-1")
         self.assertEqual(result["claim_status"], "refuted")
         self.assertIn("refutes", queryresult["qualification"])
+
+    def test_query_refutes_variable_identity_with_validated_rational_witness(self) -> None:
+        token = "natural-language-identity-contract-token"
+        with patch.dict(os.environ, {"API_BEARER_TOKEN": token}):
+            with TestClient(app) as client:
+                response = client.get(
+                    "/v2/query",
+                    params={
+                        "input": "Prove that x times x equals x",
+                        "verify": "true",
+                        "output": "json",
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        formal = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(formal["status"], "checked", formal)
+        self.assertEqual(formal["claim_status"], "refuted")
+        counterexample = formal["counterexample"]
+        self.assertEqual(counterexample["solver"], "z3")
+        self.assertEqual(counterexample["validation"], "independent_exact_rational_replay")
+        witness_x = Fraction(counterexample["assignments"]["x"])
+        self.assertNotEqual(witness_x * witness_x, witness_x)
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["counterexample"], counterexample)
+        self.assertIn("counterexample", queryresult["qualification"])
 
     def test_query_proves_supported_exact_trigonometric_identity(self) -> None:
         token = "natural-language-identity-contract-token"
