@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
-    "validate", "simplify", "factor", "expand", "differentiate", "integrate",
+    "validate", "simplify", "factor", "expand", "trigexpand", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot",
 ]
 
@@ -208,6 +208,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         result = sp.factor(expression)
     elif request.operation == "expand":
         result = sp.expand(expression)
+    elif request.operation == "trigexpand":
+        result = sp.expand_trig(expression)
     elif request.operation == "differentiate":
         result = sp.diff(expression, variable)
     elif request.operation == "limit":

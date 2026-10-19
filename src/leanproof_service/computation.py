@@ -92,6 +92,18 @@ theorem wolfram_language_compute (x : ℝ) :
 """
         return Computation("2*Cos[x]*Sin[x]", source)
 
+    trig_expand = re.fullmatch(
+        r"(?is)\s*TrigExpand\s*(?:@\s*(?P<at_expression>.+?)|\[\s*(?P<bracket_expression>.*)\s*\])\s*",
+        code,
+    )
+    if trig_expand is not None:
+        expression_source = (
+            trig_expand.group("at_expression")
+            or trig_expand.group("bracket_expression")
+            or ""
+        ).strip()
+        return _prepare_trig_expand(expression_source, time_limit_seconds)
+
     real_rational_limit = _REAL_RATIONAL_LIMIT.fullmatch(code)
     if real_rational_limit is not None:
         return _prepare_real_rational_limit(
@@ -282,6 +294,133 @@ theorem wolfram_language_compute{theorem_binders} :
 #print axioms wolfram_language_compute
 """
     return Computation(result.replace("**", "^"), source)
+
+
+def _prepare_trig_expand(
+    expression_source: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    calls = [node for node in ast.walk(expression_tree.body) if isinstance(node, ast.Call)]
+    if not calls or any(
+        not isinstance(node.func, ast.Name)
+        or node.func.id not in {"sin", "cos"}
+        or len(node.args) != 1
+        or bool(node.keywords)
+        or not _trigexpand_argument_supported(node.args[0])
+        for node in calls
+    ):
+        return None
+    if not any(_trigexpand_argument_has_sum(node.args[0]) for node in calls):
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="trigexpand",
+        expression=parsed.expression,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no trigonometric expansion"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+    result = symbolic["result"]
+    if len(result) > 4000:
+        return None
+    try:
+        result_tree = ast.parse(result, mode="eval")
+    except (ValueError, SyntaxError, RecursionError):
+        return None
+    if sum(1 for _ in ast.walk(result_tree)) > 256:
+        return None
+    expanded_calls = [node for node in ast.walk(result_tree.body) if isinstance(node, ast.Call)]
+    if any(
+        not isinstance(node.func, ast.Name)
+        or node.func.id not in {"sin", "cos"}
+        or len(node.args) != 1
+        or bool(node.keywords)
+        for node in expanded_calls
+    ):
+        return None
+    original_lean, original_symbols = _render_real_calculus_lean(parsed.expression)
+    expanded_lean, expanded_symbols = _render_real_calculus_lean(result)
+    if original_lean is None or expanded_lean is None:
+        return None
+    binders = " ".join(
+        f"({name} : ℝ)" for name in sorted(original_symbols | expanded_symbols)
+    )
+    theorem_binders = f" {binders}" if binders else ""
+    source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    {original_lean} = {expanded_lean} := by
+  simp only [Real.sin_add, Real.sin_sub, Real.cos_add, Real.cos_sub, Real.sin_neg, Real.cos_neg]
+  ring
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(_real_ast_to_wolfram(result_tree.body), source)
+
+
+def _trigexpand_argument_supported(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id != "pi" and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id) is not None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _trigexpand_argument_supported(node.operand)
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, (ast.Add, ast.Sub))
+        and _trigexpand_argument_supported(node.left)
+        and _trigexpand_argument_supported(node.right)
+    )
+
+
+def _trigexpand_argument_has_sum(node: ast.AST) -> bool:
+    return isinstance(node, ast.BinOp) and (
+        isinstance(node.op, (ast.Add, ast.Sub))
+        or _trigexpand_argument_has_sum(node.left)
+        or _trigexpand_argument_has_sum(node.right)
+    )
+
+
+def _real_ast_to_wolfram(node: ast.AST) -> str:
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return str(node.value)
+    if isinstance(node, ast.Name):
+        return "Pi" if node.id == "pi" else node.id
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _real_ast_to_wolfram(node.operand)
+        return inner if isinstance(node.op, ast.UAdd) else f"-({inner})"
+    if isinstance(node, ast.BinOp):
+        operators = {
+            ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/", ast.Pow: "^",
+        }
+        operator = operators.get(type(node.op))
+        if operator is not None:
+            left = _real_ast_to_wolfram(node.left)
+            right = _real_ast_to_wolfram(node.right)
+            return f"({left}{operator}{right})"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"sin", "cos"}
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        name = "Sin" if node.func.id == "sin" else "Cos"
+        return f"{name}[{_real_ast_to_wolfram(node.args[0])}]"
+    raise ValueError("unsupported AST in trigonometric result formatter")
 
 
 def _lean_real_integer(value: int) -> str:

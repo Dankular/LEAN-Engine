@@ -151,7 +151,7 @@ def capabilities() -> dict[str, object]:
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
         "symbolic_operations": [
-            "validate", "simplify", "factor", "expand", "differentiate", "integrate",
+            "validate", "simplify", "factor", "expand", "trigexpand", "differentiate", "integrate",
             "limit", "series", "sum", "product", "solve", "identity", "plot",
         ],
         "symbolic_plot": {
@@ -388,8 +388,9 @@ def capabilities() -> dict[str, object]:
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
+                    "TrigExpand for bounded additive Sin/Cos arguments, with a Lean proof of the identity",
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
-                    "Solve for univariate degree-at-most-two polynomial equations over Reals with rational roots",
+                    "Solve for univariate degree-at-most-four equations with complete rational factorization or exact real quadratic roots, and bounded rational linear systems over Reals",
                 ],
                 "explicit_base_log": {
                     "syntax": "Log[base, argument]",
@@ -407,6 +408,12 @@ def capabilities() -> dict[str, object]:
                     "proof": "Lean checks the explicit Finset.range computation and audits axioms",
                     "maximum_terms": 128,
                     "expression_domain": "rational-coefficient polynomials with real parameters",
+                },
+                "trigonometric_expansion": {
+                    "syntax": ["TrigExpand@expression", "TrigExpand[expression]"],
+                    "functions": ["Sin", "Cos"],
+                    "argument_scope": "bounded additive/subtractive variable expressions",
+                    "proof": "SymPy proposes the expansion; Lean checks the identity over the reals before the result is returned",
                 },
                 "limit": {
                     "syntax": "Limit[expression, {variable, point}]",
@@ -1004,7 +1011,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic, real-calculus, finite polynomial Sum/Product, "
+        "A bounded arithmetic, real-calculus, Lean-checked additive TrigExpand, finite polynomial Sum/Product, "
         "rational-function limit, and special-case subset is computed and "
         "compiled into Lean proofs."
     ),
