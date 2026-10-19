@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.2.0",
+  "registry_version": "2.3.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -180,6 +180,22 @@
       "type": "I",
       "description": "Interpret lowercase i as an ordinary variable.",
       "meaning": "variable",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "coordinate:cartesian-3d",
+      "type": "CoordinateSystem",
+      "description": "Interpret vector components in 3D Cartesian coordinates.",
+      "coordinate_system": "Cartesian3D",
+      "entry_version": 1,
+      "service_default": true
+    },
+    {
+      "id": "coordinate:cylindrical-3d",
+      "type": "CoordinateSystem",
+      "description": "Interpret vector components in 3D cylindrical coordinates.",
+      "coordinate_system": "Cylindrical3D",
       "entry_version": 1,
       "service_default": false
     },

@@ -1,0 +1,102 @@
+import os
+import unittest
+
+from fastapi.testclient import TestClient
+
+from leanproof_service.api import app
+
+
+class CoordinateSystemAssumptionApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        os.environ["API_BEARER_TOKEN"] = "contract-test-token"
+        cls.client = TestClient(app)
+        cls.headers = {"Authorization": "Bearer contract-test-token"}
+
+    def test_documented_divergence_uses_cartesian_service_default(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={"input": "div(x rho,y z,z x)", "output": "json"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        assumption = next(
+            item for item in queryresult["assumptions"]
+            if item["type"] == "CoordinateSystem"
+        )
+        self.assertEqual(assumption["selected"], "coordinate:cartesian-3d")
+        self.assertEqual(
+            queryresult["interpretation"]["typed_ast"]["coordinate_system"],
+            "Cartesian3D",
+        )
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["subpods"][0]["plaintext"], "rho + x + z")
+
+    def test_cylindrical_override_changes_the_typed_result(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params=[
+                ("input", "div(x rho,y z,z x)"),
+                ("output", "json"),
+                ("assumption", "coordinate:cylindrical-3d"),
+            ],
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        assumption = next(
+            item for item in queryresult["assumptions"]
+            if item["type"] == "CoordinateSystem"
+        )
+        self.assertEqual(assumption["selection_source"], "caller_override")
+        self.assertEqual(
+            queryresult["interpretation"]["typed_ast"]["coordinate_system"],
+            "Cylindrical3D",
+        )
+        self.assertEqual(queryresult["evidence"]["domain_conditions"], ["rho > 0"])
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["subpods"][0]["plaintext"], "3*x")
+
+    def test_per_occurrence_override_is_accepted_for_the_single_call(self) -> None:
+        response = self.client.get(
+            "/v2/validatequery",
+            params=[
+                ("input", "div(x rho,y z,z x)"),
+                ("assumption", "coordinate:cylindrical-3d@1"),
+                ("output", "json"),
+            ],
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        validate_result = response.json()["validatequeryresult"]
+        assumption = next(
+            item for item in validate_result["assumptions"]
+            if item["type"] == "CoordinateSystem"
+        )
+        self.assertEqual(assumption["selection_source"], "per_occurrence_override")
+        self.assertEqual(assumption["occurrences"][0]["id"], "CoordinateSystem:1")
+
+    def test_verify_does_not_claim_a_proof_of_the_coordinate_transformation(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "div(x rho,y z,z x)",
+                "assumption": "coordinate:cylindrical-3d",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        verification = response.json()["queryresult"]["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "unsupported")
+        self.assertFalse(verification["verified"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -85,6 +85,9 @@ _LOG_FUNCTION_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])log\s+(?P<number>{_NUMBER_PATTERN})(?![A-Za-z0-9_.])",
     re.IGNORECASE,
 )
+_COORDINATE_DIVERGENCE_QUERY = re.compile(
+    r"^\s*div\s*\((?P<arguments>.*)\)\s*$", re.IGNORECASE | re.DOTALL
+)
 
 
 class InterpretationError(ValueError):
@@ -157,6 +160,20 @@ def query_with_interpretations(
 
     parsing_started = perf_counter()
     source_query = query
+    coordinate_divergence = _COORDINATE_DIVERGENCE_QUERY.fullmatch(source_query)
+    if coordinate_divergence is not None:
+        return _interpret_coordinate_divergence(
+            source_query,
+            coordinate_divergence.group("arguments"),
+            selections,
+            compute=compute,
+            numeric_precision=numeric_precision,
+            time_limit_seconds=time_limit_seconds,
+            parse_timeout_seconds=parse_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            deadline=deadline,
+            parse_timing=perf_counter() - parsing_started,
+        )
     date_input = numeric_date_options(source_query)
     if date_input is not None:
         return _interpret_numeric_date(
@@ -538,6 +555,200 @@ def query_with_interpretations(
         }),
         "qualification": "Candidate ranking and symbolic computation are not formal proof.",
     }
+
+
+def _interpret_coordinate_divergence(
+    source_query: str,
+    arguments_source: str,
+    selections: list[str],
+    *,
+    compute: bool,
+    numeric_precision: int,
+    time_limit_seconds: float,
+    parse_timeout_seconds: float,
+    pod_timeout_seconds: float | None,
+    deadline: float | None,
+    parse_timing: float,
+) -> dict[str, Any]:
+    """Interpret the audited three-component divergence ambiguity."""
+    components_source = _split_top_level_arguments(arguments_source)
+    if components_source is None or len(components_source) != 3:
+        raise InterpretationError(
+            "coordinate-system support currently requires div(component1, component2, component3)"
+        )
+
+    registry = assumption_registry()
+    candidates = [
+        item for item in registry["assumptions"]
+        if item.get("type") == "CoordinateSystem"
+    ]
+    if not candidates or sum(bool(item.get("service_default")) for item in candidates) != 1:
+        raise RuntimeError("CoordinateSystem registry must define one service default")
+    by_id = {item["id"]: item for item in candidates}
+    if len(selections) != len(set(selections)):
+        raise AssumptionSelectionError("assumption selections cannot contain duplicates")
+    selected_item: dict[str, Any] | None = None
+    selected_occurrence: int | None = None
+    for selection in selections:
+        assumption_id, occurrence_index = _split_assumption_selector(selection)
+        if assumption_id not in by_id:
+            if assumption_id not in {item["id"] for item in registry["assumptions"]}:
+                raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+            raise AssumptionSelectionError(
+                f"assumption {assumption_id} is incompatible with this input"
+            )
+        if occurrence_index not in (None, 1):
+            raise AssumptionSelectionError(
+                "coordinate-system occurrence indexes are limited to the single divergence call"
+            )
+        if selected_item is not None:
+            raise AssumptionSelectionError(
+                "select at most one coordinate system for this divergence call"
+            )
+        selected_item = by_id[assumption_id]
+        selected_occurrence = occurrence_index
+
+    if selected_item is None:
+        selected_item = next(item for item in candidates if item["service_default"])
+        selection_source = "service_default"
+    else:
+        selection_source = (
+            "per_occurrence_override" if selected_occurrence is not None else "caller_override"
+        )
+
+    components = [_coordinate_component_expression(source) for source in components_source]
+    coordinate_system = selected_item["coordinate_system"]
+    remaining = min(
+        time_limit_seconds,
+        parse_timeout_seconds,
+        deadline - perf_counter() if deadline is not None else 60.0,
+        pod_timeout_seconds if pod_timeout_seconds is not None else 60.0,
+    )
+    if remaining <= 0.001:
+        raise InterpretationTimeout(parse_timing)
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="coordinate_divergence",
+        components=components,
+        coordinate_system=coordinate_system,
+        time_limit_seconds=min(60.0, remaining),
+    ))
+    if symbolic.get("timed_out"):
+        raise InterpretationTimeout(parse_timing + float(
+            symbolic.get("parse_timing_seconds", 0.0)
+        ))
+    if symbolic.get("error"):
+        raise InterpretationError(str(symbolic["error"]))
+    parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
+    resolved_expression = str(symbolic.get("result", ""))
+    domain_conditions = list(symbolic.get("domain_conditions", []))
+
+    assumption_payload = [{
+        "type": "CoordinateSystem",
+        "selected": selected_item["id"],
+        "selection_source": selection_source,
+        "registry_version": registry["registry_version"],
+        "occurrences": [{
+            "id": "CoordinateSystem:1",
+            "selected": selected_item["id"],
+            "selection_source": selection_source,
+        }],
+        "values": [
+            {
+                "input": item["id"],
+                "desc": item["description"],
+                "entry_version": item["entry_version"],
+            }
+            for item in candidates
+        ],
+    }]
+    classification = {
+        "name": "neutral_coordinate_system_candidate_ranker",
+        "method": "coordinate-system alternatives receive tied scores; proof success does not select a meaning",
+        "ranks_candidates_only": True,
+        "selection_authority": False,
+        "scores_calibrated_for_service": False,
+        "ranked": [{"input": item["id"], "score": 0.5} for item in candidates],
+    }
+    typed_ast = {
+        "node": "vector_calculus_operation",
+        "operation": "divergence",
+        "coordinate_system": coordinate_system,
+        "components": components,
+        "coordinate_variables": (
+            ["x", "y", "z"]
+            if coordinate_system == "Cartesian3D"
+            else ["rho", "theta", "z"]
+        ),
+        "resolved_expression": resolved_expression,
+        "display_expression": source_query,
+        "assumption_id": selected_item["id"],
+        "selection_source": selection_source,
+    }
+
+    outcome = "computed" if compute else "validated"
+    result = resolved_expression if compute else None
+
+    return {
+        "input": source_query,
+        "outcome": outcome,
+        **({"timeout_stage": "pod"} if outcome == "timeout" else {}),
+        "parse_timing": parse_timing,
+        "assumptions": assumption_payload,
+        "interpretation": {
+            "kind": "typed_symbolic_expression",
+            "typed_ast": typed_ast,
+            "expression": resolved_expression,
+            "operation": "divergence",
+            "solver_route": "sympy",
+        },
+        "classification": classification,
+        "result": result,
+        "numeric_approximation": None,
+        "input_mathml": None,
+        "result_mathml": symbolic.get("result_mathml") if compute else None,
+        "evidence": {
+            "kind": "coordinate_system_symbolic_result",
+            "engine": "sympy",
+            "verified": False,
+            "coordinate_system": coordinate_system,
+            "domain_conditions": domain_conditions,
+        },
+        "qualification": (
+            "The divergence was computed from the caller-selected coordinate interpretation. "
+            "The coordinate-calculus transformation is not Lean-verified."
+        ),
+    }
+
+
+def _coordinate_component_expression(source: str) -> str:
+    # The audited notation uses whitespace for multiplication (for example `x rho`).
+    normalized = re.sub(
+        r"(?<=[A-Za-z0-9_)])\s+(?=[A-Za-z_(])", "*", source.strip()
+    )
+    try:
+        return parse_math_input(normalized).expression
+    except MathInputError as exc:
+        raise InterpretationError("vector components must be valid mathematical expressions") from exc
+
+
+def _split_top_level_arguments(source: str) -> list[str] | None:
+    arguments: list[str] = []
+    depth = 0
+    start = 0
+    for index, character in enumerate(source):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif character == "," and depth == 0:
+            arguments.append(source[start:index].strip())
+            start = index + 1
+    if depth != 0:
+        return None
+    arguments.append(source[start:].strip())
+    return arguments
 
 
 def _interpret_function_log(

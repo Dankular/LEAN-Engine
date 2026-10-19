@@ -37,7 +37,7 @@ _DECIMAL_LITERAL = re.compile(
 _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
-    "limit", "series", "sum", "product", "solve", "identity", "plot",
+    "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
 ]
 
 
@@ -54,11 +54,34 @@ class SymbolicRequest(StrictModel):
     order: int | None = Field(default=None, strict=True, ge=1, le=32)
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
+    components: list[str] | None = Field(default=None, min_length=3, max_length=3)
+    coordinate_system: Literal["Cartesian3D", "Cylindrical3D"] | None = None
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=60.0)
     numeric_precision: int = Field(default=50, ge=1, le=500)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> SymbolicRequest:
+        if self.operation == "coordinate_divergence":
+            if (
+                self.components is None
+                or self.coordinate_system is None
+                or self.expression is not None
+                or self.lhs is not None
+                or self.rhs is not None
+                or self.variable is not None
+                or self.lower is not None
+                or self.upper is not None
+                or self.point is not None
+                or self.order is not None
+                or self.assumptions
+                or self.named_units
+            ):
+                raise ValueError(
+                    "coordinate_divergence requires three components and a coordinate system only"
+                )
+            return self
+        if self.components is not None or self.coordinate_system is not None:
+            raise ValueError("components and coordinate_system are only used by coordinate_divergence")
         if self.operation == "identity":
             if self.expression is not None or self.lhs is None or self.rhs is None:
                 raise ValueError("identity requires lhs and rhs and does not accept expression")
@@ -161,6 +184,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             unit_catalog["us_minim"] = us_minim
         symbols.update({name: unit_catalog[unit] for name, unit in request.named_units.items()})
     parser = _SafeParser(sp, symbols)
+    if request.operation == "coordinate_divergence":
+        return _execute_coordinate_divergence(request, sp, parser)
     if request.operation == "identity":
         parsing_started = perf_counter()
         lhs = parser.parse(request.lhs or "")
@@ -366,6 +391,94 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     if request.operation == "plot":
         response["plot_svg"] = plot_svg
     return response
+
+
+def _execute_coordinate_divergence(
+    request: SymbolicRequest,
+    sympy: object,
+    parser: _SafeParser,
+) -> dict[str, object]:
+    """Compute a bounded polynomial divergence in one selected 3D chart."""
+    parsing_started = perf_counter()
+    components_source = request.components or []
+    expressions = []
+    for component in components_source:
+        try:
+            syntax_tree = ast.parse(component, mode="eval")
+        except (SyntaxError, RecursionError, ValueError) as exc:
+            raise SymbolicInputError("vector component syntax is invalid") from exc
+        if any(isinstance(node, ast.Call) for node in ast.walk(syntax_tree)):
+            raise SymbolicInputError(
+                "coordinate-system divergence accepts polynomial components without function calls"
+            )
+        expressions.append(parser.parse(component))
+    parse_timing = perf_counter() - parsing_started
+
+    generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
+    for expression in expressions:
+        try:
+            polynomial = (
+                sympy.Poly(expression, *generators, domain=sympy.QQ)
+                if generators
+                else sympy.Poly(expression, domain=sympy.QQ)
+            )
+        except (sympy.PolynomialError, TypeError, ValueError) as exc:
+            raise SymbolicInputError(
+                "coordinate-system divergence requires rational-coefficient polynomials"
+            ) from exc
+        if polynomial.total_degree() > 16:
+            raise SymbolicInputError(
+                "coordinate-system divergence limits component total degree to 16"
+            )
+
+    if request.coordinate_system == "Cartesian3D":
+        x = parser.symbols.get("x", sympy.Symbol("x"))
+        y = parser.symbols.get("y", sympy.Symbol("y"))
+        z = parser.symbols.get("z", sympy.Symbol("z"))
+        derivative_terms = [
+            sympy.diff(expressions[0], x),
+            sympy.diff(expressions[1], y),
+            sympy.diff(expressions[2], z),
+        ]
+        domain_conditions: list[str] = []
+        coordinate_variables = ["x", "y", "z"]
+        result = sum(derivative_terms)
+    else:
+        rho = parser.symbols.get("rho", sympy.Symbol("rho"))
+        theta = parser.symbols.get("theta", sympy.Symbol("theta"))
+        z = parser.symbols.get("z", sympy.Symbol("z"))
+        derivative_terms = [
+            sympy.diff(rho * expressions[0], rho),
+            sympy.diff(expressions[1], theta),
+            sympy.diff(expressions[2], z),
+        ]
+        result = derivative_terms[0] / rho + derivative_terms[1] / rho + derivative_terms[2]
+        domain_conditions = ["rho > 0"]
+        coordinate_variables = ["rho", "theta", "z"]
+
+    simplified = sympy.simplify(result)
+    return {
+        "operation": request.operation,
+        "coordinate_system": request.coordinate_system,
+        "coordinate_variables": coordinate_variables,
+        "normalized_components": [sympy.sstr(item) for item in expressions],
+        "derivative_terms": [sympy.sstr(item) for item in derivative_terms],
+        "result": sympy.sstr(simplified),
+        "parse_timing_seconds": parse_timing,
+        "input_mathml": None,
+        "result_mathml": _mathml_output(sympy, simplified),
+        "domain_conditions": domain_conditions,
+        "evidence": {
+            **_symbolic_evidence(sympy),
+            "kind": "coordinate_system_symbolic_result",
+            "coordinate_system": request.coordinate_system,
+            "domain_conditions": domain_conditions,
+        },
+        "qualification": (
+            "The divergence is a bounded symbolic result in the selected coordinate system; "
+            "the coordinate-calculus transformation is not a Lean proof."
+        ),
+    }
 
 
 def _plot_svg(

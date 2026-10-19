@@ -166,8 +166,14 @@ def capabilities() -> dict[str, object]:
         },
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
-            "limit", "series", "sum", "product", "solve", "identity", "plot",
+            "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
         ],
+        "symbolic_coordinate_divergence": {
+            "status": "implemented_initial_slice",
+            "coordinate_systems": ["Cartesian3D", "Cylindrical3D"],
+            "components": "three rational-coefficient polynomial expressions, total degree at most 16",
+            "proof_status": "SymPy result; coordinate-calculus transformation is not Lean-verified",
+        },
         "numeric_evaluation": {
             "syntax": ["N[expression]", "N[expression, precision]"],
             "default_precision_digits": 16,
@@ -261,7 +267,7 @@ def capabilities() -> dict[str, object]:
             "assumption_types": sorted({item["type"] for item in registry["assumptions"]}),
             "multiple_compatible_selections": True,
             "same_type_selection_scope": "a query-wide selection applies to every matching ambiguous call; use per-occurrence selectors to override individual calls",
-            "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, or unparenthesized Function log call; unspecified calls retain the service default",
+            "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, unparenthesized Function log call, ambiguous m Unit token, or supported CoordinateSystem divergence call; unspecified occurrences retain the service default",
             "unit_assumption_scope": "single ambiguous m unit in a standalone numeric quantity",
             "candidate_generator": "deterministic_allowlisted_math_parser",
             "classifier": "deterministic_lexical_baseline; optional Decima ranking via ASSUMPTION_CLASSIFIER=decima",
@@ -298,6 +304,7 @@ def capabilities() -> dict[str, object]:
                     "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
                     "bounded N[expression] and N[expression, precision] numeric evaluations",
                     "bounded natural-language symbolic instructions",
+                    "bounded three-component divergence with a typed coordinate-system assumption",
                     "weather location queries",
                     "explicit seven-day weather forecast queries",
                     "supported CODATA constants",

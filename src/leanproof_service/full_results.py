@@ -1012,6 +1012,16 @@ def _verify_query_computation(
     *,
     symbolic_result: object,
 ) -> dict[str, Any]:
+    typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
+    if typed_ast.get("node") == "vector_calculus_operation":
+        return {
+            "status": "unsupported",
+            "verified": False,
+            "reason": (
+                "Lean verification of coordinate-system divergence transformations is not "
+                "implemented; only the selected symbolic result was computed."
+            ),
+        }
     code = _query_computation_code(request)
     if code is None:
         return {
