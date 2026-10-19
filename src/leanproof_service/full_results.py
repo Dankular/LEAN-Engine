@@ -26,6 +26,7 @@ from .computation import (
     _split_top_level_commas,
     check_computation,
     prepare_coordinate_divergence,
+    prepare_coordinate_gradient,
     prepare_computation,
 )
 from .interpretations import (
@@ -1014,8 +1015,17 @@ def _verify_query_computation(
     symbolic_result: object,
 ) -> dict[str, Any]:
     typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
-    is_coordinate_divergence = typed_ast.get("node") == "vector_calculus_operation"
-    code = "CoordinateDivergence" if is_coordinate_divergence else _query_computation_code(request)
+    is_coordinate_calculus = typed_ast.get("node") == "vector_calculus_operation"
+    coordinate_operation = typed_ast.get("operation")
+    is_coordinate_divergence = is_coordinate_calculus and coordinate_operation == "divergence"
+    is_coordinate_gradient = is_coordinate_calculus and coordinate_operation == "gradient"
+    code = (
+        "CoordinateDivergence"
+        if is_coordinate_divergence
+        else "CoordinateGradient"
+        if is_coordinate_gradient
+        else _query_computation_code(request)
+    )
     if code is None:
         return {
             "status": "unsupported",
@@ -1030,6 +1040,13 @@ def _verify_query_computation(
             str(typed_ast.get("coordinate_system", "")),
             typed_ast.get("derivative_terms", []),
             query_result,
+        )
+    elif is_coordinate_gradient:
+        computation = prepare_coordinate_gradient(
+            str(typed_ast.get("expression", "")),
+            str(typed_ast.get("coordinate_system", "")),
+            typed_ast.get("derivative_terms", []),
+            typed_ast.get("resolved_components", []),
         )
     else:
         computation = prepare_computation(
@@ -1076,7 +1093,7 @@ def _verify_query_computation(
             "reason": "The numeric backend did not produce a certified approximation bound.",
         }
 
-    if request.operation == "numeric":
+    if request.operation == "numeric" or is_coordinate_gradient:
         query_normalized = candidate_normalized = None
     elif request.operation == "solve" and request.variable is not None:
         query_normalized = _symbolic_solve_signature(
@@ -1123,6 +1140,8 @@ def _verify_query_computation(
             if request.operation == "numeric"
             else "coordinate_divergence"
             if is_coordinate_divergence
+            else "coordinate_gradient"
+            if is_coordinate_gradient
             else _query_claim_type(request, code)
         ),
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
@@ -1139,10 +1158,16 @@ def _verify_query_computation(
                 "under the "
                 "listed chart-domain conditions"
                 if is_coordinate_divergence
-                else
+                else (
+                    "Lean proves the selected polynomial gradient components and coordinate "
+                    "chart factors in the chosen Cartesian3D, Cylindrical3D, or Spherical3D "
+                    "chart, under the listed chart-domain conditions"
+                    if is_coordinate_gradient
+                    else
                 "checks the exact selected formula and result under the listed real-parameter "
                 "and domain conditions; "
                 "it does not verify the English language-to-formula translation"
+                )
             )
         ),
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
@@ -2952,6 +2977,19 @@ def _prepare_query(
             pod_timeout_seconds=pod_timeout_seconds,
             deadline=deadline,
         )
+        typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
+        if (
+            typed_ast.get("node") == "vector_calculus_operation"
+            and typed_ast.get("operation") == "gradient"
+        ):
+            symbolic_request = SymbolicRequest(
+                operation="coordinate_gradient",
+                expression=str(typed_ast.get("expression", "")),
+                coordinate_system=str(typed_ast.get("coordinate_system", "")),
+                time_limit_seconds=time_limit_seconds,
+                numeric_precision=numeric_precision,
+            )
+            return interpreted, symbolic_request
         expression = str(interpreted["interpretation"]["expression"])
         symbolic_request = SymbolicRequest(
             operation="simplify",

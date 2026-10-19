@@ -38,6 +38,7 @@ _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
+    "coordinate_gradient",
 ]
 
 
@@ -61,6 +62,25 @@ class SymbolicRequest(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> SymbolicRequest:
+        if self.operation == "coordinate_gradient":
+            if (
+                self.expression is None
+                or self.coordinate_system is None
+                or self.components is not None
+                or self.lhs is not None
+                or self.rhs is not None
+                or self.variable is not None
+                or self.lower is not None
+                or self.upper is not None
+                or self.point is not None
+                or self.order is not None
+                or self.assumptions
+                or self.named_units
+            ):
+                raise ValueError(
+                    "coordinate_gradient requires one scalar expression and a coordinate system only"
+                )
+            return self
         if self.operation == "coordinate_divergence":
             if (
                 self.components is None
@@ -186,6 +206,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     parser = _SafeParser(sp, symbols)
     if request.operation == "coordinate_divergence":
         return _execute_coordinate_divergence(request, sp, parser)
+    if request.operation == "coordinate_gradient":
+        return _execute_coordinate_gradient(request, sp, parser)
     if request.operation == "identity":
         parsing_started = perf_counter()
         lhs = parser.parse(request.lhs or "")
@@ -498,6 +520,108 @@ def _execute_coordinate_divergence(
         },
         "qualification": (
             "The divergence is computed in the selected coordinate system; verify=true can "
+            "request a Lean check of the selected chart formula."
+        ),
+    }
+
+
+def _execute_coordinate_gradient(
+    request: SymbolicRequest,
+    sympy: object,
+    parser: _SafeParser,
+) -> dict[str, object]:
+    """Compute a bounded polynomial gradient in one selected 3D chart."""
+    parsing_started = perf_counter()
+    source = request.expression or ""
+    try:
+        syntax_tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError) as exc:
+        raise SymbolicInputError("scalar field syntax is invalid") from exc
+    if any(isinstance(node, ast.Call) for node in ast.walk(syntax_tree)):
+        raise SymbolicInputError(
+            "coordinate-system gradient accepts polynomial scalar fields without function calls"
+        )
+    expression = parser.parse(source)
+    parse_timing = perf_counter() - parsing_started
+
+    generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
+    if not generators:
+        if expression.is_Rational is not True:
+            raise SymbolicInputError(
+                "coordinate-system gradient requires a rational-coefficient polynomial"
+            )
+    else:
+        try:
+            polynomial = sympy.Poly(expression, *generators, domain=sympy.QQ)
+        except (sympy.PolynomialError, TypeError, ValueError) as exc:
+            raise SymbolicInputError(
+                "coordinate-system gradient requires a rational-coefficient polynomial"
+            ) from exc
+        if polynomial.total_degree() > 16:
+            raise SymbolicInputError(
+                "coordinate-system gradient limits scalar-field total degree to 16"
+            )
+
+    if request.coordinate_system == "Cartesian3D":
+        variables = [
+            parser.symbols.get(name, sympy.Symbol(name)) for name in ("x", "y", "z")
+        ]
+        derivative_terms = [sympy.diff(expression, variable) for variable in variables]
+        gradient_components = derivative_terms
+        domain_conditions: list[str] = []
+        coordinate_variables = ["x", "y", "z"]
+    elif request.coordinate_system == "Cylindrical3D":
+        variables = [
+            parser.symbols.get(name, sympy.Symbol(name))
+            for name in ("rho", "theta", "z")
+        ]
+        derivative_terms = [sympy.diff(expression, variable) for variable in variables]
+        gradient_components = [
+            derivative_terms[0], derivative_terms[1] / variables[0], derivative_terms[2]
+        ]
+        domain_conditions = ["rho > 0"]
+        coordinate_variables = ["rho", "theta", "z"]
+    else:
+        variables = [
+            parser.symbols.get(name, sympy.Symbol(name))
+            for name in ("r", "theta", "phi")
+        ]
+        derivative_terms = [sympy.diff(expression, variable) for variable in variables]
+        gradient_components = [
+            derivative_terms[0],
+            derivative_terms[1] / variables[0],
+            derivative_terms[2] / (variables[0] * sympy.sin(variables[1])),
+        ]
+        domain_conditions = ["r > 0", "sin(theta) != 0"]
+        coordinate_variables = ["r", "theta", "phi"]
+
+    simplified_components = [
+        sympy.factor(component)
+        if request.coordinate_system == "Spherical3D"
+        else sympy.simplify(component)
+        for component in gradient_components
+    ]
+    result = sympy.Tuple(*simplified_components)
+    return {
+        "operation": request.operation,
+        "coordinate_system": request.coordinate_system,
+        "coordinate_variables": coordinate_variables,
+        "normalized_expression": sympy.sstr(expression),
+        "derivative_terms": [sympy.sstr(item) for item in derivative_terms],
+        "gradient_components": [sympy.sstr(item) for item in simplified_components],
+        "result": sympy.sstr(result),
+        "parse_timing_seconds": parse_timing,
+        "input_mathml": _mathml_output(sympy, expression),
+        "result_mathml": _mathml_output(sympy, result),
+        "domain_conditions": domain_conditions,
+        "evidence": {
+            **_symbolic_evidence(sympy),
+            "kind": "coordinate_system_symbolic_result",
+            "coordinate_system": request.coordinate_system,
+            "domain_conditions": domain_conditions,
+        },
+        "qualification": (
+            "The gradient is computed in the selected coordinate system; verify=true can "
             "request a Lean check of the selected chart formula."
         ),
     }

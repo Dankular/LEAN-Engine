@@ -177,6 +177,102 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
         self.assertTrue(verification["verified"])
         self.assertEqual(verification["axiom_audit"]["status"], "passed")
 
+    def test_cartesian_gradient_is_lean_checked_by_default(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={"input": "grad(x^2 + y*z)", "verify": "true", "output": "json"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        self.assertEqual(
+            queryresult["interpretation"]["typed_ast"]["coordinate_system"],
+            "Cartesian3D",
+        )
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["subpods"][0]["plaintext"], "(2*x, z, y)")
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertEqual(verification["claim_type"], "coordinate_gradient")
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
+    def test_cylindrical_gradient_checks_chart_condition(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "grad(rho)",
+                "assumption": "coordinate:cylindrical-3d",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        self.assertEqual(queryresult["evidence"]["domain_conditions"], ["rho > 0"])
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["subpods"][0]["plaintext"], "(1, 0, 0)")
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertEqual(verification["domain_conditions"], ["rho > 0"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
+    def test_spherical_gradient_checks_azimuthal_derivative(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "grad(phi)",
+                "assumption": "coordinate:spherical-3d",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        self.assertEqual(
+            queryresult["evidence"]["domain_conditions"],
+            ["r > 0", "sin(theta) != 0"],
+        )
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(
+            result["subpods"][0]["plaintext"], "(0, 0, 1/(r*sin(theta)))"
+        )
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
+    def test_validatequery_exposes_the_gradient_chart_plan(self) -> None:
+        response = self.client.get(
+            "/v2/validatequery",
+            params={
+                "input": "grad(phi)",
+                "assumption": "coordinate:spherical-3d",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        validate_result = response.json()["validatequeryresult"]
+        self.assertEqual(
+            validate_result["interpretation"]["typed_ast"]["operation"], "gradient"
+        )
+        self.assertEqual(
+            validate_result["interpretation"]["typed_ast"]["coordinate_system"],
+            "Spherical3D",
+        )
+        assumption = next(
+            item for item in validate_result["assumptions"]
+            if item["type"] == "CoordinateSystem"
+        )
+        self.assertEqual(assumption["selected"], "coordinate:spherical-3d")
+
 
 if __name__ == "__main__":
     unittest.main()

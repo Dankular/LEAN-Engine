@@ -6776,6 +6776,184 @@ import Mathlib.Tactic.Ring"""
     )
 
 
+def prepare_coordinate_gradient(
+    expression: str,
+    coordinate_system: str,
+    derivative_terms: list[str],
+    expected_components: list[str],
+) -> Computation | None:
+    """Prepare a Lean theorem for a selected polynomial 3D gradient chart."""
+    if (
+        len(derivative_terms) != 3
+        or len(expected_components) != 3
+        or coordinate_system not in {"Cartesian3D", "Cylindrical3D", "Spherical3D"}
+    ):
+        return None
+
+    coordinate_names = {
+        "Cartesian3D": ("x", "y", "z"),
+        "Cylindrical3D": ("rho", "theta", "z"),
+        "Spherical3D": ("r", "theta", "phi"),
+    }[coordinate_system]
+    coordinate_variables = set(coordinate_names)
+    domain_conditions: tuple[str, ...] = (
+        ("rho > 0",)
+        if coordinate_system == "Cylindrical3D"
+        else ("r > 0", "sin(theta) != 0")
+        if coordinate_system == "Spherical3D"
+        else ()
+    )
+
+    exact_expression = _normalize_decimal_literals(expression)
+    if exact_expression is None:
+        return None
+    try:
+        parsed_expression = parse_math_input(exact_expression)
+        expression_tree = ast.parse(parsed_expression.expression, mode="eval")
+    except (MathInputError, SyntaxError, ValueError, RecursionError):
+        return None
+    if any(isinstance(node, ast.Call) for node in ast.walk(expression_tree)):
+        return None
+
+    used_names = set(coordinate_variables)
+    rendered_derivatives: list[str] = []
+    derivative_proofs: list[str] = []
+    for index, (variable, derivative_source) in enumerate(
+        zip(coordinate_names, derivative_terms, strict=True)
+    ):
+        exact_derivative = _normalize_decimal_literals(derivative_source)
+        if exact_derivative is None:
+            return None
+        try:
+            parsed_derivative = parse_math_input(exact_derivative)
+        except MathInputError:
+            return None
+
+        expression_names: set[str] = set()
+        function_variable = f"coordinate_gradient_var_{index}"
+        rendered_function = _render_real_calculus_node(
+            expression_tree.body,
+            expression_names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: function_variable},
+            allow_variable_denominators=True,
+        )
+        derivative_lean, derivative_names = _render_real_calculus_lean(
+            parsed_derivative.expression,
+            allow_variable_denominators=True,
+        )
+        if (
+            rendered_function is None
+            or derivative_lean is None
+            or function_variable in expression_names
+        ):
+            return None
+        proof = _derivative_proof_term(
+            expression_tree.body,
+            variable,
+            function_variable,
+            variable,
+            {"nodes": 0},
+            0,
+        )
+        if proof is None:
+            return None
+
+        derivative_function = f"(fun {function_variable} : ℝ => {rendered_function})"
+        rendered_derivatives.append(f"(deriv {derivative_function} {variable})")
+        derivative_proofs.append(
+            f"  have h_coordinate_gradient_{index} : HasDerivAt {derivative_function} "
+            f"{derivative_lean} {variable} := by\n"
+            f"    convert ({proof}) using 1\n"
+            "    all_goals\n"
+            "      first\n"
+            f"      | ext {function_variable}; simp [id_eq] <;> ring\n"
+            "      | simp [id_eq] <;> ring"
+        )
+        used_names.update(expression_names)
+        used_names.update(derivative_names)
+
+    rendered_components: list[str] = []
+    for component in expected_components:
+        exact_component = _normalize_decimal_literals(component)
+        if exact_component is None:
+            return None
+        component_lean, component_names = _render_real_calculus_lean(
+            exact_component,
+            allow_variable_denominators=True,
+        )
+        if component_lean is None:
+            return None
+        rendered_components.append(component_lean)
+        used_names.update(component_names)
+
+    used_names.update(coordinate_variables)
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) for name in used_names):
+        return None
+
+    binders = " ".join(f"({name} : ℝ)" for name in sorted(used_names))
+    if coordinate_system == "Cylindrical3D":
+        binders = f"{binders} (h_rho : 0 < rho)"
+        gradient_terms = [
+            rendered_derivatives[0],
+            f"({rendered_derivatives[1]}) / rho",
+            rendered_derivatives[2],
+        ]
+    elif coordinate_system == "Spherical3D":
+        binders = (
+            f"{binders} (h_spherical_radius : 0 < r) "
+            "(h_spherical_sine : Real.sin theta ≠ 0)"
+        )
+        gradient_terms = [
+            rendered_derivatives[0],
+            f"({rendered_derivatives[1]}) / r",
+            f"({rendered_derivatives[2]}) / (r * Real.sin theta)",
+        ]
+    else:
+        gradient_terms = rendered_derivatives
+
+    actual_tuple = f"(({gradient_terms[0]}, {gradient_terms[1]}), {gradient_terms[2]})"
+    expected_tuple = (
+        f"(({rendered_components[0]}, {rendered_components[1]}), "
+        f"{rendered_components[2]})"
+    )
+    final_tactic = (
+        "field_simp [ne_of_gt h_rho] <;> ring"
+        if coordinate_system == "Cylindrical3D"
+        else "field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring"
+        if coordinate_system == "Spherical3D"
+        else "all_goals ring"
+    )
+    imports = """import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring"""
+    theorem_name = "coordinate_gradient"
+    source = (
+        f"{imports}\n\n"
+        f"theorem {theorem_name} {binders} :\n"
+        f"  {actual_tuple} = {expected_tuple} := by\n"
+        + "\n".join(derivative_proofs)
+        + "\n  rw ["
+        + ", ".join(
+            f"h_coordinate_gradient_{index}.deriv" for index in range(3)
+        )
+        + f"]\n  {final_tactic}\n\n#print axioms {theorem_name}\n"
+    )
+    display_result = f"({', '.join(component.replace('**', '^') for component in expected_components)})"
+    return Computation(
+        display_result,
+        source,
+        domain_conditions=domain_conditions,
+        real_parameters=tuple(sorted(used_names - coordinate_variables)),
+        proof_result_authoritative=True,
+    )
+
+
 def _prepare_polynomial_computation(
     code: str,
     time_limit_seconds: float,
