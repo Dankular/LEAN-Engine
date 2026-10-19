@@ -895,11 +895,6 @@ def _verify_query_computation(
     symbolic_result: object,
 ) -> dict[str, Any]:
     code = _query_computation_code(request)
-    exact_trig_request = (
-        request.operation == "simplify"
-        and request.expression is not None
-        and _query_exact_trigonometric_code(request.expression) is not None
-    )
     if code is None:
         return {
             "status": "unsupported",
@@ -952,7 +947,7 @@ def _verify_query_computation(
         query_normalized is None
         or candidate_normalized is None
         or query_normalized != candidate_normalized
-    ) and not exact_trig_request:
+    ) and not computation.proof_result_authoritative:
         return {
             "status": "candidate_mismatch",
             "verified": False,
@@ -984,9 +979,10 @@ def _verify_query_computation(
         ),
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
         "lean_source": lean_result.source,
-        "result_match": True,
+        "result_match": not computation.proof_result_authoritative,
     }
-    if lean_result.status == "checked" and exact_trig_request:
+    if lean_result.status == "checked" and computation.proof_result_authoritative:
+        verification["result_match"] = True
         verification["_verified_result"] = computation.display_result
     if computation.domain_conditions:
         verification["domain_conditions"] = list(computation.domain_conditions)
@@ -1007,6 +1003,18 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
         exact_trig_code = _query_exact_trigonometric_code(request.expression)
         if request.operation == "simplify" and exact_trig_code is not None:
             return exact_trig_code
+        if (
+            request.operation == "simplify"
+            and re.search(r"\b(?:sin|cos|tan)\s*\(", request.expression, re.IGNORECASE)
+            and re.search(r"\bpi\b", request.expression, re.IGNORECASE)
+        ):
+            exact_pi_expression = re.sub(
+                r"\bpi\b",
+                "Pi",
+                request.expression,
+                flags=re.IGNORECASE,
+            )
+            return f"Simplify[{exact_pi_expression}]"
         return f"{request.operation.title()}[{request.expression}]"
     if request.operation == "solve" and request.expression is not None and request.variable:
         return f"Solve[({request.expression}) == 0, {request.variable}, Reals]"
@@ -1119,6 +1127,17 @@ def _query_pi_multiple(node: ast.AST) -> Fraction | None:
 
 
 def _query_claim_type(request: SymbolicRequest, code: str) -> str:
+    if (
+        request.operation == "simplify"
+        and request.expression is not None
+        and re.search(
+            r"\b(?:sin|cos|tan)\s*\(",
+            request.expression,
+            re.IGNORECASE,
+        )
+        and re.search(r"\bpi\b", request.expression, re.IGNORECASE)
+    ):
+        return "exact_trigonometric_expression_equality"
     if request.operation == "solve":
         return "real_solution_set_equivalence"
     if request.operation == "limit":

@@ -31,6 +31,7 @@ class Computation:
     backend_error: str | None = None
     domain_conditions: tuple[str, ...] = ()
     real_parameters: tuple[str, ...] = ()
+    proof_result_authoritative: bool = False
 
 
 @dataclass(frozen=True)
@@ -353,6 +354,17 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
     if exact_trig_constant is not None:
         return exact_trig_constant
 
+    simplified_expression = re.fullmatch(
+        r"(?is)\s*Simplify\s*\[\s*(?P<expression>.*)\s*\]\s*",
+        code,
+    )
+    if simplified_expression is not None:
+        exact_trig_expression = _prepare_exact_pi_trigonometric_expression(
+            simplified_expression.group("expression"),
+        )
+        if exact_trig_expression is not None:
+            return exact_trig_expression
+
     trig_expand = re.fullmatch(
         r"(?is)\s*TrigExpand\s*(?:@\s*(?P<at_expression>.+?)|\[\s*(?P<bracket_expression>.*)\s*\])\s*",
         code,
@@ -616,7 +628,246 @@ theorem wolfram_language_compute :
 
 #print axioms wolfram_language_compute
 """
-    return Computation(display_result, source)
+    return Computation(display_result, source, proof_result_authoritative=True)
+
+
+def _prepare_exact_pi_trigonometric_expression(
+    expression_source: str,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    declarations: list[tuple[str, str]] = []
+    rendered = _render_exact_pi_trig_expression_node(
+        expression_tree.body,
+        declarations,
+        [0],
+        0,
+    )
+    if rendered is None:
+        return None
+    expression_lean, display_result, result_lean, contains_trig = rendered
+    if not contains_trig or not declarations:
+        return None
+
+    try:
+        display_tree = ast.parse(display_result.replace("^", "**"), mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return None
+    rational_result = _constant_fraction(display_tree.body)
+    if rational_result is not None:
+        display_result = _fraction_text(rational_result)
+        result_lean = _lean_rational(rational_result)
+
+    declaration_names = [name for name, _ in declarations]
+    declaration_sources = "\n\n".join(source for _, source in declarations)
+    source_lines = [
+        "import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic",
+        "import Mathlib.Tactic.Ring",
+        "",
+        declaration_sources,
+        "",
+        "theorem wolfram_language_compute :",
+        f"    {expression_lean} = {result_lean} := by",
+        f"  simp only [{', '.join(declaration_names)}] <;> ring",
+        "",
+        "#print axioms wolfram_language_compute",
+    ]
+    return Computation(
+        display_result,
+        "\n".join(source_lines),
+        proof_result_authoritative=True,
+    )
+
+
+def _render_exact_pi_trig_expression_node(
+    node: ast.AST,
+    declarations: list[tuple[str, str]],
+    node_count: list[int],
+    depth: int,
+) -> tuple[str, str, str, bool] | None:
+    node_count[0] += 1
+    if node_count[0] > 256 or depth > 32:
+        return None
+
+    rational = _constant_fraction(node)
+    if rational is not None:
+        lean_value = _lean_rational(rational)
+        return lean_value, _fraction_text(rational), lean_value, False
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _render_exact_pi_trig_expression_node(
+            node.operand, declarations, node_count, depth + 1
+        )
+        if inner is None:
+            return None
+        expression, display, result, contains_trig = inner
+        if isinstance(node.op, ast.UAdd):
+            return expression, display, result, contains_trig
+        return f"(-{expression})", f"-({display})", f"(-{result})", contains_trig
+
+    if isinstance(node, ast.BinOp):
+        left = _render_exact_pi_trig_expression_node(
+            node.left, declarations, node_count, depth + 1
+        )
+        right = _render_exact_pi_trig_expression_node(
+            node.right, declarations, node_count, depth + 1
+        )
+        if left is None or right is None:
+            return None
+        left_expression, left_display, left_result, left_has_trig = left
+        right_expression, right_display, right_result, right_has_trig = right
+        if not left_has_trig and not right_has_trig:
+            return None
+
+        operator = {
+            ast.Add: "+",
+            ast.Sub: "-",
+            ast.Mult: "*",
+            ast.Div: "/",
+            ast.Pow: "^",
+        }.get(type(node.op))
+        if operator is None:
+            return None
+        if isinstance(node.op, ast.Div):
+            denominator = _constant_fraction(node.right)
+            if denominator is None or denominator == 0:
+                return None
+        if isinstance(node.op, ast.Pow):
+            exponent = _constant_fraction(node.right)
+            if (
+                exponent is None
+                or exponent.denominator != 1
+                or not 0 <= exponent <= 16
+            ):
+                return None
+            right_expression = str(exponent.numerator)
+            right_display = right_expression
+            right_result = right_expression
+
+        return (
+            f"({left_expression} {operator} {right_expression})",
+            f"({left_display} {operator} {right_display})",
+            f"({left_result} {operator} {right_result})",
+            left_has_trig or right_has_trig,
+        )
+
+    if (
+        not isinstance(node, ast.Call)
+        or not isinstance(node.func, ast.Name)
+        or node.func.id not in {"sin", "cos", "tan"}
+        or len(node.args) != 1
+        or node.keywords
+    ):
+        return None
+    pi_multiple = _exact_pi_multiple_from_ast(node.args[0])
+    if (
+        pi_multiple is None
+        or abs(pi_multiple.numerator).bit_length() > 256
+        or pi_multiple.denominator.bit_length() > 256
+    ):
+        return None
+
+    sign = "-" if pi_multiple < 0 else ""
+    numerator = abs(pi_multiple.numerator)
+    numerator_text = "" if numerator == 1 else f"{numerator}*"
+    angle = f"{sign}{numerator_text}Pi"
+    if pi_multiple.denominator != 1:
+        angle += f"/{pi_multiple.denominator}"
+    computation = _prepare_exact_pi_trigonometric_constant(
+        f"{node.func.id.title()}[{angle}]"
+    )
+    if computation is None:
+        return None
+
+    theorem_match = re.search(
+        r"(?s)theorem\s+wolfram_language_compute\s*:\s*(.*?)\s*:=\s*by\b",
+        computation.lean_source,
+    )
+    if theorem_match is None:
+        return None
+    statement = theorem_match.group(1)
+    equality_index = statement.rfind(" = ")
+    if equality_index < 0:
+        return None
+    result_lean = statement[equality_index + 3:].strip()
+
+    index = len(declarations)
+    if index >= 16:
+        return None
+    prefix = f"exact_trig_{index}"
+    renamed_source, local_names = _rename_exact_trig_declarations(
+        computation.lean_source,
+        prefix,
+    )
+    if not local_names:
+        return None
+    declarations.append((f"{prefix}_wolfram_language_compute", renamed_source))
+    argument_lean = _lean_rational(pi_multiple)
+    return (
+        f"(Real.{node.func.id} ({argument_lean} * Real.pi))",
+        computation.display_result,
+        result_lean,
+        True,
+    )
+
+
+def _exact_pi_multiple_from_ast(node: ast.AST) -> Fraction | None:
+    if isinstance(node, ast.Name) and node.id == "pi":
+        return Fraction(1)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _exact_pi_multiple_from_ast(node.operand)
+        if value is None:
+            return None
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if not isinstance(node, ast.BinOp):
+        return None
+    if isinstance(node.op, (ast.Add, ast.Sub)):
+        left = _exact_pi_multiple_from_ast(node.left)
+        right = _exact_pi_multiple_from_ast(node.right)
+        if left is None or right is None:
+            return None
+        return left + right if isinstance(node.op, ast.Add) else left - right
+    if isinstance(node.op, ast.Mult):
+        left_pi = _exact_pi_multiple_from_ast(node.left)
+        right_pi = _exact_pi_multiple_from_ast(node.right)
+        left_rational = _constant_fraction(node.left)
+        right_rational = _constant_fraction(node.right)
+        if left_pi is not None and right_rational is not None:
+            return left_pi * right_rational
+        if right_pi is not None and left_rational is not None:
+            return right_pi * left_rational
+    if isinstance(node.op, ast.Div):
+        numerator = _exact_pi_multiple_from_ast(node.left)
+        denominator = _constant_fraction(node.right)
+        if numerator is not None and denominator not in {None, 0}:
+            return numerator / denominator
+    return None
+
+
+def _rename_exact_trig_declarations(
+    source: str,
+    prefix: str,
+) -> tuple[str, list[str]]:
+    body = "\n".join(
+        line for line in source.splitlines()
+        if not line.lstrip().startswith("import ")
+        and not line.lstrip().startswith("#print axioms ")
+    ).strip()
+    names = re.findall(
+        r"(?m)^\s*(?:private\s+)?(?:theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_']*)\b",
+        body,
+    )
+    for name in names:
+        body = re.sub(rf"\b{re.escape(name)}\b", f"{prefix}_{name}", body)
+    return body, names
 
 
 def _prepare_finite_sum_product(

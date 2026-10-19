@@ -1,7 +1,7 @@
 {
   "feature_matrix_version": 1,
   "features": [
-    {"id": "compat.full_results_exact_trig_verification", "state": "implemented_initial_slice", "scope": "GET /v2/query?verify=true transcribes a single sin/cos/tan call at a supported rational multiple of pi to the exact CAG route; after Lean checks the theorem, the Result pod displays the same exact value used by the proof"},
+    {"id": "compat.full_results_exact_trig_verification", "state": "implemented_initial_slice", "scope": "GET /v2/query?verify=true transcribes bounded sums, products, and rational scaling over supported sin/cos/tan calls at rational multiples of pi into the exact CAG route; after Lean checks the composed theorem, the Result pod displays the same exact value used by the proof. Division is limited to nonzero rational denominators and powers to nonnegative integer exponents through 16"},
     {"id": "native.prove", "state": "implemented_initial_slice", "scope": "typed bounded integer/real polynomial arithmetic and formula-text route /v1/prove-formula; supports addition, subtraction, multiplication, division by nonzero numeric constants, and powers up to 16 (maximum degree 32); nonlinear Lean checking uses nlinarith when supported and depends on local Mathlib setup"},
     {"id": "native.formula_proof", "state": "implemented_initial_slice", "scope": "safe bounded polynomial comparison parser; variables require explicit Int/Real sorts; not natural-language formalization"},
     {"id": "native.counterexample", "state": "implemented", "scope": "Z3 polynomial witness independently replayed against the submitted AST with exact integer/rational arithmetic; algebraic irrational real models return unknown unless an exact rational witness is available"},

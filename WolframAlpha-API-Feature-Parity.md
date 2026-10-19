@@ -224,7 +224,7 @@ The documented parameter groups are:
 | Error semantics | Distinguishes invalid requests/internal errors (`error=true`) from unrecognized queries (`success=false`); pod errors can be local | `/v2/query` returns queryresult-compatible invalid-request/backend error details with `error=true`, and unrecognized queries with `success=false`, `error=false`, and tips; provider/backend failures use HTTP 5xx | P0 |
 | Forward compatibility | Clients should tolerate new result elements and attributes | No generic pod schema/parser yet | P1 |
 
-`verify=true` also covers a single `sin`, `cos`, or `tan` call at a supported rational multiple of pi. The verifier routes that exact interpretation through the CAG trigonometric theorem and displays the theorem's exact value in the Result pod. This remains a small explicit formula slice; general trigonometric identities and natural-language fidelity are not implied.
+`verify=true` also covers bounded sums, products, and rational scaling over supported `sin`, `cos`, and `tan` calls at rational multiples of pi. The verifier composes the CAG trigonometric theorems in Lean and displays the exact expression proved in the Result pod. Division is limited to nonzero rational denominators and powers to nonnegative integer exponents through 16. This remains an explicit formula slice; general trigonometric identities and natural-language fidelity are not implied.
 
 ### Assumption coverage
 
