@@ -1135,7 +1135,8 @@ def _verify_query_computation(
             if request.operation == "numeric"
             else (
                 "Lean proves the selected three-component polynomial divergence formula "
-                "in the chosen Cartesian3D or Cylindrical3D coordinate chart, under the "
+                "in the chosen Cartesian3D, Cylindrical3D, or Spherical3D coordinate chart, "
+                "under the "
                 "listed chart-domain conditions"
                 if is_coordinate_divergence
                 else

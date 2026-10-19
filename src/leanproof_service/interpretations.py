@@ -678,6 +678,8 @@ def _interpret_coordinate_divergence(
             ["x", "y", "z"]
             if coordinate_system == "Cartesian3D"
             else ["rho", "theta", "z"]
+            if coordinate_system == "Cylindrical3D"
+            else ["r", "theta", "phi"]
         ),
         "derivative_terms": symbolic.get("derivative_terms", []),
         "resolved_expression": resolved_expression,
@@ -716,7 +718,8 @@ def _interpret_coordinate_divergence(
         },
         "qualification": (
             "The divergence was computed from the caller-selected coordinate interpretation. "
-            "The coordinate-calculus transformation is not Lean-verified."
+            "The chart formula can be checked with verify=true; that check does not prove the "
+            "English interpretation."
         ),
     }
 

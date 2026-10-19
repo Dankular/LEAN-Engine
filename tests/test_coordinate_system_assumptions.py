@@ -122,6 +122,61 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
         self.assertEqual(verification["real_parameters"], ["rho"])
         self.assertNotIn("domain_conditions", verification)
 
+    def test_spherical_divergence_uses_explicit_chart_and_is_lean_checked(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "div(0,1,0)",
+                "assumption": "coordinate:spherical-3d",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        self.assertEqual(
+            queryresult["interpretation"]["typed_ast"]["coordinate_variables"],
+            ["r", "theta", "phi"],
+        )
+        self.assertEqual(
+            queryresult["evidence"]["domain_conditions"],
+            ["r > 0", "sin(theta) != 0"],
+        )
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(result["subpods"][0]["plaintext"], "cos(theta)/(r*sin(theta))")
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["claim_type"], "coordinate_divergence")
+        self.assertEqual(verification["domain_conditions"], ["r > 0", "sin(theta) != 0"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
+    def test_spherical_divergence_checks_radial_and_azimuthal_derivatives(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "div(r,0,phi)",
+                "assumption": "coordinate:spherical-3d",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(
+            result["subpods"][0]["plaintext"],
+            "(3*r*sin(theta) + 1)/(r*sin(theta))",
+        )
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
 
 if __name__ == "__main__":
     unittest.main()

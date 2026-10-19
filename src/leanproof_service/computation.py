@@ -6603,7 +6603,7 @@ def prepare_coordinate_divergence(
     if (
         len(components) != 3
         or len(derivative_terms) != 3
-        or coordinate_system not in {"Cartesian3D", "Cylindrical3D"}
+        or coordinate_system not in {"Cartesian3D", "Cylindrical3D", "Spherical3D"}
     ):
         return None
 
@@ -6611,7 +6611,7 @@ def prepare_coordinate_divergence(
         derivative_sources = list(zip(components, ("x", "y", "z"), derivative_terms, strict=True))
         coordinate_variables = {"x", "y", "z"}
         domain_conditions: tuple[str, ...] = ()
-    else:
+    elif coordinate_system == "Cylindrical3D":
         derivative_sources = [
             (f"rho*({components[0]})", "rho", derivative_terms[0]),
             (components[1], "theta", derivative_terms[1]),
@@ -6619,6 +6619,14 @@ def prepare_coordinate_divergence(
         ]
         coordinate_variables = {"rho", "theta", "z"}
         domain_conditions = ("rho > 0",)
+    else:
+        derivative_sources = [
+            (f"r^2*({components[0]})", "r", derivative_terms[0]),
+            (f"sin(theta)*({components[1]})", "theta", derivative_terms[1]),
+            (components[2], "phi", derivative_terms[2]),
+        ]
+        coordinate_variables = {"r", "theta", "phi"}
+        domain_conditions = ("r > 0", "sin(theta) != 0")
 
     rendered_derivatives: list[str] = []
     derivative_proofs: list[str] = []
@@ -6634,7 +6642,19 @@ def prepare_coordinate_divergence(
             expression_tree = ast.parse(parsed_expression.expression, mode="eval")
         except (MathInputError, SyntaxError, ValueError, RecursionError):
             return None
-        if any(isinstance(node, ast.Call) for node in ast.walk(expression_tree)):
+        if any(
+            isinstance(node, ast.Call)
+            and not (
+                coordinate_system == "Spherical3D"
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "sin"
+                and len(node.args) == 1
+                and not node.keywords
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "theta"
+            )
+            for node in ast.walk(expression_tree)
+        ):
             return None
 
         expression_names: set[str] = set()
@@ -6703,16 +6723,28 @@ def prepare_coordinate_divergence(
     binders = " ".join(f"({name} : ℝ)" for name in sorted(used_names))
     if coordinate_system == "Cylindrical3D":
         binders = f"{binders} (h_rho : 0 < rho)"
+    elif coordinate_system == "Spherical3D":
+        binders = (
+            f"{binders} (h_spherical_radius : 0 < r) "
+            "(h_spherical_sine : Real.sin theta ≠ 0)"
+        )
     operator_terms = (
         " + ".join(rendered_derivatives)
         if coordinate_system == "Cartesian3D"
         else f"({rendered_derivatives[0]}) / rho + "
         f"({rendered_derivatives[1]}) / rho + {rendered_derivatives[2]}"
     )
+    if coordinate_system == "Spherical3D":
+        operator_terms = (
+            f"({rendered_derivatives[0]}) / (r ^ 2) + "
+            f"({rendered_derivatives[1]}) / (r * Real.sin theta) + "
+            f"({rendered_derivatives[2]}) / (r * Real.sin theta)"
+        )
     imports = """import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.Calculus.Deriv.Inv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring"""
     final_tactic = (
@@ -6720,6 +6752,10 @@ import Mathlib.Tactic.Ring"""
         if coordinate_system == "Cylindrical3D"
         else "ring"
     )
+    if coordinate_system == "Spherical3D":
+        final_tactic = (
+            "field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring"
+        )
     theorem_name = "coordinate_divergence"
     source = (
         f"{imports}\n\n"
@@ -8436,7 +8472,7 @@ def _render_real_calculus_node(
         return None
     if isinstance(node, ast.Constant):
         value = _constant_fraction(node)
-        return _lean_fraction(value) if value is not None else None
+        return _lean_rational(value) if value is not None else None
     if isinstance(node, ast.Name):
         if node.id == "pi":
             return "Real.pi"

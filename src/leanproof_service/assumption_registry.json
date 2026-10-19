@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.3.0",
+  "registry_version": "2.4.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -196,6 +196,14 @@
       "type": "CoordinateSystem",
       "description": "Interpret vector components in 3D cylindrical coordinates.",
       "coordinate_system": "Cylindrical3D",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "coordinate:spherical-3d",
+      "type": "CoordinateSystem",
+      "description": "Interpret vector components in 3D spherical coordinates (r, theta, phi).",
+      "coordinate_system": "Spherical3D",
       "entry_version": 1,
       "service_default": false
     },

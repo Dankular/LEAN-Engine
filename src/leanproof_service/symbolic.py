@@ -55,7 +55,7 @@ class SymbolicRequest(StrictModel):
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     components: list[str] | None = Field(default=None, min_length=3, max_length=3)
-    coordinate_system: Literal["Cartesian3D", "Cylindrical3D"] | None = None
+    coordinate_system: Literal["Cartesian3D", "Cylindrical3D", "Spherical3D"] | None = None
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=60.0)
     numeric_precision: int = Field(default=50, ge=1, le=500)
 
@@ -416,12 +416,14 @@ def _execute_coordinate_divergence(
 
     generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
     for expression in expressions:
+        if not generators:
+            if expression.is_Rational is not True:
+                raise SymbolicInputError(
+                    "coordinate-system divergence requires rational-coefficient polynomials"
+                )
+            continue
         try:
-            polynomial = (
-                sympy.Poly(expression, *generators, domain=sympy.QQ)
-                if generators
-                else sympy.Poly(expression, domain=sympy.QQ)
-            )
+            polynomial = sympy.Poly(expression, *generators, domain=sympy.QQ)
         except (sympy.PolynomialError, TypeError, ValueError) as exc:
             raise SymbolicInputError(
                 "coordinate-system divergence requires rational-coefficient polynomials"
@@ -443,7 +445,7 @@ def _execute_coordinate_divergence(
         domain_conditions: list[str] = []
         coordinate_variables = ["x", "y", "z"]
         result = sum(derivative_terms)
-    else:
+    elif request.coordinate_system == "Cylindrical3D":
         rho = parser.symbols.get("rho", sympy.Symbol("rho"))
         theta = parser.symbols.get("theta", sympy.Symbol("theta"))
         z = parser.symbols.get("z", sympy.Symbol("z"))
@@ -455,8 +457,28 @@ def _execute_coordinate_divergence(
         result = derivative_terms[0] / rho + derivative_terms[1] / rho + derivative_terms[2]
         domain_conditions = ["rho > 0"]
         coordinate_variables = ["rho", "theta", "z"]
+    else:
+        radius = parser.symbols.get("r", sympy.Symbol("r"))
+        theta = parser.symbols.get("theta", sympy.Symbol("theta"))
+        phi = parser.symbols.get("phi", sympy.Symbol("phi"))
+        derivative_terms = [
+            sympy.diff(radius**2 * expressions[0], radius),
+            sympy.diff(sympy.sin(theta) * expressions[1], theta),
+            sympy.diff(expressions[2], phi),
+        ]
+        result = (
+            derivative_terms[0] / radius**2
+            + derivative_terms[1] / (radius * sympy.sin(theta))
+            + derivative_terms[2] / (radius * sympy.sin(theta))
+        )
+        domain_conditions = ["r > 0", "sin(theta) != 0"]
+        coordinate_variables = ["r", "theta", "phi"]
 
-    simplified = sympy.simplify(result)
+    simplified = (
+        sympy.factor(result)
+        if request.coordinate_system == "Spherical3D"
+        else sympy.simplify(result)
+    )
     return {
         "operation": request.operation,
         "coordinate_system": request.coordinate_system,
@@ -475,8 +497,8 @@ def _execute_coordinate_divergence(
             "domain_conditions": domain_conditions,
         },
         "qualification": (
-            "The divergence is a bounded symbolic result in the selected coordinate system; "
-            "the coordinate-calculus transformation is not a Lean proof."
+            "The divergence is computed in the selected coordinate system; verify=true can "
+            "request a Lean check of the selected chart formula."
         ),
     }
 

@@ -170,7 +170,7 @@ def capabilities() -> dict[str, object]:
         ],
         "symbolic_coordinate_divergence": {
             "status": "implemented_initial_slice",
-            "coordinate_systems": ["Cartesian3D", "Cylindrical3D"],
+            "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
             "components": "three rational-coefficient polynomial expressions, total degree at most 16",
             "proof_status": "verify=true adds a Lean-checked chart formula and axiom audit; English interpretation is not proved",
         },
