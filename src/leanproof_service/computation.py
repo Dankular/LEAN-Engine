@@ -6960,7 +6960,7 @@ def prepare_coordinate_curl(
     derivative_terms: list[str],
     expected_components: list[str],
 ) -> Computation | None:
-    """Prepare a Lean theorem for a polynomial curl in one selected 3D chart."""
+    """Prepare a Lean theorem for a bounded real curl field in one selected chart."""
     if (
         len(components) != 3
         or len(derivative_terms) != 6
@@ -7019,14 +7019,11 @@ def prepare_coordinate_curl(
             return None
         if any(
             isinstance(node, ast.Call)
-            and not (
-                coordinate_system == "Spherical3D"
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "sin"
-                and len(node.args) == 1
-                and not node.keywords
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id == "theta"
+            and (
+                not isinstance(node.func, ast.Name)
+                or node.func.id not in {"sin", "cos"}
+                or len(node.args) != 1
+                or bool(node.keywords)
             )
             for node in ast.walk(expression_tree)
         ):

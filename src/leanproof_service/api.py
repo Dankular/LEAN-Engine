@@ -184,7 +184,7 @@ def capabilities() -> dict[str, object]:
         "symbolic_coordinate_curl": {
             "status": "implemented_initial_slice",
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
-            "components": "three rational-coefficient polynomial components, total degree at most 16, in the orthonormal coordinate basis",
+            "components": "three rational-coefficient polynomial components through total degree 16, or bounded real expressions using exact constants, arithmetic, and sin/cos (256 nodes, depth 32, integer powers 0 through 16, no variable denominators), in the orthonormal coordinate basis",
             "proof_status": "verify=true adds Lean-checked component derivatives and chart factors with an axiom audit; English interpretation is not proved",
         },
         "numeric_evaluation": {
@@ -280,7 +280,7 @@ def capabilities() -> dict[str, object]:
             "assumption_types": sorted({item["type"] for item in registry["assumptions"]}),
             "multiple_compatible_selections": True,
             "same_type_selection_scope": "a query-wide selection applies to every matching ambiguous call; use per-occurrence selectors to override individual calls",
-            "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, unparenthesized Function log call, ambiguous m Unit token, or supported CoordinateSystem divergence call; unspecified occurrences retain the service default",
+            "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, unparenthesized Function log call, ambiguous m Unit token, or supported CoordinateSystem calculus call; unspecified occurrences retain the service default",
             "unit_assumption_scope": "single ambiguous m unit in a standalone numeric quantity",
             "candidate_generator": "deterministic_allowlisted_math_parser",
             "classifier": "deterministic_lexical_baseline; optional Decima ranking via ASSUMPTION_CLASSIFIER=decima",

@@ -648,29 +648,104 @@ def _execute_coordinate_gradient(
     }
 
 
+def _coordinate_numeric_literal(node: ast.AST) -> Fraction | None:
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return None
+        if isinstance(node.value, int):
+            return Fraction(node.value)
+        if isinstance(node.value, float) and math.isfinite(node.value):
+            return Fraction(str(node.value))
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _coordinate_numeric_literal(node.operand)
+        if value is None:
+            return None
+        return value if isinstance(node.op, ast.UAdd) else -value
+    return None
+
+
+def _coordinate_curl_expression_is_bounded(node: ast.AST, depth: int = 0) -> bool:
+    if depth > 32:
+        return False
+    if isinstance(node, ast.Constant):
+        return (
+            not isinstance(node.value, bool)
+            and isinstance(node.value, (int, float))
+            and (not isinstance(node.value, float) or math.isfinite(node.value))
+        )
+    if isinstance(node, ast.Name):
+        return node.id in {"pi", "E"} or re.fullmatch(
+            r"[a-z][a-z0-9_]{0,31}", node.id
+        ) is not None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _coordinate_curl_expression_is_bounded(node.operand, depth + 1)
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, ast.Div):
+            denominator = _coordinate_numeric_literal(node.right)
+            return (
+                denominator is not None
+                and denominator != 0
+                and _coordinate_curl_expression_is_bounded(node.left, depth + 1)
+            )
+        if isinstance(node.op, ast.Pow):
+            exponent = _coordinate_numeric_literal(node.right)
+            return (
+                exponent is not None
+                and exponent.denominator == 1
+                and 0 <= exponent <= 16
+                and _coordinate_curl_expression_is_bounded(node.left, depth + 1)
+            )
+        if isinstance(node.op, (ast.Add, ast.Sub, ast.Mult)):
+            return _coordinate_curl_expression_is_bounded(
+                node.left, depth + 1
+            ) and _coordinate_curl_expression_is_bounded(node.right, depth + 1)
+        return False
+    if isinstance(node, ast.Call):
+        return (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"sin", "cos"}
+            and len(node.args) == 1
+            and not node.keywords
+            and _coordinate_curl_expression_is_bounded(node.args[0], depth + 1)
+        )
+    return False
+
+
 def _execute_coordinate_curl(
     request: SymbolicRequest,
     sympy: object,
     parser: _SafeParser,
 ) -> dict[str, object]:
-    """Compute the curl of bounded polynomial components in a selected 3D chart."""
+    """Compute the curl of bounded real fields in a selected 3D chart."""
     parsing_started = perf_counter()
     components_source = request.components or []
     expressions = []
+    component_has_calls: list[bool] = []
     for component in components_source:
         try:
             syntax_tree = ast.parse(component, mode="eval")
         except (SyntaxError, RecursionError, ValueError) as exc:
             raise SymbolicInputError("vector component syntax is invalid") from exc
-        if any(isinstance(node, ast.Call) for node in ast.walk(syntax_tree)):
+        syntax_nodes = list(ast.walk(syntax_tree))
+        has_trigonometric_calls = any(
+            isinstance(node, ast.Call) for node in syntax_nodes
+        )
+        component_has_calls.append(has_trigonometric_calls)
+        if has_trigonometric_calls and (
+            len(syntax_nodes) > 256
+            or not _coordinate_curl_expression_is_bounded(syntax_tree.body)
+        ):
             raise SymbolicInputError(
-                "coordinate-system curl accepts polynomial components without function calls"
+                "coordinate-system curl accepts bounded real expressions with only sin and cos calls"
             )
         expressions.append(parser.parse(component))
     parse_timing = perf_counter() - parsing_started
 
     generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
-    for expression in expressions:
+    for expression, has_calls in zip(expressions, component_has_calls, strict=True):
+        if has_calls:
+            continue
         if not generators:
             if expression.is_Rational is not True:
                 raise SymbolicInputError(
