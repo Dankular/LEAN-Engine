@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
 import json
 import os
 import re
+from threading import Lock
+from time import monotonic
 from typing import Annotated
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -21,6 +25,9 @@ class NaturalLanguageLeanRequest(StrictModel):
     problem: ProblemText
     budget: Budget = Field(default_factory=Budget)
     lean_timeout_seconds: int = Field(default=120, ge=1, le=180)
+    draft_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")] | None = None
+    formalization_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+    approve_formalization: bool = False
 
 
 class LeanGenerationError(RuntimeError):
@@ -33,6 +40,21 @@ class LeanGeneratorNotConfigured(LeanGenerationError):
 
 class LeanClarificationNeeded(LeanGenerationError):
     pass
+
+
+@dataclass(frozen=True)
+class FormalizationDraft:
+    problem: str
+    model: str
+    lean_source: str
+    formalization_sha256: str
+    expires_at: float
+
+
+_DRAFT_TTL_SECONDS = 15 * 60
+_DRAFT_CAPACITY = 128
+_draft_lock = Lock()
+_drafts: dict[str, FormalizationDraft] = {}
 
 
 SYSTEM_PROMPT = """Formalize and prove the user's mathematical problem in Lean 4 using Mathlib.
@@ -158,6 +180,51 @@ def normalize_lean_source(content: str) -> str:
     raise LeanClarificationNeeded(
         "The model did not produce a Lean theorem; provide a more precise mathematical statement"
     )
+
+
+def formalization_digest(problem: str, source: str) -> str:
+    signature = lean_statement_signature(source)
+    if signature is None:
+        raise LeanGenerationError("Generated source does not contain a reviewable theorem statement")
+    payload = json.dumps(
+        {"problem": problem, "prelude": signature[0], "signature": signature[1]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def create_formalization_draft(problem: str, model: str, source: str) -> tuple[str, str]:
+    digest = formalization_digest(problem, source)
+    draft_id = uuid4().hex
+    now = monotonic()
+    draft = FormalizationDraft(
+        problem=problem,
+        model=model,
+        lean_source=source,
+        formalization_sha256=digest,
+        expires_at=now + _DRAFT_TTL_SECONDS,
+    )
+    with _draft_lock:
+        expired = [key for key, value in _drafts.items() if value.expires_at <= now]
+        for key in expired:
+            del _drafts[key]
+        while len(_drafts) >= _DRAFT_CAPACITY:
+            del _drafts[next(iter(_drafts))]
+        _drafts[draft_id] = draft
+    return draft_id, digest
+
+
+def get_formalization_draft(draft_id: str) -> FormalizationDraft | None:
+    now = monotonic()
+    with _draft_lock:
+        draft = _drafts.get(draft_id)
+        if draft is None:
+            return None
+        if draft.expires_at <= now:
+            del _drafts[draft_id]
+            return None
+        return draft
 
 
 def _sanitize_candidate(candidate: str) -> str:

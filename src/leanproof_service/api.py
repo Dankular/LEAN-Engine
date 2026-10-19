@@ -56,7 +56,9 @@ from .natural_language import (
     LeanGenerationError,
     LeanGeneratorNotConfigured,
     NaturalLanguageLeanRequest,
+    create_formalization_draft,
     generate_lean,
+    get_formalization_draft,
     generator_configuration,
     lean_statement_signature,
 )
@@ -144,8 +146,11 @@ def capabilities() -> dict[str, object]:
             "protocol": "OpenAI-compatible chat completions",
             "model": generator_configuration()["model"],
             "fragment": "Lean 4 theorem generation from natural-language mathematical problems",
-            "formalization_fidelity": "not independently verified against the natural-language input",
-            "checked_outcome": "proof_checked; this does not establish natural-language fidelity",
+            "review_flow": "request a draft, inspect the Lean source, then explicitly approve its ID and statement digest",
+            "draft_ttl_seconds": 900,
+            "draft_capacity_per_process": 128,
+            "formalization_fidelity": "caller approval is required but is not independently verified against the natural-language input",
+            "checked_outcome": "proof_checked applies to the caller-approved Lean theorem; it does not establish natural-language fidelity",
             "proof_verification": "the generated theorem is compiled by Lean and axiom-audited",
             "repair_policy": "one repair attempt follows Lean rejection; the formal theorem signature must remain unchanged",
         },
@@ -576,32 +581,89 @@ def prove_formula(request: FormulaProofRequest) -> dict[str, object]:
 @app.post("/v1/natural-language/prove", dependencies=[Depends(require_api_token)])
 def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, object]:
     generation_started = monotonic()
-    try:
-        model, lean_source = generate_lean(
-            request.problem,
-            timeout_seconds=request.budget.wall_seconds / 2,
-        )
-    except LeanGeneratorNotConfigured as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    except LeanClarificationNeeded:
+    if request.draft_id is None:
+        if request.approve_formalization or request.formalization_sha256 is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="A formalization draft ID is required for caller approval.",
+            )
+        try:
+            model, lean_source = generate_lean(
+                request.problem,
+                timeout_seconds=request.budget.wall_seconds / 2,
+            )
+        except LeanGeneratorNotConfigured as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except LeanClarificationNeeded:
+            return {
+                "outcome": "needs_clarification",
+                "problem": request.problem,
+                "formalization_fidelity": {"status": "not_established"},
+                "model": {
+                    "name": generator_configuration()["model"],
+                    "protocol": "openai_chat_completions",
+                },
+                "message": "The model did not produce a Lean theorem; provide a more precise mathematical statement.",
+            }
+        except LeanGenerationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+
+        draft_id, digest = create_formalization_draft(request.problem, model, lean_source)
         return {
-            "outcome": "needs_clarification",
+            "outcome": "needs_review",
+            "theorem_status": "not_submitted_to_lean",
             "problem": request.problem,
-            "formalization_fidelity": {"status": "not_established"},
-            "model": {
-                "name": generator_configuration()["model"],
-                "protocol": "openai_chat_completions",
+            "formalization_fidelity": {
+                "status": "awaiting_caller_review",
+                "message": (
+                    "Review the theorem statement before approving it. Lean can check the "
+                    "formal theorem and proof, but cannot establish that the theorem matches "
+                    "the natural-language problem."
+                ),
             },
-            "message": "The model did not produce a Lean theorem; provide a more precise mathematical statement.",
+            "model": {"name": model, "protocol": "openai_chat_completions"},
+            "formalization": {
+                "draft_id": draft_id,
+                "sha256": digest,
+                "expires_in_seconds": 15 * 60,
+                "lean_source": lean_source,
+            },
         }
-    except LeanGenerationError as exc:
+
+    if not request.approve_formalization:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
+            status_code=422,
+            detail="Set approve_formalization=true only after reviewing the returned Lean theorem.",
+        )
+    if request.formalization_sha256 is None:
+        raise HTTPException(
+            status_code=422,
+            detail="formalization_sha256 from the draft response is required for approval.",
+        )
+    draft = get_formalization_draft(request.draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="The formalization draft is missing or expired; request a new draft.",
+        )
+    if draft.problem != request.problem:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The approval request problem does not match the formalization draft.",
+        )
+    if not hmac.compare_digest(draft.formalization_sha256, request.formalization_sha256):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The approved formalization digest does not match the returned draft.",
+        )
+    model = draft.model
+    lean_source = draft.lean_source
     lean_started = monotonic()
     lean_result = run_generated_source(
         lean_source,
@@ -670,13 +732,19 @@ def prove_natural_language(request: NaturalLanguageLeanRequest) -> dict[str, obj
         "theorem_status": "checked" if verified else lean_result.status,
         "problem": request.problem,
         "formalization_fidelity": {
-            "status": "unverified_against_natural_language",
+            "status": "caller_approved_but_not_mechanically_verified",
             "message": (
-                "Lean checked the generated theorem statement and proof, but that does not "
-                "establish that the formal statement preserves the natural-language meaning."
+                "The caller approved this formalization. Lean checked the theorem statement "
+                "and proof, but approval and kernel checking do not independently establish "
+                "that the formal statement preserves the natural-language meaning."
             ),
         },
         "model": {"name": model, "protocol": "openai_chat_completions"},
+        "formalization": {
+            "draft_id": request.draft_id,
+            "sha256": draft.formalization_sha256,
+            "approval": "caller_approved",
+        },
         "evidence": evidence,
         **({"diagnostics": lean_result.diagnostics} if lean_result.diagnostics else {}),
     }
