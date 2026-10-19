@@ -143,6 +143,9 @@ real-domain and denominator conditions.
 hyperbolic quotient identity, and `Integrate[Tanh[x], x]` is accepted when the
 symbolic backend proposes `log(cosh(x))`. Lean proves `cosh` is positive in this
 proof, so the result has no added domain condition.
+Definite `Integrate[Tanh[a*x+b], {x,l,u}]` supports rational nonzero slopes
+and exact rational bounds; Lean checks the log-cosh endpoint difference through
+the interval fundamental theorem, with no extra domain conditions.
 
 `Coth` is represented as `Real.cosh argument / Real.sinh argument` in generated
 Lean code. `D[Coth[f(x)], x]` is accepted when Lean checks the derivative and the

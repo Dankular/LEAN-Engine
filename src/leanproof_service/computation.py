@@ -1496,6 +1496,23 @@ def _prepare_definite_real_integral(
     )
     if coth_arguments and coth_affine is None:
         return None
+    tanh_arguments = [
+        node.args[0]
+        for node in ast.walk(expression_tree.body)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "tanh"
+        and len(node.args) == 1
+        and not node.keywords
+    ]
+    tanh_affine = _direct_tanh_affine_integrand(
+        expression_tree.body, variable
+    )
+    if (
+        any(_contains_calculus_variable(argument) for argument in tanh_arguments)
+        and tanh_affine is None
+    ):
+        return None
     explicit_base_log_arguments = {
         ast.dump(node.args[0], include_attributes=False)
         for node in ast.walk(expression_tree.body)
@@ -1545,6 +1562,14 @@ def _prepare_definite_real_integral(
         ):
             return None
         coth_endpoint_arguments = (lower_argument, upper_argument)
+    tanh_endpoint_arguments: tuple[Fraction, Fraction] | None = None
+    if tanh_affine is not None:
+        argument = tanh_affine[0]
+        lower_argument = _exact_rational_node_value(argument, variable, lower)
+        upper_argument = _exact_rational_node_value(argument, variable, upper)
+        if lower_argument is None or upper_argument is None:
+            return None
+        tanh_endpoint_arguments = (lower_argument, upper_argument)
     for node in ast.walk(expression_tree.body):
         if (
             not isinstance(node, ast.Call)
@@ -1593,6 +1618,14 @@ def _prepare_definite_real_integral(
             log_sinh
             if coth_affine[1] == 1
             else f"({log_sinh})/({_fraction_text(coth_affine[1])})"
+        )
+    elif tanh_affine is not None:
+        argument_text = ast.unparse(tanh_affine[0])
+        log_cosh = f"log(cosh({argument_text}))"
+        antiderivative = (
+            log_cosh
+            if tanh_affine[1] == 1
+            else f"({log_cosh})/({_fraction_text(tanh_affine[1])})"
         )
     elif sech_affine is not None:
         argument_text = ast.unparse(sech_affine[0])
@@ -1661,6 +1694,16 @@ def _prepare_definite_real_integral(
             endpoint_difference
             if coth_affine[1] == 1
             else f"({endpoint_difference})/({_fraction_text(coth_affine[1])})"
+        )
+    elif tanh_endpoint_arguments is not None and tanh_affine is not None:
+        lower_argument, upper_argument = tanh_endpoint_arguments
+        lower_log = f"log(cosh({_fraction_text(lower_argument)}))"
+        upper_log = f"log(cosh({_fraction_text(upper_argument)}))"
+        endpoint_difference = f"({upper_log} - {lower_log})"
+        definite_result = (
+            endpoint_difference
+            if tanh_affine[1] == 1
+            else f"({endpoint_difference})/({_fraction_text(tanh_affine[1])})"
         )
     try:
         definite_result_tree = ast.parse(definite_result, mode="eval")
@@ -1799,6 +1842,27 @@ def _prepare_definite_real_integral(
         )
         if rendered_domain is None:
             return None
+        if (
+            isinstance(domain_expression, ast.Call)
+            and isinstance(domain_expression.func, ast.Name)
+            and domain_expression.func.id == "cosh"
+            and len(domain_expression.args) == 1
+            and not domain_expression.keywords
+        ):
+            cosh_argument = _render_real_calculus_node(
+                domain_expression.args[0],
+                set(),
+                {"nodes": 0},
+                0,
+                substitutions={variable: point_variable},
+                allow_variable_denominators=True,
+            )
+            if cosh_argument is None:
+                return None
+            cosh_nonzero = f"ne_of_gt (Real.cosh_pos {cosh_argument})"
+            domain_hypotheses[key] = cosh_nonzero
+            interval_domain_proofs.append(cosh_nonzero)
+            continue
         affine_values = _affine_interval_values(
             domain_expression, variable, lower, upper
         )
@@ -2285,6 +2349,35 @@ def _prepare_definite_real_integral(
             f"({coth_argument_derivative_proof})).div_const "
             f"({_lean_rational(coth_affine[1])})"
         )
+    elif tanh_affine is not None:
+        tanh_argument_at_point = _render_real_calculus_node(
+            tanh_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        tanh_argument_derivative_proof = _derivative_proof_term(
+            tanh_affine[0],
+            variable,
+            function_variable,
+            point_variable,
+            {"nodes": 0},
+            0,
+            domain_hypotheses=domain_hypotheses,
+            positive_hypotheses=positive_hypotheses,
+        )
+        if (
+            tanh_argument_at_point is None
+            or tanh_argument_derivative_proof is None
+        ):
+            return None
+        proof = (
+            f"((wolfram_hasDerivAt_log_cosh {tanh_argument_at_point}).comp "
+            f"{point_variable} ({tanh_argument_derivative_proof})).div_const "
+            f"({_lean_rational(tanh_affine[1])})"
+        )
     if proof is None:
         return None
 
@@ -2303,6 +2396,11 @@ def _prepare_definite_real_integral(
         f"    rw [show ({left} : ℝ) = ({right} : ℝ)⁻¹ by norm_num, Real.log_inv]"
         for name, left, right in log_reciprocal_lemmas
     )
+    if coth_affine is not None or tanh_affine is not None:
+        log_equivalence_lemmas.clear()
+        log_reciprocal_lemmas.clear()
+        log_sign_lemma_source = ""
+        log_reciprocal_lemma_source = ""
     log_lemma_source = "\n".join(
         part for part in (log_sign_lemma_source, log_reciprocal_lemma_source) if part
     )
@@ -2323,9 +2421,13 @@ def _prepare_definite_real_integral(
     )
     if coth_affine is not None:
         final_integral_tactic = (
-            "all_goals (simp only [F] <;> "
+            "try (simp only [F] <;> "
             "rw [wolfram_log_sinh_abs, wolfram_log_sinh_abs] <;> "
             "norm_num <;> ring_nf)"
+        )
+    elif tanh_affine is not None:
+        final_integral_tactic = (
+            "try (simp [F, Real.cosh_neg] <;> ring_nf)"
         )
     interval_domain_lemma_source = "\n".join(interval_domain_lemmas)
     if interval_domain_lemma_source:
@@ -2334,6 +2436,7 @@ def _prepare_definite_real_integral(
     csch_helper_source = ""
     sech_helper_source = ""
     coth_helper_source = ""
+    tanh_helper_source = ""
     hderiv_function_proof = "simp [F, id_eq] <;> ring"
     hderiv_value_proof = (
         f"simp [F, id_eq] <;> field_simp{field_simp_arguments} <;> ring"
@@ -2401,6 +2504,51 @@ def _prepare_definite_real_integral(
             f"    · intro {point_variable} hpoint\n"
             f"      exact {coth_sinh_hypothesis}"
         )
+    elif tanh_affine is not None:
+        tanh_helper_source = _tanh_primitive_derivative_lemma_source()
+        tanh_argument_at_integral_var = _render_real_calculus_node(
+            tanh_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: integration_variable},
+            allow_variable_denominators=True,
+        )
+        tanh_argument_at_point = _render_real_calculus_node(
+            tanh_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        if (
+            tanh_argument_at_integral_var is None
+            or tanh_argument_at_point is None
+        ):
+            return None
+        hderiv_function_proof = (
+            "simp [F, Function.comp_def, id_eq] <;> ring"
+        )
+        hderiv_value_proof = (
+            f"simp [F, Function.comp_def, id_eq] <;> "
+            f"field_simp{field_simp_arguments} <;> ring"
+        )
+        hcont_proof = (
+            f"rw [show (fun {integration_variable} : ℝ => "
+            f"Real.tanh ({tanh_argument_at_integral_var})) =\n"
+            f"      (fun {integration_variable} : ℝ => "
+            f"Real.sinh ({tanh_argument_at_integral_var}) / "
+            f"Real.cosh ({tanh_argument_at_integral_var})) by\n"
+            f"      funext {integration_variable}\n"
+            f"      exact Real.tanh_eq_sinh_div_cosh "
+            f"({tanh_argument_at_integral_var})]\n"
+            "    apply ContinuousOn.div₀\n"
+            "    · fun_prop\n"
+            "    · fun_prop\n"
+            f"    · intro {point_variable} hpoint\n"
+            f"      exact ne_of_gt (Real.cosh_pos ({tanh_argument_at_point}))"
+        )
 
     binders = " ".join(
         [
@@ -2446,15 +2594,20 @@ theorem wolfram_language_compute{theorem_binders} :
       (fun {integration_variable} : ℝ => {integrand_at_integral_var})
       MeasureTheory.volume {lean_lower} {lean_upper} := by
     exact hcont.intervalIntegrable
-  rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
 {log_lemma_source}
 {arcsin_half_lemma_source}
+  rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
   {final_integral_tactic}
 
 #print axioms wolfram_language_compute
 """
     helper_source = "\n".join(
-        part for part in (csch_helper_source, sech_helper_source, coth_helper_source) if part
+        part for part in (
+            csch_helper_source,
+            sech_helper_source,
+            coth_helper_source,
+            tanh_helper_source,
+        ) if part
     )
     if helper_source:
         source = source.replace(
@@ -4646,6 +4799,38 @@ def _direct_coth_affine_integrand(
     return argument, slope
 
 
+def _direct_tanh_affine_integrand(
+    root: ast.AST,
+    variable: str,
+) -> tuple[ast.AST, Fraction] | None:
+    import sympy as _sympy
+
+    if (
+        not isinstance(root, ast.Call)
+        or not isinstance(root.func, ast.Name)
+        or root.func.id != "tanh"
+        or len(root.args) != 1
+        or root.keywords
+    ):
+        return None
+    argument = root.args[0]
+    expression = _real_sympy_expression(argument)
+    symbol = _sympy.Symbol(variable)
+    if expression is None or expression.free_symbols - {symbol}:
+        return None
+    try:
+        polynomial = _sympy.Poly(expression, symbol, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return None
+    if polynomial.degree() > 1:
+        return None
+    coefficient = polynomial.coeff_monomial(symbol)
+    if not isinstance(coefficient, _sympy.Rational) or coefficient == 0:
+        return None
+    slope = Fraction(int(coefficient.p), int(coefficient.q))
+    return argument, slope
+
+
 def _direct_sech_affine_integrand(
     root: ast.AST,
     variable: str,
@@ -4863,6 +5048,15 @@ def _coth_primitive_derivative_lemma_source() -> str:
 theorem wolfram_log_sinh_abs (x : ℝ) :
     Real.log (Real.sinh x) = Real.log (Real.sinh |x|) := by
   rw [← Real.log_abs, Real.abs_sinh]
+
+"""
+
+
+def _tanh_primitive_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_log_cosh (x : ℝ) :
+    HasDerivAt (fun y : ℝ => Real.log (Real.cosh y)) (Real.tanh x) x := by
+  have hcosh : Real.cosh x ≠ 0 := ne_of_gt (Real.cosh_pos x)
+  simpa [Real.tanh_eq_sinh_div_cosh] using (Real.hasDerivAt_cosh x).log hcosh
 
 """
 
