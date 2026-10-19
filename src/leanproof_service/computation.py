@@ -2175,9 +2175,13 @@ def _prepare_real_antiderivative(
     coth_arguments = _coth_arguments(integrand_tree.body)
     if coth_arguments is None:
         return None
+    csch_arguments = _csch_arguments(integrand_tree.body)
+    if csch_arguments is None or csch_arguments:
+        return None
     coth_affine = _direct_coth_affine_integrand(
         integrand_tree.body, variable
     )
+    sech_affine = _direct_sech_affine_integrand(integrand_tree.body, variable)
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="integrate",
@@ -2229,6 +2233,14 @@ def _prepare_real_antiderivative(
         antiderivative = (
             f"{variable}*acosh({variable}) - "
             f"sqrt({variable}**2 - 1)"
+        )
+    elif sech_affine is not None:
+        argument, slope = sech_affine
+        sech_antiderivative = f"atan(sinh({ast.unparse(argument)}))"
+        antiderivative = (
+            sech_antiderivative
+            if slope == 1
+            else f"({sech_antiderivative})/({_fraction_text(slope)})"
         )
     if coth_arguments:
         antiderivative = _wrap_coth_log_abs(antiderivative)
@@ -2518,6 +2530,17 @@ def _prepare_real_antiderivative(
             for node in ast.walk(expression_tree.body)
         )
     )
+    direct_sech_argument_lean = None
+    if sech_affine is not None:
+        direct_sech_argument_lean = _render_real_calculus_node(
+            sech_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if direct_sech_argument_lean is None:
+            return None
     if has_coth:
         identities = _coth_identity_terms(integrand_tree.body, tree.body)
         derivative_tactic = (
@@ -2530,6 +2553,11 @@ def _prepare_real_antiderivative(
         derivative_tactic = (
             "simp [id_eq, Real.tanh_eq_sinh_div_cosh] <;> "
             f"field_simp{field_simp_arguments} <;> ring"
+        )
+    elif sech_affine is not None:
+        derivative_tactic = (
+            f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> "
+            f"nlinarith [Real.cosh_sq_sub_sinh_sq {direct_sech_argument_lean}]"
         )
     elif has_tangent or has_sine_cosine_quotient:
         tangent_simp = ", Real.tan_eq_sin_div_cos" if has_tangent else ""
@@ -4185,6 +4213,38 @@ def _direct_coth_affine_integrand(
         not isinstance(root, ast.Call)
         or not isinstance(root.func, ast.Name)
         or root.func.id != "coth"
+        or len(root.args) != 1
+        or root.keywords
+    ):
+        return None
+    argument = root.args[0]
+    expression = _real_sympy_expression(argument)
+    symbol = _sympy.Symbol(variable)
+    if expression is None or expression.free_symbols - {symbol}:
+        return None
+    try:
+        polynomial = _sympy.Poly(expression, symbol, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return None
+    if polynomial.degree() > 1:
+        return None
+    coefficient = polynomial.coeff_monomial(symbol)
+    if not isinstance(coefficient, _sympy.Rational) or coefficient == 0:
+        return None
+    slope = Fraction(int(coefficient.p), int(coefficient.q))
+    return argument, slope
+
+
+def _direct_sech_affine_integrand(
+    root: ast.AST,
+    variable: str,
+) -> tuple[ast.AST, Fraction] | None:
+    import sympy as _sympy
+
+    if (
+        not isinstance(root, ast.Call)
+        or not isinstance(root.func, ast.Name)
+        or root.func.id != "sech"
         or len(root.args) != 1
         or root.keywords
     ):

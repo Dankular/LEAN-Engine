@@ -155,7 +155,10 @@ with the same nonzero-sinh condition in the evidence.
 `Sech` is represented as `1/Cosh[argument]`; Lean derives the required
 nonzero-cosh fact from positivity, so no extra condition is exposed. `Csch` is
 represented as `1/Sinh[argument]` and returns `Sinh[argument] ≠ 0`. Their
-antiderivatives are not part of this slice.
+antiderivatives are handled separately: `Integrate[Sech[a*x+b], x]` supports
+rational nonzero slopes `a` and returns `ArcTan[Sinh[a*x+b]]/a` after Lean checks
+the derivative using `cosh² - sinh² = 1`. It needs no additional domain
+condition. Variable-argument `Csch` antiderivatives remain unsupported.
 
 `ArcTanh` differentiation is checked under the explicit strict conditions
 `-1 < argument` and `argument < 1`. For `Integrate[1/(1-x^2), x]`, the service
