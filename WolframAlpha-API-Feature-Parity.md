@@ -136,6 +136,13 @@ hyperbolic quotient identity, and `Integrate[Tanh[x], x]` is accepted when the
 symbolic backend proposes `log(cosh(x))`. Lean proves `cosh` is positive in this
 proof, so the result has no added domain condition.
 
+`Coth` is represented as `Real.cosh argument / Real.sinh argument` in generated
+Lean code. `D[Coth[f(x)], x]` is accepted when Lean checks the derivative and the
+service returns the explicit pole condition `Sinh[f(x)] ≠ 0`. Indefinite
+integrals of `Coth[a*x+b]` are supported for rational nonzero `a`; the candidate
+`log(Abs(Sinh[a*x+b]))/a` is returned only after Lean checks its derivative,
+with the same nonzero-sinh condition in the evidence.
+
 `ArcTanh` differentiation is checked under the explicit strict conditions
 `-1 < argument` and `argument < 1`. For `Integrate[1/(1-x^2), x]`, the service
 proposes `atanh(x)` and returns those bounds alongside any denominator condition.

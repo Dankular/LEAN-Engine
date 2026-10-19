@@ -607,7 +607,7 @@ class _SafeParser:
         "atan": "atan", "asinh": "asinh", "arcsinh": "asinh",
         "acosh": "acosh", "arccosh": "acosh",
         "atanh": "atanh", "arctanh": "atanh", "artanh": "atanh",
-        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
+        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "coth": "coth", "exp": "exp",
         "sec": "sec", "csc": "csc", "cot": "cot",
         "log": "log", "sqrt": "sqrt", "root": "root", "Abs": "Abs", "abs": "Abs", "floor": "floor",
         "ceiling": "ceiling",

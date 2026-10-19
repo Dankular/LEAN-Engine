@@ -14,7 +14,7 @@ _FUNCTIONS = {
     "sin", "cos", "tan", "asin", "acos", "atan", "arcsin", "arccos", "arctan",
     "atanh", "arctanh", "artanh",
     "asinh", "arcsinh", "acosh", "arccosh",
-    "sinh", "cosh", "tanh", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
+    "sinh", "cosh", "tanh", "coth", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
     "abs",
     "floor", "ceiling",
 }
