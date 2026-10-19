@@ -9,6 +9,7 @@ import json
 import math
 import re
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from .computation import (
+    _constant_fraction,
     _normalize_decimal_literals,
     _normalize_wolfram_real_functions,
     _real_sympy_expression,
@@ -691,6 +693,11 @@ def execute_query(
             proof_timeout_seconds,
             symbolic_result=symbolic.get("result"),
         )
+        verified_result = formal_verification.pop("_verified_result", None)
+        if isinstance(verified_result, str):
+            # Exact trigonometric values can have different exact radical forms in
+            # SymPy and the Lean-backed CAG route. Display the value Lean proved.
+            result_text = verified_result
         elapsed = perf_counter() - started
     candidate_pods = [
         {"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100},
@@ -888,6 +895,11 @@ def _verify_query_computation(
     symbolic_result: object,
 ) -> dict[str, Any]:
     code = _query_computation_code(request)
+    exact_trig_request = (
+        request.operation == "simplify"
+        and request.expression is not None
+        and _query_exact_trigonometric_code(request.expression) is not None
+    )
     if code is None:
         return {
             "status": "unsupported",
@@ -940,7 +952,7 @@ def _verify_query_computation(
         query_normalized is None
         or candidate_normalized is None
         or query_normalized != candidate_normalized
-    ):
+    ) and not exact_trig_request:
         return {
             "status": "candidate_mismatch",
             "verified": False,
@@ -974,6 +986,8 @@ def _verify_query_computation(
         "lean_source": lean_result.source,
         "result_match": True,
     }
+    if lean_result.status == "checked" and exact_trig_request:
+        verification["_verified_result"] = computation.display_result
     if computation.domain_conditions:
         verification["domain_conditions"] = list(computation.domain_conditions)
     if computation.real_parameters:
@@ -990,6 +1004,9 @@ def _verify_query_computation(
 
 def _query_computation_code(request: SymbolicRequest) -> str | None:
     if request.operation in {"simplify", "expand", "factor"} and request.expression is not None:
+        exact_trig_code = _query_exact_trigonometric_code(request.expression)
+        if request.operation == "simplify" and exact_trig_code is not None:
+            return exact_trig_code
         return f"{request.operation.title()}[{request.expression}]"
     if request.operation == "solve" and request.expression is not None and request.variable:
         return f"Solve[({request.expression}) == 0, {request.variable}, Reals]"
@@ -1035,6 +1052,69 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
         and request.upper is None
     ):
         return f"Integrate[{request.expression}, {request.variable}]"
+    return None
+
+
+def _query_exact_trigonometric_code(expression: str) -> str | None:
+    """Transpile a single exact sin/cos/tan of a rational multiple of pi."""
+    try:
+        parsed = parse_math_input(expression)
+        node = ast.parse(parsed.expression, mode="eval").body
+    except (MathInputError, SyntaxError, RecursionError, ValueError):
+        return None
+    if (
+        not isinstance(node, ast.Call)
+        or not isinstance(node.func, ast.Name)
+        or node.func.id not in {"sin", "cos", "tan"}
+        or len(node.args) != 1
+        or node.keywords
+    ):
+        return None
+    multiple = _query_pi_multiple(node.args[0])
+    if (
+        multiple is None
+        or abs(multiple.numerator).bit_length() > 256
+        or multiple.denominator.bit_length() > 256
+    ):
+        return None
+    sign = "-" if multiple < 0 else ""
+    numerator = abs(multiple.numerator)
+    numerator_text = "" if numerator == 1 else f"{numerator}*"
+    angle = f"{sign}{numerator_text}Pi"
+    if multiple.denominator != 1:
+        angle += f"/{multiple.denominator}"
+    return f"{node.func.id.title()}[{angle}]"
+
+
+def _query_pi_multiple(node: ast.AST) -> Fraction | None:
+    if isinstance(node, ast.Name) and node.id == "pi":
+        return Fraction(1)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _query_pi_multiple(node.operand)
+        if value is None:
+            return None
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, (ast.Add, ast.Sub)):
+            left = _query_pi_multiple(node.left)
+            right = _query_pi_multiple(node.right)
+            if left is None or right is None:
+                return None
+            return left + right if isinstance(node.op, ast.Add) else left - right
+        if isinstance(node.op, ast.Mult):
+            left_pi = _query_pi_multiple(node.left)
+            right_pi = _query_pi_multiple(node.right)
+            left_rational = _constant_fraction(node.left)
+            right_rational = _constant_fraction(node.right)
+            if left_pi is not None and right_rational is not None:
+                return left_pi * right_rational
+            if right_pi is not None and left_rational is not None:
+                return right_pi * left_rational
+        if isinstance(node.op, ast.Div):
+            numerator = _query_pi_multiple(node.left)
+            denominator = _constant_fraction(node.right)
+            if numerator is not None and denominator not in {None, 0}:
+                return numerator / denominator
     return None
 
 
