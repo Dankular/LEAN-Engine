@@ -237,6 +237,10 @@ def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str
         return "Official languages", "OfficialLanguages", "Data"
     if property_id == "P38":
         return "Currency", "Currency", "Data"
+    if property_id == "P2044":
+        return "Elevation", "Elevation", "Data"
+    if property_id == "P2046":
+        return "Area", "Area", "Data"
     if property_id == "P2131":
         return "Nominal GDP", "NominalGDP", "Data"
     if property_id == "P4010":
@@ -266,6 +270,8 @@ def _wikidata_provider_presentation(
         "P36": ("Capital", "Capital", "Geography"),
         "P37": ("Official languages", "OfficialLanguages", "Languages"),
         "P38": ("Currency", "Currency", "Economics"),
+        "P2044": ("Elevation", "Elevation", "Geography"),
+        "P2046": ("Area", "Area", "Geography"),
         "P2131": ("Nominal GDP", "NominalGDP", "Economics"),
         "P4010": ("GDP at purchasing power parity", "GDP_PPP", "Economics"),
         "P2132": ("Nominal GDP per capita", "GDPPerCapita", "Economics"),
@@ -1547,6 +1553,36 @@ def _provider_request(
             query=query, max_results=3,
         )
 
+    elevation = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|give\s+me|tell\s+me)\s+)?(?:the\s+)?"
+        r"(?:elevation|altitude)(?:\s+above\s+sea\s+level)?\s+(?:of|in|for)\s+(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if elevation:
+        query = elevation.group(1).strip()
+        if not query:
+            raise ProviderContextNeeded("elevation lookup needs a place or entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P2044",
+            query=query, max_results=3,
+        )
+
+    area = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|give\s+me|tell\s+me)\s+)?(?:the\s+)?"
+        r"(?:(?:land|geographic(?:al)?)\s+)?area\s+(?:of|in|for)\s+(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if area:
+        query = area.group(1).strip()
+        if not query:
+            raise ProviderContextNeeded("area lookup needs a place or entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P2046",
+            query=query, max_results=3,
+        )
+
     official_languages = re.fullmatch(
         r"\s*(?:(?:what\s+is|what\s+are|what's|name)\s+)?(?:the\s+)?"
         r"official\s+languages?\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
@@ -2077,6 +2113,8 @@ def _execute_provider_query(
         "P36": "capital",
         "P37": "official-language",
         "P38": "currency",
+        "P2044": "elevation above sea level",
+        "P2046": "area",
         "P2131": "nominal GDP",
         "P4010": "GDP at purchasing-power parity",
         "P2132": "nominal GDP per capita",
@@ -2085,6 +2123,7 @@ def _execute_provider_query(
     wikidata_property_note = {
         "P17": "Country P17 is intended for geographic places, not people.",
         "P30": "Wikidata may list multiple continents when a subject spans continents.",
+        "P2044": "Elevation measurements can vary by source and unit; inspect the reported unit and statement qualifiers.",
     }.get(wikidata_property_id)
     payload = _query_envelope(
         success=not (format_budget.timed_out_pods and not filtered),
@@ -2168,6 +2207,49 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             description = entity.get("description")
             rows.append(f"{label} [{identifier}]: {description}" if description else f"{label} [{identifier}]")
         return "\n".join(rows) if rows else "No matching entities were found."
+    wikidata_quantities = {
+        "P2044": ("elevation", "Elevation above sea level"),
+        "P2046": ("area", "Area"),
+    }
+    if (
+        provider == "wikidata"
+        and isinstance(data, dict)
+        and data.get("property_id") in wikidata_quantities
+    ):
+        value_key, measure_name = wikidata_quantities[str(data["property_id"])]
+        matches = data.get("matches")
+        rows = []
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                label = str(match.get("label") or match.get("id") or "Entity")
+                identifier = str(match.get("id") or "")
+                prefix = f"{label} [{identifier}]" if identifier else label
+                values = match.get(value_key)
+                statements = []
+                if isinstance(values, list):
+                    for value in values:
+                        if not isinstance(value, dict):
+                            continue
+                        amount = _display_wikidata_amount(value.get("amount"))
+                        lower = _display_wikidata_amount(value.get("lowerBound"))
+                        upper = _display_wikidata_amount(value.get("upperBound"))
+                        if lower is not None and upper is not None:
+                            quantity = f"between {lower} and {upper}"
+                        else:
+                            quantity = amount or "amount not reported"
+                        unit = value.get("unit_label") or value.get("unit") or value.get("unit_id")
+                        if unit:
+                            quantity += f" {unit}"
+                        point_in_time = value.get("point_in_time")
+                        if isinstance(point_in_time, str):
+                            date = point_in_time.removeprefix("+").split("T", 1)[0]
+                            quantity += f" (as of {date})"
+                        statements.append(quantity)
+                detail = "; ".join(statements) or f"no usable {measure_name.lower()} statement found"
+                rows.append(f"{measure_name}: {prefix}: {detail}")
+        return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     if (
         provider == "wikidata"
         and isinstance(data, dict)

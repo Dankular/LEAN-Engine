@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections import OrderedDict
@@ -25,7 +26,8 @@ class KnowledgeRequest(StrictModel):
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
     property_id: Literal[
-        "P17", "P30", "P36", "P37", "P38", "P1082", "P2131", "P4010", "P2132", "P2299"
+        "P17", "P30", "P36", "P37", "P38", "P1082", "P2044", "P2046",
+        "P2131", "P4010", "P2132", "P2299"
     ] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
@@ -109,6 +111,9 @@ _WIKIDATA_CACHE_TTL_SECONDS = 300
 _WIKIDATA_CACHE_MAX_ENTRIES = 128
 _WIKIDATA_CACHE_MAX_ENTRY_BYTES = 2_000_000
 _WIKIDATA_CACHE_MAX_BYTES = 16_000_000
+_WIKIDATA_QUANTITY_PROPERTIES = frozenset({
+    "P2044", "P2046", "P2131", "P4010", "P2132", "P2299",
+})
 _WIKIDATA_CACHE_LOCK = Lock()
 _WIKIDATA_CACHE: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
 _WIKIDATA_CACHE_BYTES = 0
@@ -314,6 +319,8 @@ def _wikidata_property(
         "P37": "official language",
         "P38": "currency",
         "P1082": "population",
+        "P2044": "elevation above sea level",
+        "P2046": "area",
         "P2131": "nominal GDP",
         "P4010": "GDP at purchasing power parity",
         "P2132": "nominal GDP per capita",
@@ -382,6 +389,8 @@ def _wikidata_property(
         "P37": "languages",
         "P38": "currencies",
         "P1082": "population",
+        "P2044": "elevation",
+        "P2046": "area",
         "P2131": "nominal_gdp",
         "P4010": "gdp_ppp",
         "P2132": "nominal_gdp_per_capita",
@@ -397,7 +406,7 @@ def _wikidata_property(
             claims = claims.get(property_id, [])
         if property_id == "P1082":
             values = _wikidata_population_values(claims)
-        elif property_id in {"P2131", "P4010", "P2132", "P2299"}:
+        elif property_id in _WIKIDATA_QUANTITY_PROPERTIES:
             values = _wikidata_quantity_values(claims, property_id)
             target_ids.update(
                 str(value["unit_id"])
@@ -444,7 +453,7 @@ def _wikidata_property(
             relationships = match.get(value_key, [])
             if not isinstance(relationships, list):
                 continue
-            if property_id in {"P2131", "P4010", "P2132", "P2299"}:
+            if property_id in _WIKIDATA_QUANTITY_PROPERTIES:
                 for quantity in relationships:
                     if not isinstance(quantity, dict):
                         continue
@@ -479,10 +488,10 @@ def _wikidata_property(
         "are returned with ties preserved."
         if property_id == "P1082"
         else (
-            "Wikidata entity search order; preferred GDP statements are used when present, "
+            "Wikidata entity search order; preferred quantity statements are used when present, "
             "otherwise the latest dated statements are returned with ties preserved; amount, "
-            "unit, rank, references, and time qualifiers are preserved."
-            if property_id in {"P2131", "P4010", "P2132", "P2299"}
+            "unit, bounds, rank, reference counts, and bounded qualifier details are preserved."
+            if property_id in _WIKIDATA_QUANTITY_PROPERTIES
             else (
                 "Wikidata entity search order; all returned candidates and non-deprecated "
                 f"{property_name} statements are preserved, including rank, references, "
@@ -645,6 +654,9 @@ def _wikidata_quantity_values(
                     break
         if point_in_time is not None:
             observation["point_in_time"] = point_in_time
+        qualifier_values = _wikidata_qualifier_values(statement)
+        if qualifier_values:
+            observation["qualifiers"] = qualifier_values
         values.append(observation)
 
     preferred = [item for item in values if item.get("rank") == "preferred"]
@@ -654,6 +666,67 @@ def _wikidata_quantity_values(
         latest = max(str(item["point_in_time"]) for item in dated)
         eligible = [item for item in dated if item["point_in_time"] == latest]
     return eligible[:5]
+
+
+def _wikidata_qualifier_values(statement: dict[str, object]) -> list[dict[str, object]]:
+    qualifiers = statement.get("qualifiers")
+    if not isinstance(qualifiers, dict):
+        return []
+    values: list[dict[str, object]] = []
+    for property_id, snaks in qualifiers.items():
+        if (
+            not isinstance(property_id, str)
+            or not re.fullmatch(r"P[1-9][0-9]{0,8}", property_id)
+        ):
+            continue
+        if not isinstance(snaks, list):
+            continue
+        for snak in snaks:
+            if not isinstance(snak, dict) or snak.get("snaktype") != "value":
+                continue
+            datavalue = snak.get("datavalue")
+            if not isinstance(datavalue, dict):
+                continue
+            value = _compact_wikidata_qualifier(datavalue.get("value"))
+            if value is None:
+                continue
+            record: dict[str, object] = {"property_id": property_id, "value": value}
+            value_type = datavalue.get("type")
+            if isinstance(value_type, str):
+                record["type"] = value_type[:80]
+            values.append(record)
+            if len(values) >= 12:
+                return values
+    return values
+
+
+def _compact_wikidata_qualifier(value: object) -> object | None:
+    if isinstance(value, str):
+        return value[:512]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return str(value) if math.isfinite(value) else None
+    if not isinstance(value, dict):
+        return None
+    allowed_fields = {
+        "id", "numeric-id", "entity-type", "amount", "unit", "lowerBound", "upperBound",
+        "time", "precision", "before", "after", "timezone", "calendarmodel",
+        "latitude", "longitude", "altitude", "globe", "text", "language", "code",
+    }
+    compact: dict[str, object] = {}
+    for key, item in value.items():
+        if key not in allowed_fields:
+            continue
+        if isinstance(item, str):
+            compact[key] = item[:512]
+        elif isinstance(item, bool) or isinstance(item, int):
+            compact[key] = item
+        elif isinstance(item, float) and math.isfinite(item):
+            compact[key] = str(item)
+    return compact or None
 
 
 def _wikidata_entity_values(
