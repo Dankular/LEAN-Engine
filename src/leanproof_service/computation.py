@@ -1645,8 +1645,17 @@ def _prepare_pi_bounded_sin_cos_integral(
         and integrand.func.id in {"sin", "cos"}
         and len(integrand.args) == 1
         and not integrand.keywords
-        and isinstance(integrand.args[0], ast.Name)
-        and integrand.args[0].id == variable
+    ):
+        return None
+    argument_form = _linear_rational_form(integrand.args[0], variable)
+    if argument_form is None:
+        return None
+    slope, intercept = argument_form
+    if (
+        slope == 0
+        or intercept != 0
+        or abs(slope.numerator).bit_length() > 256
+        or slope.denominator.bit_length() > 256
     ):
         return None
 
@@ -1658,6 +1667,14 @@ def _prepare_pi_bounded_sin_cos_integral(
     upper_multiple = _parse_rational_pi_multiple(normalized_upper)
     allowed_multiples = {Fraction(-1), Fraction(-1, 2), Fraction(0), Fraction(1, 2), Fraction(1)}
     if lower_multiple not in allowed_multiples or upper_multiple not in allowed_multiples:
+        return None
+    endpoint_multiples = {
+        Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(0),
+        Fraction(1, 2), Fraction(1), Fraction(2),
+    }
+    lower_phase = slope * lower_multiple
+    upper_phase = slope * upper_multiple
+    if lower_phase not in endpoint_multiples or upper_phase not in endpoint_multiples:
         return None
 
     symbolic = run_symbolic(SymbolicRequest(
@@ -1676,44 +1693,80 @@ def _prepare_pi_bounded_sin_cos_integral(
         )
         return Computation("", "", backend_error=str(diagnostic)[:1000])
     result = _parse_exact_rational(symbolic["result"])
-    if result is None:
+    if (
+        result is None
+        or abs(result.numerator).bit_length() > 256
+        or result.denominator.bit_length() > 256
+    ):
         return None
 
     lean_lower = _lean_pi_multiple(lower_multiple)
     lean_upper = _lean_pi_multiple(upper_multiple)
+    lean_lower_phase = _lean_pi_multiple(lower_phase)
+    lean_upper_phase = _lean_pi_multiple(upper_phase)
+    lean_slope = _lean_rational(slope)
     lean_result = _lean_rational(result)
     if integrand.func.id == "sin":
-        primitive = "-Real.cos"
+        primitive = "fun t : ℝ => -Real.cos (a * t) / a"
         primitive_derivative = (
-            f"simpa [F] using (Real.hasDerivAt_cos {variable}).neg"
+            f"have hcos : HasDerivAt (fun y : ℝ => Real.cos (a * y)) "
+            f"(-Real.sin (a * x) * a) x := by\n"
+            f"      convert (Real.hasDerivAt_cos (a * x)).comp x "
+            f"(hasDerivAt_const_mul a) using 1\n"
+            f"      ext y\n"
+            f"      rfl\n"
+            f"    convert hcos.neg.div_const a using 1\n"
+            f"    field_simp [ha]\n"
+            f"    <;> ring"
         )
     else:
-        primitive = "Real.sin"
-        primitive_derivative = f"simpa [F] using (Real.hasDerivAt_sin {variable})"
+        primitive = "fun t : ℝ => Real.sin (a * t) / a"
+        primitive_derivative = (
+            f"have hsin : HasDerivAt (fun y : ℝ => Real.sin (a * y)) "
+            f"(Real.cos (a * x) * a) x := by\n"
+            f"      convert (Real.hasDerivAt_sin (a * x)).comp x "
+            f"(hasDerivAt_const_mul a) using 1\n"
+            f"      ext y\n"
+            f"      rfl\n"
+            f"    convert hsin.div_const a using 1\n"
+            f"    field_simp [ha]\n"
+            f"    <;> ring"
+        )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.MeasureTheory.Integral.IntervalIntegral.FundThmCalculus
 import Mathlib.Tactic.FunProp
 import Mathlib.Tactic.NormNum
+import Mathlib.Tactic.FieldSimp
 
 theorem wolfram_language_compute :
-    (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} {variable}) = {lean_result} := by
+    (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} ({lean_slope} * {variable})) = {lean_result} := by
+  let a : ℝ := {lean_slope}
+  have ha : a ≠ 0 := by norm_num [a]
   let F : ℝ → ℝ := {primitive}
+  change (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} (a * {variable})) = {lean_result}
   have hderiv : ∀ x ∈ Set.uIcc {lean_lower} {lean_upper},
-      HasDerivAt F (Real.{integrand.func.id} x) x := by
+      HasDerivAt F (Real.{integrand.func.id} (a * x)) x := by
     intro x hx
     {primitive_derivative}
   have hcont : ContinuousOn
-      (fun x : ℝ => Real.{integrand.func.id} x)
+      (fun x : ℝ => Real.{integrand.func.id} (a * x))
       (Set.uIcc {lean_lower} {lean_upper}) := by
     fun_prop
   have hint : IntervalIntegrable
-      (fun x : ℝ => Real.{integrand.func.id} x)
+      (fun x : ℝ => Real.{integrand.func.id} (a * x))
       MeasureTheory.volume {lean_lower} {lean_upper} := by
     exact hcont.intervalIntegrable
+  have h_lower_phase : a * {lean_lower} = {lean_lower_phase} := by
+    norm_num [a] <;> ring
+  have h_upper_phase : a * {lean_upper} = {lean_upper_phase} := by
+    norm_num [a] <;> ring
   rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
-  norm_num [F, Real.sin_pi_div_two, Real.sin_pi, Real.sin_neg,
-    Real.cos_pi_div_two, Real.cos_neg, Real.cos_pi]
+  simp only [F]
+  rw [h_upper_phase, h_lower_phase]
+  norm_num [a, Real.sin_pi_div_two,
+    Real.sin_pi, Real.sin_neg, Real.sin_two_pi, Real.cos_pi_div_two,
+    Real.cos_neg, Real.cos_pi, Real.cos_two_pi]
 
 #print axioms wolfram_language_compute
 """
@@ -1766,6 +1819,10 @@ def _rational_pi_form(node: ast.AST) -> tuple[Fraction, Fraction] | None:
 
 
 def _lean_pi_multiple(coefficient: Fraction) -> str:
+    if coefficient == 2:
+        return "(2 * Real.pi)"
+    if coefficient == -2:
+        return "(-(2 * Real.pi))"
     if coefficient == 0:
         return "(0)"
     if coefficient == 1:

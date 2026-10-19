@@ -40,6 +40,11 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
         cases = {
             "Integrate[Sin[x], {x, 0, Pi}]": "2",
             "Integrate[Cos[x], {x, -Pi/2, Pi/2}]": "2",
+            "Integrate[Sin[2x], {x, 0, Pi}]": "0",
+            "Integrate[Cos[x/2], {x, 0, Pi}]": "2",
+            "Integrate[Sin[2x], {x, 0, Pi/2}]": "1",
+            "Integrate[Sin[-2x], {x, 0, Pi/2}]": "-1",
+            "Integrate[Cos[-4x], {x, 0, Pi/2}]": "0",
         }
         for code, expected_result in cases.items():
             with self.subTest(code=code):
@@ -53,6 +58,9 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
 
     def test_lowercase_pi_is_not_mistaken_for_wolfram_constant(self) -> None:
         self.assertIsNone(prepare_computation("Integrate[Sin[x], {x, 0, pi}]", 10))
+
+    def test_nonzero_phase_is_not_claimed_by_the_exact_endpoint_path(self) -> None:
+        self.assertIsNone(prepare_computation("Integrate[Sin[x+1], {x, 0, Pi}]", 10))
 
 
 class InverseTrigonometricAntiderivativeTests(unittest.TestCase):
