@@ -280,17 +280,44 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
             "tan": ("0", "0", "Real.tan_zero"),
         }[function]
         base_expression = "0"
+        base_lemmas = [value[2]]
     else:
         reciprocal = 1 / base_angle
-        if reciprocal.denominator != 1:
+        if reciprocal.denominator == 1:
+            base_denominator = reciprocal.numerator
+            value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(base_denominator)
+            if value is None:
+                return None
+            base_expression = f"(Real.pi / {base_denominator})"
+            base_lemmas = [value[2]]
+        elif function in {"sin", "cos"}:
+            complement = Fraction(1, 2) - base_angle
+            complement_reciprocal = 1 / complement if complement > 0 else None
+            if (
+                complement_reciprocal is None
+                or complement_reciprocal.denominator != 1
+            ):
+                return None
+            base_denominator = complement_reciprocal.numerator
+            complementary_function = "cos" if function == "sin" else "sin"
+            value = _EXACT_PI_TRIG_VALUES.get(
+                complementary_function, {}
+            ).get(base_denominator)
+            if value is None:
+                return None
+            base_expression = (
+                f"(Real.pi / 2 - Real.pi / {base_denominator})"
+            )
+            cofunction_lemma = (
+                "Real.sin_pi_div_two_sub"
+                if function == "sin"
+                else "Real.cos_pi_div_two_sub"
+            )
+            base_lemmas = [cofunction_lemma, value[2]]
+        else:
             return None
-        base_denominator = reciprocal.numerator
-        value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(base_denominator)
-        if value is None:
-            return None
-        base_expression = f"(Real.pi / {base_denominator})"
 
-    display_result, lean_result, base_lemma = value
+    display_result, lean_result, _base_lemma = value
     parity_sign = -1 if integer_shift % 2 else 1
     if function == "sin":
         result_sign = -parity_sign if subtract_base else parity_sign
@@ -318,7 +345,7 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
   have hangle : {lean_multiple} * Real.pi = {angle_decomposition} := by
     norm_num <;> ring
   rw [hangle, {identity}]
-  rw [{base_lemma}] <;> norm_num
+  rw [{", ".join(base_lemmas)}] <;> norm_num
 """
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 

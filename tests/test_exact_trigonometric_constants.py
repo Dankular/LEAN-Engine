@@ -19,6 +19,14 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Sin[Pi/8]": "sqrt(2 - sqrt(2))/2",
             "Sin[Pi/16]": "sqrt(2 - sqrt(2 + sqrt(2)))/2",
             "Sin[Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Sin[3Pi/8]": "sqrt(2 + sqrt(2))/2",
+            "Cos[3Pi/8]": "sqrt(2 - sqrt(2))/2",
+            "Sin[7Pi/16]": "sqrt(2 + sqrt(2 + sqrt(2)))/2",
+            "Cos[7Pi/16]": "sqrt(2 - sqrt(2 + sqrt(2)))/2",
+            "Sin[15Pi/32]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Cos[15Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Sin[5Pi/8]": "sqrt(2 + sqrt(2))/2",
+            "Cos[5Pi/8]": "-sqrt(2 - sqrt(2))/2",
             "Cos[Pi]": "-1",
             "Cos[Pi/2]": "0",
             "Cos[Pi/3]": "1/2",
@@ -56,6 +64,9 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[2Pi/3]",
             "Tan[2Pi/3]",
             "Sin[2Pi]",
+            "Sin[3Pi/8]",
+            "Cos[3Pi/8]",
+            "Cos[5Pi/8]",
             "Sin[-Pi]",
             "Cos[Pi/8]",
             "Cos[-Pi/3]",
@@ -72,7 +83,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
 
     def test_unlisted_angles_and_tangent_poles_remain_unsupported(self) -> None:
         self.assertIsNone(prepare_computation("Sin[Pi/5]", 10))
-        self.assertIsNone(prepare_computation("Sin[3Pi/8]", 10))
+        self.assertIsNone(prepare_computation("Sin[3Pi/16]", 10))
+        self.assertIsNone(prepare_computation("Tan[3Pi/8]", 10))
         self.assertIsNone(prepare_computation("Cos[Pi/64]", 10))
         self.assertIsNone(prepare_computation("Tan[Pi/2]", 10))
         self.assertIsNone(prepare_computation("Sin[pi/6]", 10))
