@@ -44,7 +44,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>"
-    r"Sin|Cos|Tan|Sec|Csc|Coth|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|ArcTanh|Sqrt|Exp|Sinh|Cosh|Tanh|Log"
+    r"Sin|Cos|Tan|Sec|Csc|Coth|Cot|Sech|Csch|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|ArcTanh|Sqrt|Exp|Sinh|Cosh|Tanh|Log"
     r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
@@ -2491,6 +2491,10 @@ def _prepare_real_derivative(
     coth_arguments = _coth_arguments(tree.body)
     if coth_arguments is None:
         return None
+    csch_arguments = _csch_arguments(tree.body)
+    if csch_arguments is None:
+        return None
+    sech_arguments = _sech_arguments(tree.body)
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="differentiate",
@@ -2528,6 +2532,7 @@ def _prepare_real_derivative(
     domain_denominators = [
         *_variable_denominators(tree.body),
         *(_sinh_call(argument) for argument in coth_arguments),
+        *(_sinh_call(argument) for argument in csch_arguments),
     ]
     domain_hypotheses: dict[str, str] = {}
     positive_hypotheses: dict[str, str] = {}
@@ -2570,6 +2575,22 @@ def _prepare_real_derivative(
         else:
             denominator_source = ast.unparse(denominator).replace("**", "^")
         domain_conditions.append(f"{denominator_source} ≠ 0")
+
+    for argument in sech_arguments:
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        cosh_nonzero_proof = f"(ne_of_gt (Real.cosh_pos {argument_lean}))"
+        domain_hypotheses[
+            ast.dump(_cosh_call(argument), include_attributes=False)
+        ] = cosh_nonzero_proof
+        domain_condition_names.append(cosh_nonzero_proof)
 
     for index, argument in enumerate(inverse_trig_arguments):
         argument_lean = _render_real_calculus_node(
@@ -2710,11 +2731,18 @@ def _prepare_real_derivative(
         for node in ast.walk(tree.body)
     )
     has_coth_derivative = bool(coth_arguments)
+    has_csch_derivative = bool(csch_arguments)
+    has_sech_derivative = bool(sech_arguments)
     if has_coth_derivative:
         identity_terms = _coth_identity_terms(tree.body)
         derivative_tactic = (
             f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> "
             f"nlinarith [{', '.join(identity_terms)}]"
+        )
+    elif has_sech_derivative:
+        derivative_tactic = (
+            "simp [id_eq, Real.tanh_eq_sinh_div_cosh] <;> "
+            f"field_simp{field_simp_arguments} <;> ring"
         )
     elif has_tangent_derivative:
         derivative_tactic = (
@@ -2759,6 +2787,16 @@ def _prepare_real_derivative(
         if has_coth_derivative
         else ""
     )
+    csch_helper_source = (
+        _csch_derivative_lemma_source()
+        if has_csch_derivative
+        else ""
+    )
+    sech_helper_source = (
+        _sech_derivative_lemma_source()
+        if has_sech_derivative
+        else ""
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
@@ -2781,6 +2819,8 @@ import Mathlib.Tactic.Ring
 {tanh_helper_source}
 {artanh_helper_source}
 {coth_helper_source}
+{csch_helper_source}
+{sech_helper_source}
 
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {result_lean} {variable} := by
@@ -3812,6 +3852,14 @@ def _sinh_call(argument: ast.AST) -> ast.Call:
     )
 
 
+def _cosh_call(argument: ast.AST) -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id="cosh", ctx=ast.Load()),
+        args=[argument],
+        keywords=[],
+    )
+
+
 def _coth_arguments(root: ast.AST) -> list[ast.AST] | None:
     import sympy as _sympy
 
@@ -3835,6 +3883,59 @@ def _coth_arguments(root: ast.AST) -> list[ast.AST] | None:
                 or _sympy.simplify(_sympy.sinh(value) != 0) is not _sympy.true
             ):
                 return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _csch_arguments(root: ast.AST) -> list[ast.AST] | None:
+    import sympy as _sympy
+
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "csch"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            value = _constant_sympy_expression(argument)
+            if (
+                value is None
+                or value.is_real is not True
+                or _sympy.simplify(_sympy.sinh(value) != 0) is not _sympy.true
+            ):
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _sech_arguments(root: ast.AST) -> list[ast.AST]:
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "sech"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
             continue
         key = ast.dump(argument, include_attributes=False)
         if key not in seen:
@@ -3938,6 +4039,32 @@ def _coth_derivative_lemma_source() -> str:
 """
 
 
+def _csch_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_csch {x : ℝ}
+    (hsinh : Real.sinh x ≠ 0) :
+    HasDerivAt (fun y : ℝ => 1 / Real.sinh y)
+      (-(Real.cosh x / (Real.sinh x) ^ 2)) x := by
+  have hquot := (hasDerivAt_const x (1 : ℝ)).div (Real.hasDerivAt_sinh x) hsinh
+  convert hquot using 1
+  field_simp [hsinh]
+  ring
+
+"""
+
+
+def _sech_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_sech {x : ℝ} :
+    HasDerivAt (fun y : ℝ => 1 / Real.cosh y)
+      (-(Real.sinh x / (Real.cosh x) ^ 2)) x := by
+  have hcosh : Real.cosh x ≠ 0 := ne_of_gt (Real.cosh_pos x)
+  have hquot := (hasDerivAt_const x (1 : ℝ)).div (Real.hasDerivAt_cosh x) hcosh
+  convert hquot using 1
+  field_simp [hcosh]
+  ring
+
+"""
+
+
 def _contains_calculus_variable(node: ast.AST) -> bool:
     return any(
         isinstance(child, ast.Name) and child.id not in {"pi", "E"}
@@ -3985,6 +4112,8 @@ def _constant_sympy_expression(node: ast.AST):
             "cosh": _sympy.cosh,
             "tanh": _sympy.tanh,
             "coth": _sympy.coth,
+            "sech": _sympy.sech,
+            "csch": _sympy.csch,
             "log": _sympy.log,
         }.get(node.func.id)
         return function(argument) if function is not None else None
@@ -4053,6 +4182,8 @@ def _real_sympy_expression(
             "cosh": _sympy.cosh,
             "tanh": _sympy.tanh,
             "coth": _sympy.coth,
+            "sech": _sympy.sech,
+            "csch": _sympy.csch,
             "log": _sympy.log,
             "sqrt": _sympy.sqrt,
         }.get(node.func.id)
@@ -4178,6 +4309,19 @@ def _render_real_calculus_node(
             if argument is None:
                 return None
             return f"((Real.cosh {argument}) / (Real.sinh {argument}))"
+        if node.func.id in {"csch", "sech"}:
+            argument = _render_real_calculus_node(
+                node.args[0],
+                names,
+                state,
+                depth + 1,
+                substitutions,
+                allow_variable_denominators,
+            )
+            if argument is None:
+                return None
+            hyperbolic_function = "sinh" if node.func.id == "csch" else "cosh"
+            return f"(1 / (Real.{hyperbolic_function} {argument}))"
         function_name = {
             "sin": "Real.sin",
             "cos": "Real.cos",
@@ -4550,6 +4694,79 @@ def _derivative_proof_term(
             return (
                 f"(wolfram_hasDerivAt_tanh {rendered_argument}).comp "
                 f"{point} ({inner})"
+            )
+        if node.func.id == "sech":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(1 / (Real.cosh {rendered_argument})))"
+                )
+            rendered_argument = _render_real_calculus_node(
+                argument, set(), {"nodes": 0}, 0,
+                allow_variable_denominators=True,
+            )
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if rendered_argument is None or inner is None:
+                return None
+            return (
+                f"(wolfram_hasDerivAt_sech (x := {rendered_argument})).comp "
+                f"{point} ({inner})"
+            )
+        if node.func.id == "csch":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(1 / (Real.sinh {rendered_argument})))"
+                )
+            rendered_argument = _render_real_calculus_node(
+                argument, set(), {"nodes": 0}, 0,
+                allow_variable_denominators=True,
+            )
+            sinh_hypothesis = (domain_hypotheses or {}).get(
+                ast.dump(_sinh_call(argument), include_attributes=False)
+            )
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if rendered_argument is None or sinh_hypothesis is None or inner is None:
+                return None
+            return (
+                f"(wolfram_hasDerivAt_csch (x := {rendered_argument}) "
+                f"{sinh_hypothesis}).comp {point} ({inner})"
             )
         if node.func.id == "coth":
             argument = node.args[0]

@@ -143,6 +143,12 @@ integrals of `Coth[a*x+b]` are supported for rational nonzero `a`; the candidate
 `log(Abs(Sinh[a*x+b]))/a` is returned only after Lean checks its derivative,
 with the same nonzero-sinh condition in the evidence.
 
+`Sech` and `Csch` derivatives are also checked for bounded real compositions.
+`Sech` is represented as `1/Cosh[argument]`; Lean derives the required
+nonzero-cosh fact from positivity, so no extra condition is exposed. `Csch` is
+represented as `1/Sinh[argument]` and returns `Sinh[argument] ≠ 0`. Their
+antiderivatives are not part of this slice.
+
 `ArcTanh` differentiation is checked under the explicit strict conditions
 `-1 < argument` and `argument < 1`. For `Integrate[1/(1-x^2), x]`, the service
 proposes `atanh(x)` and returns those bounds alongside any denominator condition.

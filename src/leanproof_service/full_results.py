@@ -2548,7 +2548,7 @@ def _render_wolfram_node(node: ast.AST) -> str:
         functions = {
             "sin": "Sin", "cos": "Cos", "tan": "Tan",
             "asin": "ArcSin", "acos": "ArcCos", "atan": "ArcTan",
-            "sinh": "Sinh", "cosh": "Cosh", "tanh": "Tanh", "coth": "Coth",
+            "sinh": "Sinh", "cosh": "Cosh", "tanh": "Tanh", "coth": "Coth", "sech": "Sech", "csch": "Csch",
             "exp": "Exp", "log": "Log", "sqrt": "Sqrt",
             "root": "Surd",
             "Abs": "Abs", "abs": "Abs", "floor": "Floor", "ceiling": "Ceiling",

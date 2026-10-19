@@ -37,7 +37,7 @@ _FUNCTIONS = {
     "sin", "cos", "tan", "asin", "acos", "atan", "arcsin", "arccos", "arctan",
     "atanh", "arctanh", "artanh",
     "asinh", "arcsinh", "acosh", "arccosh",
-    "sinh", "cosh", "tanh", "coth", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
+    "sinh", "cosh", "tanh", "coth", "sech", "csch", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
     "abs", "floor",
     "ceiling",
 }
@@ -191,7 +191,7 @@ def _latex_command(command: str, source: str, after_command: int) -> tuple[str, 
         "arctan": "atan", "arcsinh": "asinh", "asinh": "asinh",
         "arccosh": "acosh", "acosh": "acosh",
         "arctanh": "atanh", "artanh": "atanh", "atanh": "atanh",
-        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "coth": "coth", "exp": "exp",
+        "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "coth": "coth", "sech": "sech", "csch": "csch", "exp": "exp",
         "sec": "sec", "csc": "csc", "cot": "cot", "log": "log", "ln": "ln", "abs": "abs",
         "floor": "floor", "ceiling": "ceiling",
     }
