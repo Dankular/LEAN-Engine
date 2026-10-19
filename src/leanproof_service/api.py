@@ -431,13 +431,14 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
+                    "Exact Sin, Cos, and selected Tan values at standard Pi fractions, checked by Lean",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Selected rational-frequency definite Sin/Cos integrals with exact Pi-multiple bounds",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
                     "TrigExpand for bounded additive and integer-multiple Sin/Cos arguments through 12x, with a Lean proof of the identity",
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
-                    "Solve for univariate degree-at-most-four equations with complete rational factorization or exact real quadratic roots, and bounded rational linear systems over Reals",
+                    "Solve for univariate equations through degree eight with complete rational factorization, exact real quadratic roots, and bounded rational linear systems over Reals",
                 ],
                 "explicit_base_log": {
                     "syntax": "Log[base, argument]",
@@ -1301,7 +1302,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "Supported operations include bounded arithmetic and real calculus, Lean-checked TrigExpand, "
+        "Supported operations include bounded arithmetic, exact standard Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
         "finite polynomial Sum/Product, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof."

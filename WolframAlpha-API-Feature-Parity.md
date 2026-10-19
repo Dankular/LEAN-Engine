@@ -41,6 +41,12 @@ HTTP 200 response with `success=true` and a Wolfram `Failure` expression contain
 documented `MessageTemplate` and `MessageParameters` fields. Authentication accepts the
 configured key directly or as a bearer token.
 
+The CAG route also evaluates exact Sin, Cos, and selected Tan values at standard
+Pi fractions. Sin and Cos accept signed Pi fractions with denominators 1, 2, 3, 4,
+6, 8, 16, and 32; Tan accepts denominators 1, 3, 4, and 6. Each value is checked
+against a Mathlib trigonometric identity. Tangent poles and other angles remain
+unsupported.
+
 The CAG endpoint and `/v2/query?verify=true` also support finite `Sum` and `Product`
 over inclusive integer bounds when the integrand and result fit the rational-polynomial
 grammar. Ranges are limited to 128 terms; negative bounds and reversed bounds are handled,

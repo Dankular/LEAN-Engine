@@ -67,21 +67,69 @@ _FINITE_SUM_PRODUCT = re.compile(
     r"(?P<lower>[^,{}]+?)\s*,\s*(?P<upper>[^,{}]+?)\s*\}\s*\]\s*"
 )
 _TRIG_EXPAND_MAX_MULTIPLE = 12
+_EXACT_PI_TRIG_VALUES: dict[
+    str, dict[int, tuple[str, str, str]]
+] = {
+    "sin": {
+        1: ("0", "0", "Real.sin_pi"),
+        2: ("1", "1", "Real.sin_pi_div_two"),
+        3: ("sqrt(3)/2", "Real.sqrt 3 / 2", "Real.sin_pi_div_three"),
+        4: ("sqrt(2)/2", "Real.sqrt 2 / 2", "Real.sin_pi_div_four"),
+        6: ("1/2", "1 / 2", "Real.sin_pi_div_six"),
+        8: (
+            "sqrt(2 - sqrt(2))/2",
+            "Real.sqrt (2 - Real.sqrt 2) / 2",
+            "Real.sin_pi_div_eight",
+        ),
+        16: (
+            "sqrt(2 - sqrt(2 + sqrt(2)))/2",
+            "Real.sqrt (2 - Real.sqrt (2 + Real.sqrt 2)) / 2",
+            "Real.sin_pi_div_sixteen",
+        ),
+        32: (
+            "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Real.sqrt (2 - Real.sqrt (2 + Real.sqrt (2 + Real.sqrt 2))) / 2",
+            "Real.sin_pi_div_thirty_two",
+        ),
+    },
+    "cos": {
+        1: ("-1", "-1", "Real.cos_pi"),
+        2: ("0", "0", "Real.cos_pi_div_two"),
+        3: ("1/2", "1 / 2", "Real.cos_pi_div_three"),
+        4: ("sqrt(2)/2", "Real.sqrt 2 / 2", "Real.cos_pi_div_four"),
+        6: ("sqrt(3)/2", "Real.sqrt 3 / 2", "Real.cos_pi_div_six"),
+        8: (
+            "sqrt(2 + sqrt(2))/2",
+            "Real.sqrt (2 + Real.sqrt 2) / 2",
+            "Real.cos_pi_div_eight",
+        ),
+        16: (
+            "sqrt(2 + sqrt(2 + sqrt(2)))/2",
+            "Real.sqrt (2 + Real.sqrt (2 + Real.sqrt 2)) / 2",
+            "Real.cos_pi_div_sixteen",
+        ),
+        32: (
+            "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Real.sqrt (2 + Real.sqrt (2 + Real.sqrt (2 + Real.sqrt 2))) / 2",
+            "Real.cos_pi_div_thirty_two",
+        ),
+    },
+    "tan": {
+        1: ("0", "0", "Real.tan_pi"),
+        3: ("sqrt(3)", "Real.sqrt 3", "Real.tan_pi_div_three"),
+        4: ("1", "1", "Real.tan_pi_div_four"),
+        6: ("1/sqrt(3)", "1 / Real.sqrt 3", "Real.tan_pi_div_six"),
+    },
+}
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
     # Wolfram Language uses case-sensitive `Pi`; the shared parser reserves lowercase `pi`.
     if re.search(r"\bpi\b|π", code):
         return None
-    if re.fullmatch(r"\s*Sin\s*\[\s*Pi\s*\]\s*", code):
-        source = """import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
-
-theorem wolfram_language_compute : Real.sin Real.pi = 0 := by
-  simp
-
-#print axioms wolfram_language_compute
-"""
-        return Computation("0", source)
+    exact_trig_constant = _prepare_exact_pi_trigonometric_constant(code)
+    if exact_trig_constant is not None:
+        return exact_trig_constant
 
     trig_expand = re.fullmatch(
         r"(?is)\s*TrigExpand\s*(?:@\s*(?P<at_expression>.+?)|\[\s*(?P<bracket_expression>.*)\s*\])\s*",
@@ -191,6 +239,48 @@ theorem wolfram_language_compute : Real.sin Real.pi = 0 := by
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
+    match = re.fullmatch(
+        r"(?is)\s*(?P<function>Sin|Cos|Tan)\s*\[\s*"
+        r"(?P<sign>[+-]?)\s*Pi(?:\s*/\s*(?P<denominator>\d+))?\s*\]\s*",
+        code,
+    )
+    if match is None:
+        return None
+
+    function = match.group("function").lower()
+    denominator = int(match.group("denominator") or "1")
+    value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(denominator)
+    if value is None:
+        return None
+
+    display_result, lean_result, lemma = value
+    negative = match.group("sign") == "-"
+    if negative and function in {"sin", "tan"} and display_result != "0":
+        display_result = f"-{display_result}"
+        lean_result = f"-({lean_result})"
+
+    angle = "Real.pi" if denominator == 1 else f"(Real.pi / {denominator})"
+    if negative:
+        angle = f"(-{angle})"
+    lean_function = f"Real.{function}"
+    proof = (
+        f"by\n  rw [Real.{function}_neg, {lemma}]"
+        if negative
+        else f"by\n  rw [{lemma}]"
+    )
+    if negative and function in {"sin", "tan"} and display_result == "0":
+        proof += "\n  norm_num"
+    source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
+
+theorem wolfram_language_compute :
+    {lean_function} {angle} = {lean_result} := {proof}
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(display_result, source)
 
 
 def _prepare_finite_sum_product(
