@@ -18,6 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set up Lean and Mathlib
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build: false
+          test: false
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
