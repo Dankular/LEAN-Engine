@@ -167,6 +167,7 @@ def async_pod_descriptor(
     latlong: str | None = None,
     units: str | None = None,
     assumptions: list[str] | None = None,
+    series_offset: int = 0,
 ) -> tuple[str, str, str]:
     try:
         gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
@@ -177,12 +178,24 @@ def async_pod_descriptor(
         request = (
             gdp_resolution[0]
             if gdp_resolution is not None
-            else _provider_request(input_text, location, latlong, units)
+            else _provider_request(input_text, location, latlong, units, series_offset)
         )
     except ProviderAssumptionNeeded:
         raise
     except ProviderContextNeeded:
+        if series_offset:
+            raise FullResultsRequestError(
+                "seriesoffset is only supported for DBnomics series search"
+            )
         return "Result", "Result", "Mathematical"
+    if series_offset and not (
+        request is not None
+        and request.provider == "dbnomics"
+        and request.operation == "series_search"
+    ):
+        raise FullResultsRequestError(
+            "seriesoffset is only supported for DBnomics series search"
+        )
     if request is None:
         if numeric_date_options(input_text) is not None:
             return "Date", "Result", "Date"
@@ -198,7 +211,11 @@ def async_pod_descriptor(
         "dbnomics": (
             ("Economic datasets", "EconomicDatasetSearch", "Data")
             if request.operation == "search"
-            else ("Economic time series", "EconomicSeries", "Data")
+            else (
+                ("Economic series matches", "EconomicSeriesSearch", "Data")
+                if request.operation == "series_search"
+                else ("Economic time series", "EconomicSeries", "Data")
+            )
         ),
         "geonames": ("Place matches", "PlaceSearch", "Data"),
     }[request.provider]
@@ -350,6 +367,7 @@ def execute_query(
     location: str | None = None,
     latlong: str | None = None,
     units: str | None = None,
+    series_offset: int = 0,
     pod_states: list[str] | None = None,
     include_pod_ids: list[str] | None = None,
     exclude_pod_ids: list[str] | None = None,
@@ -385,7 +403,9 @@ def execute_query(
                 "location, latlong, and units are currently supported for weather queries"
             )
         if gdp_resolution is None:
-            provider_request = _provider_request(input_text, location, latlong, units)
+            provider_request = _provider_request(
+                input_text, location, latlong, units, series_offset
+            )
             provider_assumptions: list[dict[str, Any]] = []
         else:
             provider_request, gdp_assumption = gdp_resolution
@@ -397,6 +417,14 @@ def execute_query(
     except ProviderContextNeeded as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     provider_parse_timing = perf_counter() - provider_parse_started
+    if series_offset and not (
+        provider_request is not None
+        and provider_request.provider == "dbnomics"
+        and provider_request.operation == "series_search"
+    ):
+        raise FullResultsRequestError(
+            "seriesoffset is only supported for DBnomics series search"
+        )
     if provider_request is not None:
         if requested_pod_states:
             raise FullResultsRequestError(
@@ -1128,6 +1156,7 @@ def validate_query(
     location: str | None = None,
     latlong: str | None = None,
     units: str | None = None,
+    series_offset: int = 0,
     ignorecase: bool = False,
     parse_timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
@@ -1140,11 +1169,21 @@ def validate_query(
                 "location, latlong, and units are currently supported for weather queries"
             )
         if gdp_resolution is None:
-            provider_request = _provider_request(input_text, location, latlong, units)
+            provider_request = _provider_request(
+                input_text, location, latlong, units, series_offset
+            )
             provider_assumptions: list[dict[str, Any]] = []
         else:
             provider_request, gdp_assumption = gdp_resolution
             provider_assumptions = [gdp_assumption]
+        if series_offset and not (
+            provider_request is not None
+            and provider_request.provider == "dbnomics"
+            and provider_request.operation == "series_search"
+        ):
+            raise FullResultsRequestError(
+                "seriesoffset is only supported for DBnomics series search"
+            )
         if provider_request is not None:
             if assumptions and not provider_assumptions:
                 raise AssumptionSelectionError(
@@ -1271,6 +1310,7 @@ def _provider_request(
     location: str | None,
     latlong: str | None,
     units: str | None,
+    series_offset: int = 0,
 ) -> KnowledgeRequest | None:
     unit_system = units.strip().lower() if units is not None else None
     if unit_system is not None and unit_system not in {"metric", "nonmetric"}:
@@ -1451,6 +1491,26 @@ def _provider_request(
         if not query:
             raise FullResultsRequestError("place search needs a non-empty query")
         return _knowledge_request(provider="geonames", operation="search", query=query)
+
+    series_search = re.fullmatch(
+        r"\s*(?:series|dbnomics)\s+search\s*:\s*(.+?)\s+(?:within|in)\s+"
+        r"([^/\s]+)/([^/\s]+)\s*[?.!]*\s*",
+        input_text,
+        re.I,
+    )
+    if series_search:
+        query = series_search.group(1).strip()
+        if not query:
+            raise FullResultsRequestError("DBnomics series search needs a non-empty query")
+        return _knowledge_request(
+            provider="dbnomics",
+            operation="series_search",
+            query=query,
+            provider_code=series_search.group(2),
+            dataset_code=series_search.group(3),
+            max_results=5,
+            offset=series_offset,
+        )
 
     series_search = re.fullmatch(
         r"\s*(?:series|dbnomics)\s+search\s*:\s*(.+?)\s*[?.!]*\s*",
@@ -1719,7 +1779,15 @@ def _execute_provider_query(
             ),
             "nist_codata": "Physical constant",
             "wikidata": _wikidata_async_descriptor(request)[0],
-            "dbnomics": "Economic datasets" if request.operation == "search" else "Economic time series",
+            "dbnomics": (
+                "Economic datasets"
+                if request.operation == "search"
+                else (
+                    "Economic series matches"
+                    if request.operation == "series_search"
+                    else "Economic time series"
+                )
+            ),
             "geonames": "Place matches",
         }
         format_budget = _FormatStageBudget(
@@ -1809,7 +1877,11 @@ def _execute_provider_query(
         "dbnomics": (
             ("Economic datasets", "EconomicDatasetSearch", "Economics")
             if request.operation == "search"
-            else ("Economic time series", "EconomicSeries", "Economics")
+            else (
+                ("Economic series matches", "EconomicSeriesSearch", "Economics")
+                if request.operation == "series_search"
+                else ("Economic time series", "EconomicSeries", "Economics")
+            )
         ),
         "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
@@ -1933,9 +2005,13 @@ def _execute_provider_query(
                 "DBnomics full-text dataset search; results are ranked candidates"
                 if request.provider == "dbnomics" and request.operation == "search"
                 else (
-                    "Wikidata label search; ranked entity candidates are retained"
-                    if request.provider == "wikidata" and _wikidata_property_id(request) is not None
-                    else "explicit query pattern or supported constant alias"
+                    "DBnomics full-text series search within the selected dataset; results are ranked candidates"
+                    if request.provider == "dbnomics" and request.operation == "series_search"
+                    else (
+                        "Wikidata label search; ranked entity candidates are retained"
+                        if request.provider == "wikidata" and _wikidata_property_id(request) is not None
+                        else "explicit query pattern or supported constant alias"
+                    )
                 )
             ),
             "ranks_candidates_only": True,
@@ -1950,7 +2026,11 @@ def _execute_provider_query(
             else (
                 "DBnomics search results are dataset candidates. Select a provider and dataset explicitly, then request a specific series; no dataset is selected automatically. Retrieved data is not a formal proof."
                 if request.provider == "dbnomics" and request.operation == "search"
-                else knowledge["qualification"]
+                else (
+                    "DBnomics series search results are candidates within the selected provider and dataset. Select a series code explicitly before requesting observations; no series is selected automatically. Retrieved data is not a formal proof."
+                    if request.provider == "dbnomics" and request.operation == "series_search"
+                    else knowledge["qualification"]
+                )
             )
         ),
         sources=knowledge["sources"],
@@ -2147,6 +2227,22 @@ def _provider_plaintext(provider: str, data: Any) -> str:
     if provider == "dbnomics" and isinstance(data, dict):
         candidates = data.get("candidates")
         if isinstance(candidates, list):
+            if data.get("search_kind") == "series":
+                blocks = []
+                for candidate in candidates[:10]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    name = candidate.get("name") or candidate.get("series_code") or "Series"
+                    code = candidate.get("series_code")
+                    label = f"{name} [{code}]" if code else str(name)
+                    dimensions = candidate.get("dimensions")
+                    if isinstance(dimensions, dict) and dimensions:
+                        rendered_dimensions = ", ".join(
+                            f"{key}={value}" for key, value in sorted(dimensions.items())
+                        )
+                        label += f" ({rendered_dimensions})"
+                    blocks.append(label)
+                return "\n".join(blocks) if blocks else "No matching DBnomics series were found."
             blocks = []
             for candidate in candidates[:10]:
                 if not isinstance(candidate, dict):

@@ -20,7 +20,7 @@ from .models import StrictModel
 class KnowledgeRequest(StrictModel):
     provider: Literal["wikidata", "dbnomics", "nist_codata", "geonames", "open_meteo"]
     operation: Literal[
-        "search", "entity", "population", "capital", "property", "series", "constant", "weather", "weather_forecast"
+        "search", "entity", "population", "capital", "property", "series", "series_search", "constant", "weather", "weather_forecast"
     ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
@@ -37,13 +37,14 @@ class KnowledgeRequest(StrictModel):
     units: Literal["metric", "nonmetric"] | None = None
     language: str = Field(default="en", pattern=r"^[a-z]{2}$")
     max_results: int = Field(default=5, ge=1, le=10)
+    offset: int = Field(default=0, ge=0, le=10000)
     timeout_seconds: int = Field(default=10, ge=1, le=20)
 
     @model_validator(mode="after")
     def validate_provider_operation(self) -> KnowledgeRequest:
         expected = {
             "wikidata": {"search", "entity", "population", "capital", "property"},
-            "dbnomics": {"search", "series"},
+            "dbnomics": {"search", "series", "series_search"},
             "nist_codata": {"constant"},
             "geonames": {"search"},
             "open_meteo": {"weather", "weather_forecast"},
@@ -66,6 +67,12 @@ class KnowledgeRequest(StrictModel):
                 raise ValueError("DBnomics dataset search requires query")
             if self.operation == "series" and not all((self.provider_code, self.dataset_code, self.series_code)):
                 raise ValueError("DBnomics series lookup requires provider_code, dataset_code, and series_code")
+            if self.operation == "series_search" and not all(
+                (self.query, self.provider_code, self.dataset_code)
+            ):
+                raise ValueError(
+                    "DBnomics series search requires query, provider_code, and dataset_code"
+                )
         elif self.provider == "nist_codata" and self.constant is None:
             raise ValueError("NIST lookup requires constant")
         elif self.provider == "geonames" and self.query is None:
@@ -706,7 +713,7 @@ def _dbnomics(
 ) -> tuple[object, dict[str, str]]:
     if request.operation == "search":
         url = "https://api.db.nomics.world/v22/search?" + urlencode(
-            {"q": request.query or "", "limit": request.max_results}
+            {"q": request.query or "", "limit": request.max_results, "offset": request.offset}
         )
         response = _request_json(url, request.timeout_seconds, deadline)
         results = response.get("results")
@@ -748,6 +755,7 @@ def _dbnomics(
         meta = response.get("_meta")
         args = meta.get("args") if isinstance(meta, dict) else None
         return {
+            "search_kind": "datasets",
             "query": request.query,
             "num_found": results.get("num_found"),
             "limit": args.get("limit") if isinstance(args, dict) else request.max_results,
@@ -758,6 +766,62 @@ def _dbnomics(
             "name": "DBnomics Web API dataset search",
             "url": url,
             "license": "Dataset-specific; consult the original series provider",
+        }
+    if request.operation == "series_search":
+        provider = quote(request.provider_code or "", safe="")
+        dataset = quote(request.dataset_code or "", safe="")
+        url = (
+            f"https://api.db.nomics.world/v22/series/{provider}/{dataset}?"
+            + urlencode({
+                "q": request.query or "",
+                "limit": request.max_results,
+                "offset": request.offset,
+            })
+        )
+        response = _request_json(url, request.timeout_seconds, deadline)
+        series_result = response.get("series")
+        docs = series_result.get("docs") if isinstance(series_result, dict) else None
+        if not isinstance(docs, list):
+            raise KnowledgeProviderError("DBnomics returned an invalid series search response")
+        candidates: list[dict[str, object]] = []
+        for rank, item in enumerate(docs[: request.max_results], start=request.offset + 1):
+            if not isinstance(item, dict):
+                continue
+            series_code = item.get("series_code")
+            if not isinstance(series_code, str) or not series_code:
+                continue
+            candidate: dict[str, object] = {
+                "id": f"dbnomics:series:{provider}/{dataset}/{quote(series_code, safe='')}",
+                "rank": rank,
+                "provider_code": item.get("provider_code") or request.provider_code,
+                "dataset_code": item.get("dataset_code") or request.dataset_code,
+                "series_code": series_code,
+                "name": item.get("series_name") or series_code,
+                "url": f"https://db.nomics.world/{provider}/{dataset}/{quote(series_code, safe='')}",
+            }
+            dimensions = item.get("dimensions")
+            if isinstance(dimensions, dict):
+                candidate["dimensions"] = dimensions
+            indexed_at = item.get("indexed_at")
+            if isinstance(indexed_at, str):
+                candidate["indexed_at"] = indexed_at
+            candidates.append(candidate)
+        meta = response.get("_meta")
+        args = meta.get("args") if isinstance(meta, dict) else None
+        return {
+            "search_kind": "series",
+            "query": request.query,
+            "provider_code": request.provider_code,
+            "dataset_code": request.dataset_code,
+            "num_found": series_result.get("num_found"),
+            "limit": args.get("limit") if isinstance(args, dict) else request.max_results,
+            "offset": args.get("offset") if isinstance(args, dict) else request.offset,
+            "candidates": candidates,
+            "selection_required": bool(candidates),
+        }, {
+            "name": "DBnomics Web API series search",
+            "url": url,
+            "license": "Provider-specific; consult the original series provider",
         }
     provider = quote(request.provider_code or "", safe="")
     dataset = quote(request.dataset_code or "", safe="")

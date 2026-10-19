@@ -256,7 +256,18 @@ def capabilities() -> dict[str, object]:
         },
         "factual_sources": {
             "wikidata": {"coverage": "entity search and entity records; allowlisted country (P17), continent (P30), capital (P36), official language (P37), currency (P38), population (P1082), nominal GDP (P2131), GDP at purchasing power parity (P4010), nominal GDP per capita (P2132), and PPP GDP per capita (P2299) retrieval with ranked candidates; ambiguous GDP and GDP per capita queries require explicit typed assumptions", "status": "implemented_initial_slice"},
-            "dbnomics": {"coverage": "ranked full-text dataset discovery and exact individual time-series retrieval; search results require caller selection", "status": "implemented_initial_slice"},
+            "dbnomics": {
+                "coverage": "ranked full-text dataset discovery, bounded full-text series discovery within a selected provider/dataset, and exact individual time-series retrieval; search results require caller selection",
+                "series_search": {
+                    "syntax": "series search: <phrase> within <provider>/<dataset>",
+                    "query_offset_parameter": "seriesoffset",
+                    "knowledge_request_offset_field": "offset",
+                    "default_limit": 5,
+                    "maximum_offset": 10000,
+                    "selection_required": True,
+                },
+                "status": "implemented_initial_slice",
+            },
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},
             "open_meteo": {"coverage": "current weather and seven-day forecasts by location or coordinates; forecast chart included", "status": "implemented"},
@@ -721,6 +732,10 @@ def full_results_query(
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
+    seriesoffset: Annotated[
+        int,
+        Query(ge=0, le=10000, description="Page offset for DBnomics series search"),
+    ] = 0,
     ignorecase: Annotated[bool, Query()] = False,
     verify: Annotated[
         bool,
@@ -807,6 +822,7 @@ def full_results_query(
                 location=location,
                 latlong=latlong,
                 units=units,
+                series_offset=seriesoffset,
                 pod_states=podstate,
                 include_pod_ids=includepodid,
                 exclude_pod_ids=excludepodid,
@@ -861,6 +877,7 @@ def full_results_query(
                     latlong=latlong,
                     units=units,
                     assumptions=assumption,
+                    series_offset=seriesoffset,
                 )
             except ProviderAssumptionNeeded:
                 return render_response(run_query(), selected_output)
@@ -1233,6 +1250,7 @@ def full_results_validatequery(
     location: Annotated[str | None, Query()] = None,
     latlong: Annotated[str | None, Query()] = None,
     units: Annotated[str | None, Query()] = None,
+    seriesoffset: Annotated[int, Query(ge=0, le=10000)] = 0,
     ignorecase: Annotated[bool, Query()] = False,
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
 ) -> Response:
@@ -1253,6 +1271,7 @@ def full_results_validatequery(
     try:
         payload = validate_query(
             input, assumption, location=location, latlong=latlong, units=units,
+            series_offset=seriesoffset,
             ignorecase=ignorecase, parse_timeout_seconds=parsetimeout,
         )
     except AssumptionSelectionError as exc:
