@@ -353,6 +353,7 @@ def capabilities() -> dict[str, object]:
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
+                    "pod_provenance": "Every Input, Result, DecimalApproximation, and Data pod includes source, evidence_kind, and verified; provider sources remain retrieved facts, and computation pods identify their engine and any Lean proof checker used",
                 },
                 "time_controls": {
                     "parsetimeout": {

@@ -3304,6 +3304,7 @@ def _query_envelope(
     retrieved_at: str | None = None,
     data: Any = None,
 ) -> dict[str, Any]:
+    _attach_pod_provenance(pods, evidence=evidence, sources=sources)
     result: dict[str, Any] = _base_queryresult(
         success=success,
         error=error,
@@ -3336,6 +3337,50 @@ def _query_envelope(
     if data is not None:
         result["data"] = data
     return {"queryresult": result}
+
+
+def _attach_pod_provenance(
+    pods: list[dict[str, Any]],
+    *,
+    evidence: dict[str, Any] | None,
+    sources: list[dict[str, Any]] | None,
+) -> None:
+    """Give each pod local source and verification metadata for downstream consumers."""
+    query_evidence = evidence or {}
+    query_sources = [source for source in (sources or []) if isinstance(source, dict)]
+    evidence_kind = str(query_evidence.get("kind", "computed_result"))
+    verified = query_evidence.get("verified") is True
+    engine = query_evidence.get("engine")
+    provider = query_evidence.get("provider")
+    formal = query_evidence.get("formal_verification")
+
+    for pod in pods:
+        if pod.get("id") == "Input":
+            pod_source = [{"name": "LEAN Engine", "component": "input_interpreter"}]
+            pod_kind = "input_interpretation"
+            pod_verified = False
+        elif query_sources:
+            pod_source = [dict(source) for source in query_sources]
+            pod_kind = evidence_kind
+            pod_verified = verified
+        elif provider:
+            pod_source = [{"name": str(provider), "component": "data_provider"}]
+            pod_kind = evidence_kind
+            pod_verified = verified
+        else:
+            engine_name = str(engine) if engine else "LEAN Engine"
+            pod_source = [{"name": engine_name, "component": "computation_engine"}]
+            if isinstance(formal, dict) and formal.get("verified") is True:
+                pod_source.append({
+                    "name": "Lean 4 + Mathlib",
+                    "component": "proof_checker",
+                })
+            pod_kind = evidence_kind
+            pod_verified = verified
+
+        pod.setdefault("source", pod_source)
+        pod.setdefault("evidence_kind", pod_kind)
+        pod.setdefault("verified", pod_verified)
 
 
 def _base_queryresult(
