@@ -456,8 +456,8 @@ def capabilities() -> dict[str, object]:
                     "syntax": "Integrate[expression, {variable, lower, upper}]",
                     "proof": "Lean-checked antiderivative plus the interval fundamental theorem of calculus; axiom audit",
                     "bounds": "exact rational numeric expressions",
-                    "limits": "bounded real-calculus grammar with exact rational bounds; selected variable-denominator cases are supported and unresolved interval-wide nonzero conditions are returned; affine Sech arguments with rational nonzero slopes return the exact arctan-sinh endpoint difference without extra conditions; affine Csch arguments with rational nonzero slopes are supported when the argument has the same nonzero sign at both bounds, with interval-wide Sinh[argument] and Tanh[argument/2] nonzero conditions; intervals crossing a Csch pole are rejected; other free variables are real parameters",
-                    "examples": ["Integrate[Sech[x], {x, 0, 1}]", "Integrate[Sech[x/2+1], {x, 0, 2}]", "Integrate[Csch[x], {x, 1, 2}]", "Integrate[Csch[x/2+1], {x, 0, 2}]"],
+                    "limits": "bounded real-calculus grammar with exact rational bounds; selected variable-denominator cases are supported and unresolved interval-wide nonzero conditions are returned; affine Sech arguments with rational nonzero slopes return the exact arctan-sinh endpoint difference without extra conditions; affine Coth and Csch arguments with rational nonzero slopes are supported when the argument has the same nonzero sign at both bounds, with interval-wide Sinh[argument] nonzero conditions, plus Tanh[argument/2] nonzero conditions for Csch; intervals crossing Coth or Csch poles are rejected; other free variables are real parameters",
+                    "examples": ["Integrate[Sech[x], {x, 0, 1}]", "Integrate[Sech[x/2+1], {x, 0, 2}]", "Integrate[Coth[x], {x, 1, 2}]", "Integrate[Coth[-2x-1], {x, 0, 1}]", "Integrate[Csch[x], {x, 1, 2}]", "Integrate[Csch[x/2+1], {x, 0, 2}]"],
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
@@ -465,7 +465,7 @@ def capabilities() -> dict[str, object]:
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative", "Integrate[Csch[x], {x, -1, 1}] pole-crossing definite integral"],
+                    "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative", "Integrate[Coth[x], {x, -1, 1}] pole-crossing definite integral", "Integrate[Csch[x], {x, -1, 1}] pole-crossing definite integral"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"

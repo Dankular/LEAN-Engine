@@ -150,6 +150,11 @@ service returns the explicit pole condition `Sinh[f(x)] ≠ 0`. Indefinite
 integrals of `Coth[a*x+b]` are supported for rational nonzero `a`; the candidate
 `log(Abs(Sinh[a*x+b]))/a` is returned only after Lean checks its derivative,
 with the same nonzero-sinh condition in the evidence.
+Definite `Integrate[Coth[a*x+b], {x,l,u}]` also supports rational nonzero slopes
+and exact rational bounds when the affine argument has the same nonzero sign at
+both endpoints. Lean checks the exact endpoint log-sinh difference through the
+interval fundamental theorem and returns an interval-wide `Sinh[argument] != 0`
+condition. Bounds containing or crossing a Coth pole are rejected.
 
 `Sech` and `Csch` derivatives are also checked for bounded real compositions.
 `Sech` is represented as `1/Cosh[argument]`; Lean derives the required
