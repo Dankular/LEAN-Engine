@@ -309,6 +309,7 @@ def _prepare_real_rational_limit(
     point = _parse_exact_rational(point_source)
     point_tree: ast.Expression | None = None
     point_symbols: set[str] = set()
+    symbolic_singularity = False
     if point is not None:
         if (
             abs(point.numerator).bit_length() > 256
@@ -342,10 +343,9 @@ def _prepare_real_rational_limit(
             return None
         point_expression = parsed_point.expression
         point_display = point_expression.replace("**", "^")
-        if _rational_denominator_vanishes_at_symbolic_point(
+        symbolic_singularity = _rational_denominator_vanishes_at_symbolic_point(
             expression_tree.body, variable, point_tree.body
-        ):
-            return None
+        )
 
     symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
     symbolic = run_symbolic(SymbolicRequest(
@@ -372,6 +372,25 @@ def _prepare_real_rational_limit(
         result_tree = ast.parse(result, mode="eval")
     except (SyntaxError, RecursionError, ValueError):
         return None
+
+    if symbolic_singularity:
+        remaining_symbolic_time = symbolic_deadline - monotonic()
+        if remaining_symbolic_time <= 0.001:
+            return Computation("", "", timed_out=True)
+        if point_tree is None:
+            return None
+        return _prepare_removable_rational_limit(
+            parsed.expression,
+            expression_tree,
+            result,
+            variable,
+            point,
+            point_lean,
+            point_display,
+            point_tree.body,
+            point_symbols,
+            remaining_symbolic_time,
+        )
 
     used_names = set(expression_symbols) | set(result_symbols) | set(point_symbols) | {variable}
     limit_variable = _fresh_identifier("limit_variable", used_names)
@@ -420,6 +439,10 @@ def _prepare_real_rational_limit(
             result,
             variable,
             point,
+            point_lean,
+            point_display,
+            None,
+            point_symbols,
             remaining_symbolic_time,
         )
 
@@ -699,7 +722,11 @@ def _prepare_removable_rational_limit(
     expression_tree: ast.Expression,
     limit_result: str,
     variable: str,
-    point: Fraction,
+    point: Fraction | None,
+    point_lean: str,
+    point_display: str,
+    point_tree: ast.AST | None,
+    point_symbols: set[str],
     time_limit_seconds: float,
 ) -> Computation | None:
     simplified = run_symbolic(SymbolicRequest(
@@ -728,13 +755,28 @@ def _prepare_removable_rational_limit(
         return None
     vanishing_denominators: list[tuple[ast.AST, Fraction, int]] = []
     for denominator in denominators:
-        denominator_value = _exact_rational_node_value(denominator, variable, point)
-        vanishing_factor = _vanishing_affine_power(denominator, variable, point)
-        if denominator_value != 0 or vanishing_factor is None:
-            return None
+        if point is not None:
+            denominator_value = _exact_rational_node_value(
+                denominator, variable, point
+            )
+            vanishing_factor = _vanishing_affine_power(
+                denominator, variable, point
+            )
+            if denominator_value != 0 or vanishing_factor is None:
+                return None
+        else:
+            if point_tree is None:
+                return None
+            vanishing_factor = _vanishing_affine_power_at_symbolic_point(
+                denominator, variable, point_tree
+            )
+            if vanishing_factor is None:
+                return None
         vanishing_denominators.append((denominator, *vanishing_factor))
 
-    used_names = expression_symbols | simplified_symbols | result_symbols
+    used_names = (
+        expression_symbols | simplified_symbols | result_symbols | point_symbols | {variable}
+    )
     limit_variable = _fresh_identifier("limit_variable", used_names)
     expression = _render_rational_limit_node(
         expression_tree.body,
@@ -755,7 +797,7 @@ def _prepare_removable_rational_limit(
         set(),
         {"nodes": 0},
         0,
-        substitutions={variable: _lean_rational(point)},
+        substitutions={variable: point_lean},
     )
     if expression is None or simplified_expression is None or simplified_value is None:
         return None
@@ -774,8 +816,8 @@ def _prepare_removable_rational_limit(
         simplified_tree.body,
         variable,
         point,
-        _lean_rational(point),
-        _fraction_text(point),
+        point_lean,
+        point_display,
         continuity_state,
         0,
     )
@@ -783,12 +825,11 @@ def _prepare_removable_rational_limit(
         return None
 
     theorem_symbols = sorted(
-        (expression_symbols | simplified_symbols | result_symbols)
+        (expression_symbols | simplified_symbols | result_symbols | point_symbols)
         - {variable, limit_variable}
     )
     binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
     theorem_binders = f" {binders}" if binders else ""
-    point_lean = _lean_rational(point)
     hcont = _fresh_identifier("h_limit_continuous", used_names)
     hvalue = _fresh_identifier("h_limit_value", used_names)
     heq = _fresh_identifier("h_limit_eventual_eq", used_names)
@@ -883,12 +924,14 @@ def _vanishing_affine_power(
 ) -> tuple[Fraction, int] | None:
     exponent = 1
     affine_node = node
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
-        power = _constant_fraction(node.right)
+    while isinstance(affine_node, ast.BinOp) and isinstance(affine_node.op, ast.Pow):
+        power = _constant_fraction(affine_node.right)
         if power is None or power.denominator != 1 or not 1 <= power <= 16:
             return None
-        exponent = power.numerator
-        affine_node = node.left
+        exponent *= power.numerator
+        if exponent > 16:
+            return None
+        affine_node = affine_node.left
     linear = _linear_rational_form(affine_node, variable)
     if linear is None:
         return None
@@ -896,6 +939,52 @@ def _vanishing_affine_power(
     if slope == 0 or slope * point + intercept != 0:
         return None
     return slope, exponent
+
+
+def _vanishing_affine_power_at_symbolic_point(
+    node: ast.AST,
+    variable: str,
+    point: ast.AST,
+) -> tuple[Fraction, int] | None:
+    import sympy as _sympy
+
+    exponent = 1
+    affine_node = node
+    while isinstance(affine_node, ast.BinOp) and isinstance(affine_node.op, ast.Pow):
+        power = _constant_fraction(affine_node.right)
+        if power is None or power.denominator != 1 or not 1 <= power <= 16:
+            return None
+        exponent *= power.numerator
+        if exponent > 16:
+            return None
+        affine_node = affine_node.left
+
+    affine_expression = _real_sympy_expression(affine_node)
+    point_expression = _real_sympy_expression(point)
+    if affine_expression is None or point_expression is None:
+        return None
+    symbol = _sympy.Symbol(variable)
+    try:
+        slope = _sympy.simplify(_sympy.diff(affine_expression, symbol))
+        intercept = _sympy.simplify(affine_expression - slope * symbol)
+        at_point = _sympy.simplify(affine_expression.subs(symbol, point_expression))
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if (
+        slope.has(symbol)
+        or intercept.has(symbol)
+        or not slope.is_Rational
+        or slope == 0
+        or not (at_point == 0 or at_point.is_zero is True)
+    ):
+        return None
+    slope_fraction = Fraction(int(slope.p), int(slope.q))
+    if (
+        abs(slope_fraction.numerator).bit_length() > 256
+        or slope_fraction.denominator.bit_length() > 256
+    ):
+        return None
+    return slope_fraction, exponent
 
 
 def _linear_rational_form(
