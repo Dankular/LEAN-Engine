@@ -10,6 +10,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      LEAN_PROJECT_DIR: ${{ github.workspace }}/lean
     strategy:
       fail-fast: false
       matrix:
