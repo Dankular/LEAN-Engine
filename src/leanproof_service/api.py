@@ -420,18 +420,18 @@ def capabilities() -> dict[str, object]:
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "functions": [
                         "Sin", "Cos", "Tan", "Sec", "Csc", "Cot", "ArcSin", "ArcCos",
-                        "ArcTan", "ArcSinh", "Sqrt", "Exp", "Sinh", "Cosh", "Log",
+                        "ArcTan", "ArcSinh", "ArcCosh", "Sqrt", "Exp", "Sinh", "Cosh", "Log",
                     ],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
-                    "domain_conditions": "Tan and Sec arguments require nonzero cosine; Csc and Cot arguments require nonzero sine; ArcSin and ArcCos arguments require strict bounds between -1 and 1; variable Sqrt arguments require positivity; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
+                    "domain_conditions": "Tan and Sec arguments require nonzero cosine; Csc and Cot arguments require nonzero sine; ArcSin and ArcCos arguments require strict bounds between -1 and 1; variable ArcCosh arguments require values greater than 1; variable Sqrt arguments require positivity; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
                     "result_semantics": "one antiderivative representative; additive constant omitted; generated real logarithms use log(abs(argument)) where required",
-                    "functions": ["Sin", "Cos", "Tan", "Sec", "Csc", "Cot", "ArcSin", "ArcCos", "ArcTan", "ArcSinh", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
-                    "limits": "bounded exact expressions; selected variable-denominator, logarithmic, square-root, reciprocal-trigonometric, tangent, inverse-trigonometric, and inverse-hyperbolic antiderivatives are accepted only when Lean checks the result, with required domain conditions returned; examples include Integrate[Sec[x]^2, x], Integrate[Csc[x]^2, x], Integrate[Cot[x]^2, x], Integrate[ArcSin[x], x], Integrate[ArcCos[x], x], Integrate[1/Sqrt[1+x^2], x], and Integrate[ArcSinh[x], x]",
-                    "domain_conditions": "submitted Log and variable Sqrt arguments require positivity; inverse-trigonometric results require strict argument bounds between -1 and 1; Sec antiderivatives require nonzero cosine and Csc/Cot antiderivatives require nonzero sine; selected inverse-hyperbolic antiderivatives return positivity and denominator conditions when required by their generated expressions; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
+                    "functions": ["Sin", "Cos", "Tan", "Sec", "Csc", "Cot", "ArcSin", "ArcCos", "ArcTan", "ArcSinh", "ArcCosh", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
+                    "limits": "bounded exact expressions; selected variable-denominator, logarithmic, square-root, reciprocal-trigonometric, tangent, inverse-trigonometric, and inverse-hyperbolic antiderivatives are accepted only when Lean checks the result, with required domain conditions returned; examples include Integrate[Sec[x]^2, x], Integrate[Csc[x]^2, x], Integrate[Cot[x]^2, x], Integrate[ArcSin[x], x], Integrate[ArcCos[x], x], Integrate[1/Sqrt[1+x^2], x], Integrate[ArcSinh[x], x], Integrate[1/Sqrt[x^2-1], x], and Integrate[ArcCosh[x], x]",
+                    "domain_conditions": "submitted Log and variable Sqrt arguments require positivity; inverse-trigonometric results require strict argument bounds between -1 and 1; ArcCosh results require the argument greater than 1; Sec antiderivatives require nonzero cosine and Csc/Cot antiderivatives require nonzero sine; selected inverse-hyperbolic antiderivatives return positivity and denominator conditions when required by their generated expressions; selected denominator poles and generated real logarithm or tangent-pole conditions require nonzero conditions; returned in evidence.domain_conditions",
                 },
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",
@@ -453,7 +453,7 @@ def capabilities() -> dict[str, object]:
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
-                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "ArcSinh", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "ArcSinh", "ArcCosh", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,

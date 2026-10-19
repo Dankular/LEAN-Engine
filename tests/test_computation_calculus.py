@@ -112,6 +112,32 @@ class InverseHyperbolicCalculusTests(unittest.TestCase):
                 if code == "Integrate[1/Sqrt[1+x^2], x]":
                     self.assertIn("1 + x ^ 2 > 0", computation.domain_conditions)
 
+    def test_inverse_hyperbolic_cosine_has_strict_real_domain_conditions(self) -> None:
+        self.assertEqual(
+            parse_math_input(r"\operatorname{arccosh}(x)").expression,
+            "acosh(x)",
+        )
+        derivative = prepare_computation("D[ArcCosh[x], x]", 10)
+        self.assertIsNotNone(derivative)
+        assert derivative is not None
+        self.assertEqual(derivative.display_result, "1/sqrt(x^2 - 1)")
+        self.assertEqual(derivative.domain_conditions, ("x > 1",))
+        self.assertIn("Real.hasDerivAt_arcosh", derivative.lean_source)
+
+        cases = {
+            "Integrate[1/Sqrt[x^2-1], x]": "log(Abs(x + sqrt(x^2 - 1)))",
+            "Integrate[ArcCosh[x], x]": "x*acosh(x) - sqrt(x^2 - 1)",
+        }
+        for code, expected_result in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected_result)
+                self.assertIn("HasDerivAt", computation.lean_source)
+                if code == "Integrate[ArcCosh[x], x]":
+                    self.assertIn("x > 1", computation.domain_conditions)
+
 
 if __name__ == "__main__":
     unittest.main()

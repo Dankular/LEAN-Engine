@@ -44,7 +44,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>"
-    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|Sqrt|Exp|Sinh|Cosh|Log"
+    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|Sqrt|Exp|Sinh|Cosh|Log"
     r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
@@ -2045,6 +2045,18 @@ def _prepare_real_antiderivative(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
 
     antiderivative = symbolic["result"]
+    if (
+        isinstance(integrand_tree.body, ast.Call)
+        and isinstance(integrand_tree.body.func, ast.Name)
+        and integrand_tree.body.func.id == "acosh"
+        and len(integrand_tree.body.args) == 1
+        and isinstance(integrand_tree.body.args[0], ast.Name)
+        and integrand_tree.body.args[0].id == variable
+    ):
+        antiderivative = (
+            f"{variable}*acosh({variable}) - "
+            f"sqrt({variable}**2 - 1)"
+        )
     try:
         tree = ast.parse(antiderivative, mode="eval")
         antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(
@@ -2098,6 +2110,11 @@ def _prepare_real_antiderivative(
     inverse_trig_arguments = _inverse_trig_arguments(tree.body)
     if inverse_trig_arguments is None:
         return None
+    inverse_hyperbolic_cosh_arguments = _inverse_hyperbolic_cosh_arguments(
+        tree.body
+    )
+    if inverse_hyperbolic_cosh_arguments is None:
+        return None
     for index, argument in enumerate(inverse_trig_arguments):
         argument_lean = _render_real_calculus_node(
             argument,
@@ -2127,6 +2144,25 @@ def _prepare_real_antiderivative(
         domain_conditions.extend(
             [f"-1 < {argument_source}", f"{argument_source} < 1"]
         )
+
+    for index, argument in enumerate(inverse_hyperbolic_cosh_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        hypothesis_name = _fresh_identifier(f"h_arcosh_domain_{index}", used_names)
+        domain_hypotheses[
+            _inverse_hyperbolic_cosh_hypothesis_key(argument)
+        ] = hypothesis_name
+        domain_binders.append(f"({hypothesis_name} : 1 < {argument_lean})")
+        domain_condition_names.append(hypothesis_name)
+        domain_conditions.append(f"{argument_source} > 1")
 
     for index, domain_expression in enumerate(domain_expressions):
         key = ast.dump(domain_expression, include_attributes=False)
@@ -2240,6 +2276,7 @@ import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Arsinh
+import Mathlib.Analysis.SpecialFunctions.Arcosh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -2296,6 +2333,11 @@ def _prepare_real_derivative(
     inverse_trig_arguments = _inverse_trig_arguments(tree.body)
     if inverse_trig_arguments is None:
         return None
+    inverse_hyperbolic_cosh_arguments = _inverse_hyperbolic_cosh_arguments(
+        tree.body
+    )
+    if inverse_hyperbolic_cosh_arguments is None:
+        return None
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="differentiate",
@@ -2310,6 +2352,15 @@ def _prepare_real_derivative(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
 
     result = symbolic["result"]
+    if (
+        isinstance(tree.body, ast.Call)
+        and isinstance(tree.body.func, ast.Name)
+        and tree.body.func.id == "acosh"
+        and len(tree.body.args) == 1
+        and isinstance(tree.body.args[0], ast.Name)
+        and tree.body.args[0].id == variable
+    ):
+        result = f"1/sqrt({variable}**2 - 1)"
     try:
         result_lean, result_symbols = _render_real_calculus_lean(
             result, allow_variable_denominators=True
@@ -2382,6 +2433,25 @@ def _prepare_real_derivative(
         domain_conditions.extend(
             [f"-1 < {argument_source}", f"{argument_source} < 1"]
         )
+
+    for index, argument in enumerate(inverse_hyperbolic_cosh_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        hypothesis_name = _fresh_identifier(f"h_arcosh_domain_{index}", used_names)
+        domain_hypotheses[
+            _inverse_hyperbolic_cosh_hypothesis_key(argument)
+        ] = hypothesis_name
+        domain_binders.append(f"({hypothesis_name} : 1 < {argument_lean})")
+        domain_condition_names.append(hypothesis_name)
+        domain_conditions.append(f"{argument_source} > 1")
 
     positive_arguments = [*positive_log_arguments, *positive_sqrt_arguments]
     for index, argument in enumerate(positive_arguments):
@@ -2466,6 +2536,7 @@ import Mathlib.Analysis.Calculus.Deriv.Inv
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Arsinh
+import Mathlib.Analysis.SpecialFunctions.Arcosh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -3156,6 +3227,7 @@ def _normalize_wolfram_real_functions(source: str) -> str:
                 "arccos": "acos",
                 "arctan": "atan",
                 "arcsinh": "asinh",
+                "arccosh": "acosh",
             }.get(function_name, function_name)
             argument = match.group("argument")
             try:
@@ -3313,6 +3385,41 @@ def _inverse_trig_hypothesis_key(argument: ast.AST, endpoint: str) -> str:
     return f"{key}:inverse-trig:{endpoint}"
 
 
+def _inverse_hyperbolic_cosh_arguments(root: ast.AST) -> list[ast.AST] | None:
+    import sympy as _sympy
+
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "acosh"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            value = _constant_sympy_expression(argument)
+            if (
+                value is None
+                or value.is_real is not True
+                or _sympy.simplify(value >= 1) is not _sympy.true
+            ):
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _inverse_hyperbolic_cosh_hypothesis_key(argument: ast.AST) -> str:
+    return f"{ast.dump(argument, include_attributes=False)}:inverse-hyperbolic-cosh"
+
+
 def _unwrap_real_abs(node: ast.AST) -> ast.AST:
     if (
         isinstance(node, ast.Call)
@@ -3460,6 +3567,8 @@ def _real_sympy_expression(
             "asin": _sympy.asin,
             "acos": _sympy.acos,
             "atan": _sympy.atan,
+            "asinh": _sympy.asinh,
+            "acosh": _sympy.acosh,
             "exp": _sympy.exp,
             "sinh": _sympy.sinh,
             "cosh": _sympy.cosh,
@@ -3584,6 +3693,7 @@ def _render_real_calculus_node(
             "acos": "Real.arccos",
             "atan": "Real.arctan",
             "asinh": "Real.arsinh",
+            "acosh": "Real.arcosh",
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
@@ -3908,6 +4018,43 @@ def _derivative_proof_term(
                 f"(Real.hasDerivAt_tan {hypothesis_name}).comp "
                 f"{point} ({inner})"
             )
+        if node.func.id == "acosh":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(Real.arcosh {rendered_argument}))"
+                )
+            hypothesis_name = (domain_hypotheses or {}).get(
+                _inverse_hyperbolic_cosh_hypothesis_key(argument)
+            )
+            if hypothesis_name is None:
+                return None
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if inner is None:
+                return None
+            return (
+                f"(Real.hasDerivAt_arcosh "
+                f"(Set.mem_Ioi.mpr {hypothesis_name})).comp "
+                f"{point} ({inner})"
+            )
         if node.func.id in {"asin", "acos"}:
             argument = node.args[0]
             function_name = (
@@ -3993,6 +4140,7 @@ def _derivative_proof_term(
             "cos": "cos",
             "atan": "arctan",
             "asinh": "arsinh",
+            "acosh": "arcosh",
             "exp": "exp",
             "sinh": "sinh",
             "cosh": "cosh",
