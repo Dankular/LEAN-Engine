@@ -407,13 +407,12 @@ def capabilities() -> dict[str, object]:
                 },
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",
-                    "system_syntax": "Solve[{eq1,...,eqn}, {x1,...,xn}, Reals] with 2 <= n <= 4",
-                    "domain": "univariate rational-coefficient polynomials of degree at most four with complete rational factorization, plus exact real quadratic-radical roots and quadratics with no real roots, nonzero constant equations, and rational square linear systems of size 2 through 4 with unique or empty solution sets",
+                    "system_syntax": "Solve[{eq1,...,eqm}, {x1,...,xn}, Reals] with 1 <= m <= 4 and 2 <= n <= 4",
+                    "domain": "univariate rational-coefficient polynomials of degree at most four with complete rational factorization, plus exact real quadratic-radical roots and quadratics with no real roots, nonzero constant equations, and rational linear systems with 1 to 4 equations and 2 to 4 variables, returning unique, parametric, or empty solution sets",
                     "proof": "Lean proves the returned solution set is equivalent to the submitted equation or system over the reals and audits axioms",
                     "unsupported": [
                         "complex-domain solving",
-                        "nonlinear or larger systems",
-                        "underdetermined systems",
+                        "nonlinear systems or systems with more than four equations or variables",
                         "degree above four",
                         "degree-three or degree-four polynomials without complete rational factorization",
                     ],

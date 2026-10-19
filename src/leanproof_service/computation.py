@@ -1347,6 +1347,62 @@ def _split_top_level_commas(source: str) -> list[str] | None:
     return items if all(items) else None
 
 
+def _linear_expression_text(
+    expression: object,
+    variables: list[str],
+    sympy: object,
+    *,
+    lean: bool,
+) -> str | None:
+    symbols = [sympy.Symbol(variable) for variable in variables]
+    try:
+        polynomial = sympy.Poly(expression, *symbols, domain=sympy.QQ)
+    except (TypeError, ValueError, sympy.PolynomialError):
+        return None
+    if polynomial.total_degree() > 1:
+        return None
+
+    terms: list[tuple[Fraction, str | None]] = []
+    constant = polynomial.coeff_monomial(1)
+    if not constant.is_Rational:
+        return None
+    constant_fraction = Fraction(int(constant.p), int(constant.q))
+    if constant_fraction:
+        terms.append((constant_fraction, None))
+
+    for variable, symbol in zip(variables, symbols):
+        coefficient = polynomial.coeff_monomial(symbol)
+        if not coefficient.is_Rational:
+            return None
+        coefficient_fraction = Fraction(int(coefficient.p), int(coefficient.q))
+        if coefficient_fraction:
+            terms.append((coefficient_fraction, variable))
+
+    if not terms:
+        return "0"
+
+    rendered = ""
+    for index, (coefficient, variable) in enumerate(terms):
+        magnitude = abs(coefficient)
+        if variable is None:
+            body = _lean_fraction(magnitude) if lean else _fraction_text(magnitude)
+        elif magnitude == 1:
+            body = variable
+        else:
+            number = _lean_fraction(magnitude) if lean else _fraction_text(magnitude)
+            multiplication = " * " if lean else "*"
+            body = f"{number}{multiplication}{variable}"
+
+        if index == 0:
+            rendered = ("-" if coefficient < 0 else "") + body
+        else:
+            separator = " - " if lean else "-"
+            if coefficient > 0:
+                separator = " + " if lean else "+"
+            rendered += separator + body
+    return rendered
+
+
 def _prepare_real_linear_system_solve(
     equation_sources: list[str],
     variables: list[str],
@@ -1355,7 +1411,7 @@ def _prepare_real_linear_system_solve(
 
     if (
         not 2 <= len(variables) <= 4
-        or len(equation_sources) != len(variables)
+        or not 1 <= len(equation_sources) <= 4
         or len(set(variables)) != len(variables)
     ):
         return None
@@ -1426,33 +1482,77 @@ def _prepare_real_linear_system_solve(
     right_hand_side = _sympy.Matrix(
         [-equation.coeff_monomial(1) for equation in sympy_equations]
     )
-    determinant = matrix.det()
-    if determinant != 0:
-        solution = [
-            _sympy.cancel(value)
-            for value in matrix.inv() * right_hand_side
+    reduced, pivots = matrix.row_join(right_hand_side).rref()
+    if len(variables) in pivots:
+        result = "{}"
+        result_proposition = "False"
+        equation_hypotheses = [
+            f"hequation{index + 1}" for index in range(len(equation_sources))
         ]
-        if not all(value.is_Rational for value in solution):
-            return None
-        solution_fractions = [
-            Fraction(int(value.p), int(value.q)) for value in solution
+        if len(equation_hypotheses) == 1:
+            equation_intro = f"  · intro {equation_hypotheses[0]}"
+        else:
+            equation_intro = f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩"
+        forward_proof = (
+            f"{equation_intro}\n"
+            f"    norm_num at {' '.join(equation_hypotheses)} <;> "
+            f"linarith [{', '.join(equation_hypotheses)}]"
+        )
+        backward_proof = """  · intro hfalse
+    exact False.elim hfalse"""
+    else:
+        pivot_columns = [column for column in pivots if column < len(variables)]
+        free_columns = [
+            column for column in range(len(variables)) if column not in pivot_columns
         ]
+        assignments: list[tuple[int, object, str, str]] = []
+        for row, pivot_column in enumerate(pivot_columns):
+            expression = reduced[row, len(variables)]
+            for free_column in free_columns:
+                coefficient = reduced[row, free_column]
+                if coefficient:
+                    expression -= coefficient * symbols[free_column]
+            expression = _sympy.cancel(expression)
+            wolfram_expression = _linear_expression_text(
+                expression,
+                variables,
+                _sympy,
+                lean=False,
+            )
+            lean_expression = _linear_expression_text(
+                expression,
+                variables,
+                _sympy,
+                lean=True,
+            )
+            if wolfram_expression is None or lean_expression is None:
+                return None
+            assignments.append(
+                (pivot_column, expression, wolfram_expression, lean_expression)
+            )
+
         result_bindings = ", ".join(
-            f"{variable} -> {_fraction_text(value)}"
-            for variable, value in zip(variables, solution_fractions)
+            f"{variables[column]} -> {wolfram_expression}"
+            for column, _expression, wolfram_expression, _lean_expression in assignments
         )
         result = "{{" + result_bindings + "}}"
-        result_proposition = " ∧ ".join(
-            f"{variable} = {_lean_rational(value)}"
-            for variable, value in zip(variables, solution_fractions)
-        )
-        equation_hypotheses = [
-            f"hequation{index + 1}" for index in range(len(variables))
+        result_relations = [
+            f"{variables[column]} = ({lean_expression})"
+            for column, _expression, _wolfram_expression, lean_expression in assignments
         ]
-        solution_hypotheses = [f"h{variable}" for variable in variables]
-        linear_hypothesis_list = (
-            "[" + ", ".join(equation_hypotheses) + "]"
-        )
+        result_proposition = " ∧ ".join(result_relations) or "True"
+
+        equation_hypotheses = [
+            f"hequation{index + 1}" for index in range(len(equation_sources))
+        ]
+        solution_hypotheses = [
+            f"h{variables[column]}" for column, *_rest in assignments
+        ]
+        linear_hypothesis_list = "[" + ", ".join(equation_hypotheses) + "]"
+        if len(equation_hypotheses) == 1:
+            equation_intro = f"  · intro {equation_hypotheses[0]}"
+        else:
+            equation_intro = f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩"
 
         def render_conjunction_proof(
             tactics: list[str],
@@ -1473,38 +1573,44 @@ def _prepare_real_linear_system_solve(
             )
             return lines
 
-        forward_proof = "\n".join(
-            [
-                f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩",
-                *render_conjunction_proof(
-                    [f"linarith {linear_hypothesis_list}" for _ in variables]
-                ),
-            ]
-        )
-        backward_proof = "\n".join(
-            [
-                f"  · rintro ⟨{', '.join(solution_hypotheses)}⟩",
-                *[f"    subst {variable}" for variable in variables],
-                *render_conjunction_proof(["norm_num" for _ in variables]),
-            ]
-        )
-    else:
-        if matrix.rank() == matrix.row_join(right_hand_side).rank():
-            return None
-        result = "{}"
-        result_proposition = "False"
-        equation_hypotheses = [
-            f"hequation{index + 1}" for index in range(len(variables))
-        ]
-        forward_proof = (
-            f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩\n"
-            f"    linarith [{', '.join(equation_hypotheses)}]"
-        )
-        backward_proof = """  · intro hfalse
-    exact False.elim hfalse"""
+        if assignments:
+            forward_proof = "\n".join(
+                [
+                    equation_intro,
+                    *render_conjunction_proof(
+                        [
+                            f"linarith {linear_hypothesis_list}"
+                            for _assignment in assignments
+                        ]
+                    ),
+                ]
+            )
+            if len(assignments) == 1:
+                solution_intro = f"  · intro {solution_hypotheses[0]}"
+            else:
+                solution_intro = f"  · rintro ⟨{', '.join(solution_hypotheses)}⟩"
+            backward_proof = "\n".join(
+                [
+                    solution_intro,
+                    *[f"    subst {variables[column]}" for column, *_rest in assignments],
+                    *render_conjunction_proof(
+                        ["linarith" for _equation in equation_sources]
+                    ),
+                ]
+            )
+        else:
+            forward_proof = "  · intro _\n    exact True.intro"
+            backward_proof = "\n".join(
+                [
+                    "  · intro _",
+                    *render_conjunction_proof(
+                        ["norm_num" for _equation in equation_sources]
+                    ),
+                ]
+            )
 
     system_proposition = " ∧ ".join(
-        f"({equation} = 0)" for equation in lean_equations
+        f"(({equation} : ℝ) = 0)" for equation in lean_equations
     )
     source = f"""import Mathlib.Data.Real.Basic
 import Mathlib.Tactic.Linarith
