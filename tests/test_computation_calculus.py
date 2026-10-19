@@ -35,6 +35,26 @@ class ReciprocalTrigonometryTests(unittest.TestCase):
                 self.assertIsInstance(result.get("result"), str)
 
 
+class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
+    def test_sine_and_cosine_integrals_accept_selected_pi_bounds(self) -> None:
+        cases = {
+            "Integrate[Sin[x], {x, 0, Pi}]": "2",
+            "Integrate[Cos[x], {x, -Pi/2, Pi/2}]": "2",
+        }
+        for code, expected_result in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected_result)
+                self.assertEqual(computation.domain_conditions, ())
+                self.assertIn("intervalIntegral.integral_eq_sub_of_hasDerivAt", computation.lean_source)
+                self.assertIn("#print axioms wolfram_language_compute", computation.lean_source)
+
+    def test_lowercase_pi_is_not_mistaken_for_wolfram_constant(self) -> None:
+        self.assertIsNone(prepare_computation("Integrate[Sin[x], {x, 0, pi}]", 10))
+
+
 class InverseTrigonometricAntiderivativeTests(unittest.TestCase):
     def test_inverse_sine_antiderivative_carries_real_domain_conditions(self) -> None:
         computation = prepare_computation("Integrate[1/Sqrt[1-x^2], x]", 10)

@@ -118,6 +118,15 @@ theorem wolfram_language_compute : Real.sin Real.pi = 0 := by
         code,
     )
     if definite_integral is not None:
+        pi_bounded_trig_integral = _prepare_pi_bounded_sin_cos_integral(
+            definite_integral.group("expression"),
+            definite_integral.group("variable"),
+            definite_integral.group("lower"),
+            definite_integral.group("upper"),
+            time_limit_seconds,
+        )
+        if pi_bounded_trig_integral is not None:
+            return pi_bounded_trig_integral
         return _prepare_definite_real_integral(
             definite_integral.group("expression"),
             definite_integral.group("variable"),
@@ -1611,6 +1620,163 @@ def _linear_rational_form(
         if exponent == 1:
             return left
     return None
+
+
+def _prepare_pi_bounded_sin_cos_integral(
+    expression_source: str,
+    variable: str,
+    lower_source: str,
+    upper_source: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    integrand = expression_tree.body
+    if not (
+        isinstance(integrand, ast.Call)
+        and isinstance(integrand.func, ast.Name)
+        and integrand.func.id in {"sin", "cos"}
+        and len(integrand.args) == 1
+        and not integrand.keywords
+        and isinstance(integrand.args[0], ast.Name)
+        and integrand.args[0].id == variable
+    ):
+        return None
+
+    if any(re.search(r"\bpi\b|π", bound) for bound in (lower_source, upper_source)):
+        return None
+    normalized_lower = re.sub(r"\bPi\b", "pi", lower_source)
+    normalized_upper = re.sub(r"\bPi\b", "pi", upper_source)
+    lower_multiple = _parse_rational_pi_multiple(normalized_lower)
+    upper_multiple = _parse_rational_pi_multiple(normalized_upper)
+    allowed_multiples = {Fraction(-1), Fraction(-1, 2), Fraction(0), Fraction(1, 2), Fraction(1)}
+    if lower_multiple not in allowed_multiples or upper_multiple not in allowed_multiples:
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="integrate",
+        expression=parsed.expression,
+        variable=variable,
+        lower=normalized_lower,
+        upper=normalized_upper,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no exact trigonometric integral"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+    result = _parse_exact_rational(symbolic["result"])
+    if result is None:
+        return None
+
+    lean_lower = _lean_pi_multiple(lower_multiple)
+    lean_upper = _lean_pi_multiple(upper_multiple)
+    lean_result = _lean_rational(result)
+    if integrand.func.id == "sin":
+        primitive = "-Real.cos"
+        primitive_derivative = (
+            f"simpa [F] using (Real.hasDerivAt_cos {variable}).neg"
+        )
+    else:
+        primitive = "Real.sin"
+        primitive_derivative = f"simpa [F] using (Real.hasDerivAt_sin {variable})"
+    source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.MeasureTheory.Integral.IntervalIntegral.FundThmCalculus
+import Mathlib.Tactic.FunProp
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute :
+    (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} {variable}) = {lean_result} := by
+  let F : ℝ → ℝ := {primitive}
+  have hderiv : ∀ x ∈ Set.uIcc {lean_lower} {lean_upper},
+      HasDerivAt F (Real.{integrand.func.id} x) x := by
+    intro x hx
+    {primitive_derivative}
+  have hcont : ContinuousOn
+      (fun x : ℝ => Real.{integrand.func.id} x)
+      (Set.uIcc {lean_lower} {lean_upper}) := by
+    fun_prop
+  have hint : IntervalIntegrable
+      (fun x : ℝ => Real.{integrand.func.id} x)
+      MeasureTheory.volume {lean_lower} {lean_upper} := by
+    exact hcont.intervalIntegrable
+  rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
+  norm_num [F, Real.sin_pi_div_two, Real.sin_pi, Real.sin_neg,
+    Real.cos_pi_div_two, Real.cos_neg, Real.cos_pi]
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(str(symbolic["result"]), source)
+
+
+def _parse_rational_pi_multiple(source: str) -> Fraction | None:
+    try:
+        parsed = parse_math_input(source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    form = _rational_pi_form(tree.body)
+    if form is None or form[1] != 0:
+        return None
+    coefficient = form[0]
+    if coefficient.numerator.bit_length() > 256 or coefficient.denominator.bit_length() > 256:
+        return None
+    return coefficient
+
+
+def _rational_pi_form(node: ast.AST) -> tuple[Fraction, Fraction] | None:
+    if isinstance(node, ast.Name):
+        return (Fraction(1), Fraction(0)) if node.id == "pi" else None
+    constant = _constant_fraction(node)
+    if constant is not None:
+        return Fraction(0), constant
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _rational_pi_form(node.operand)
+        if value is None or isinstance(node.op, ast.UAdd):
+            return value
+        return -value[0], -value[1]
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _rational_pi_form(node.left)
+    right = _rational_pi_form(node.right)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return left[0] + right[0], left[1] + right[1]
+    if isinstance(node.op, ast.Sub):
+        return left[0] - right[0], left[1] - right[1]
+    if isinstance(node.op, ast.Mult):
+        if left[0] and right[0]:
+            return None
+        return left[0] * right[1] + right[0] * left[1], left[1] * right[1]
+    if isinstance(node.op, ast.Div) and right[0] == 0 and right[1] != 0:
+        return left[0] / right[1], left[1] / right[1]
+    return None
+
+
+def _lean_pi_multiple(coefficient: Fraction) -> str:
+    if coefficient == 0:
+        return "(0)"
+    if coefficient == 1:
+        return "(Real.pi)"
+    if coefficient == -1:
+        return "(-Real.pi)"
+    if coefficient == Fraction(1, 2):
+        return "(Real.pi / 2)"
+    if coefficient == Fraction(-1, 2):
+        return "(-(Real.pi / 2))"
+    raise ValueError("unsupported rational multiple of pi")
 
 
 def _prepare_definite_real_integral(

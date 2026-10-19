@@ -387,6 +387,7 @@ def capabilities() -> dict[str, object]:
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
+                    "Selected definite Sin/Cos integrals with exact Pi-multiple bounds",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
                     "TrigExpand for bounded additive and doubled/tripled Sin/Cos arguments, with a Lean proof of the identity",
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
@@ -466,9 +467,9 @@ def capabilities() -> dict[str, object]:
                 "definite_integral": {
                     "syntax": "Integrate[expression, {variable, lower, upper}]",
                     "proof": "Lean-checked antiderivative plus the interval fundamental theorem of calculus; axiom audit",
-                    "bounds": "exact rational numeric expressions",
-                    "limits": "bounded real-calculus grammar with exact rational bounds; selected variable-denominator cases are supported and unresolved interval-wide nonzero conditions are returned; affine Tanh arguments with rational nonzero slopes return the exact log-cosh endpoint difference without extra conditions; affine Sech arguments with rational nonzero slopes return the exact arctan-sinh endpoint difference without extra conditions; affine Coth and Csch arguments with rational nonzero slopes are supported when the argument has the same nonzero sign at both bounds, with interval-wide Sinh[argument] nonzero conditions, plus Tanh[argument/2] nonzero conditions for Csch; intervals crossing Coth or Csch poles are rejected; other free variables are real parameters",
-                    "examples": ["Integrate[Tanh[x], {x, 0, 1}]", "Integrate[Tanh[x/2+1], {x, 0, 2}]", "Integrate[Sech[x], {x, 0, 1}]", "Integrate[Sech[x/2+1], {x, 0, 2}]", "Integrate[Coth[x], {x, 1, 2}]", "Integrate[Coth[-2x-1], {x, 0, 1}]", "Integrate[Csch[x], {x, 1, 2}]", "Integrate[Csch[x/2+1], {x, 0, 2}]"],
+                    "bounds": "exact rational numeric expressions; Sin[x] and Cos[x] also accept exact multiples of Pi in {-Pi, -Pi/2, 0, Pi/2, Pi}",
+                    "limits": "bounded real-calculus grammar with exact rational bounds; Sin[x] and Cos[x] also support exact Pi-multiple bounds from {-Pi, -Pi/2, 0, Pi/2, Pi}; selected variable-denominator cases are supported and unresolved interval-wide nonzero conditions are returned; affine Tanh arguments with rational nonzero slopes return the exact log-cosh endpoint difference without extra conditions; affine Sech arguments with rational nonzero slopes return the exact arctan-sinh endpoint difference without extra conditions; affine Coth and Csch arguments with rational nonzero slopes are supported when the argument has the same nonzero sign at both bounds, with interval-wide Sinh[argument] nonzero conditions, plus Tanh[argument/2] nonzero conditions for Csch; intervals crossing Coth or Csch poles are rejected; other free variables are real parameters",
+                    "examples": ["Integrate[Sin[x], {x, 0, Pi}]", "Integrate[Cos[x], {x, -Pi/2, Pi/2}]", "Integrate[Tanh[x], {x, 0, 1}]", "Integrate[Tanh[x/2+1], {x, 0, 2}]", "Integrate[Sech[x], {x, 0, 1}]", "Integrate[Sech[x/2+1], {x, 0, 2}]", "Integrate[Coth[x], {x, 1, 2}]", "Integrate[Coth[-2x-1], {x, 0, 1}]", "Integrate[Csch[x], {x, 1, 2}]", "Integrate[Csch[x/2+1], {x, 0, 2}]"],
                 },
                 "real_calculus_limits": {
                     "operators": ["+", "-", "*", "rational constant denominators; selected variable denominators for indefinite Integrate and D require explicit nonzero conditions", "^ with integer exponent 0–16"],
