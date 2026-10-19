@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install build tool
-        run: python -m pip install --upgrade pip build
+        run: python -m pip install --upgrade pip build "httpx>=0.27,<1"
 
       - name: Build package
         run: python -m build
@@ -34,6 +34,9 @@ jobs:
 
       - name: Compile source modules
         run: python -m compileall -q src
+
+      - name: Run API contract checks
+        run: python -m unittest discover -s tests -v
 
       - name: Check API module import
         run: python -c "import leanproof_service.api"

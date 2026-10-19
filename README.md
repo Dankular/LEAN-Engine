@@ -23,6 +23,15 @@ Set-Location ..
 
 The API listens on `http://127.0.0.1:8000`. The dev script creates a local bearer token in `.dev-api-token`. Open [`/docs`](http://127.0.0.1:8000/docs) for the interactive API reference.
 
+## Run API contract checks
+
+Install the test client dependency and run the integration checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 ## Try a computation
 
 This calls the Wolfram-compatible computation route with a supported differentiation request:
