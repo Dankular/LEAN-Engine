@@ -44,7 +44,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>"
-    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|Sqrt|Exp|Sinh|Cosh|Log"
+    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|Sqrt|Exp|Sinh|Cosh|Tanh|Log"
     r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
@@ -2048,6 +2048,15 @@ def _prepare_real_antiderivative(
     if (
         isinstance(integrand_tree.body, ast.Call)
         and isinstance(integrand_tree.body.func, ast.Name)
+        and integrand_tree.body.func.id == "tanh"
+        and len(integrand_tree.body.args) == 1
+        and isinstance(integrand_tree.body.args[0], ast.Name)
+        and integrand_tree.body.args[0].id == variable
+    ):
+        antiderivative = f"log(cosh({variable}))"
+    elif (
+        isinstance(integrand_tree.body, ast.Call)
+        and isinstance(integrand_tree.body.func, ast.Name)
         and integrand_tree.body.func.id == "acosh"
         and len(integrand_tree.body.args) == 1
         and isinstance(integrand_tree.body.args[0], ast.Name)
@@ -2168,6 +2177,28 @@ def _prepare_real_antiderivative(
         key = ast.dump(domain_expression, include_attributes=False)
         if key in domain_hypotheses or key in positive_hypotheses:
             continue
+        if (
+            isinstance(domain_expression, ast.Call)
+            and isinstance(domain_expression.func, ast.Name)
+            and domain_expression.func.id == "cosh"
+            and len(domain_expression.args) == 1
+            and not domain_expression.keywords
+        ):
+            argument_lean = _render_real_calculus_node(
+                domain_expression.args[0],
+                set(),
+                {"nodes": 0},
+                0,
+                allow_variable_denominators=True,
+            )
+            if argument_lean is None:
+                return None
+            cosh_nonzero_proof = (
+                f"(ne_of_gt (Real.cosh_pos {argument_lean}))"
+            )
+            domain_hypotheses[key] = cosh_nonzero_proof
+            domain_condition_names.append(cosh_nonzero_proof)
+            continue
         constant = _constant_fraction(domain_expression)
         if constant is not None:
             if constant == 0:
@@ -2228,6 +2259,13 @@ def _prepare_real_antiderivative(
         f" [{', '.join(domain_condition_names)}]" if domain_condition_names else ""
     )
     function_equality_tactic = f"ext {function_variable}; simp [id_eq] <;> ring"
+    has_hyperbolic_tangent = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "tanh"
+        for expression_tree in (integrand_tree, tree)
+        for node in ast.walk(expression_tree.body)
+    )
     has_tangent = any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -2258,7 +2296,12 @@ def _prepare_real_antiderivative(
             for node in ast.walk(expression_tree.body)
         )
     )
-    if has_tangent or has_sine_cosine_quotient:
+    if has_hyperbolic_tangent:
+        derivative_tactic = (
+            "simp [id_eq, Real.tanh_eq_sinh_div_cosh] <;> "
+            f"field_simp{field_simp_arguments} <;> ring"
+        )
+    elif has_tangent or has_sine_cosine_quotient:
         tangent_simp = ", Real.tan_eq_sin_div_cos" if has_tangent else ""
         derivative_tactic = (
             f"simp [id_eq{tangent_simp}] <;> "
@@ -2529,6 +2572,21 @@ def _prepare_real_derivative(
     function_equality_tactic = (
         f"ext {function_variable}; simp [id_eq] <;> ring"
     )
+    tanh_helper_source = """theorem wolfram_hasDerivAt_tanh (x : ℝ) :
+    HasDerivAt Real.tanh (1 - (Real.tanh x) ^ 2) x := by
+  have hcosh : Real.cosh x ≠ 0 := ne_of_gt (Real.cosh_pos x)
+  convert (Real.hasDerivAt_sinh x).div (Real.hasDerivAt_cosh x) hcosh using 1
+  all_goals
+    first
+    | ext y; simp [Real.tanh_eq_sinh_div_cosh]
+    | rw [Real.tanh_eq_sinh_div_cosh]; field_simp [hcosh] <;> ring
+
+""" if any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "tanh"
+        for node in ast.walk(tree.body)
+    ) else ""
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
@@ -2544,6 +2602,8 @@ import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.Tactic.FieldSimp
 import Mathlib.Tactic.Ring
+
+{tanh_helper_source}
 
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {result_lean} {variable} := by
@@ -3507,6 +3567,7 @@ def _constant_sympy_expression(node: ast.AST):
             "exp": _sympy.exp,
             "sinh": _sympy.sinh,
             "cosh": _sympy.cosh,
+            "tanh": _sympy.tanh,
             "log": _sympy.log,
         }.get(node.func.id)
         return function(argument) if function is not None else None
@@ -3572,6 +3633,7 @@ def _real_sympy_expression(
             "exp": _sympy.exp,
             "sinh": _sympy.sinh,
             "cosh": _sympy.cosh,
+            "tanh": _sympy.tanh,
             "log": _sympy.log,
             "sqrt": _sympy.sqrt,
         }.get(node.func.id)
@@ -3697,6 +3759,7 @@ def _render_real_calculus_node(
             "exp": "Real.exp",
             "sinh": "Real.sinh",
             "cosh": "Real.cosh",
+            "tanh": "Real.tanh",
             "log": "Real.log",
             "sqrt": "Real.sqrt",
         }.get(node.func.id)
@@ -4016,6 +4079,44 @@ def _derivative_proof_term(
                 return None
             return (
                 f"(Real.hasDerivAt_tan {hypothesis_name}).comp "
+                f"{point} ({inner})"
+            )
+        if node.func.id == "tanh":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(Real.tanh {rendered_argument}))"
+                )
+            rendered_argument = _render_real_calculus_node(
+                argument,
+                set(),
+                {"nodes": 0},
+                0,
+                allow_variable_denominators=True,
+            )
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if rendered_argument is None or inner is None:
+                return None
+            return (
+                f"(wolfram_hasDerivAt_tanh {rendered_argument}).comp "
                 f"{point} ({inner})"
             )
         if node.func.id == "acosh":
