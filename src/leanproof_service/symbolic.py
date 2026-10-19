@@ -606,6 +606,7 @@ class _SafeParser:
         "sin": "sin", "cos": "cos", "tan": "tan", "asin": "asin", "acos": "acos",
         "atan": "atan", "asinh": "asinh", "arcsinh": "asinh",
         "acosh": "acosh", "arccosh": "acosh",
+        "atanh": "atanh", "arctanh": "atanh", "artanh": "atanh",
         "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
         "sec": "sec", "csc": "csc", "cot": "cot",
         "log": "log", "sqrt": "sqrt", "root": "root", "Abs": "Abs", "abs": "Abs", "floor": "floor",

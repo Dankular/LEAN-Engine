@@ -44,7 +44,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
     r"\b(?P<function>"
-    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|Sqrt|Exp|Sinh|Cosh|Tanh|Log"
+    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|ArcSinh|ArcCosh|ArcTanh|Sqrt|Exp|Sinh|Cosh|Tanh|Log"
     r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
@@ -2045,6 +2045,10 @@ def _prepare_real_antiderivative(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
 
     antiderivative = symbolic["result"]
+    inverse_tanh_integrand_sign = _inverse_hyperbolic_tanh_integrand_sign(
+        integrand_tree.body,
+        variable,
+    )
     if (
         isinstance(integrand_tree.body, ast.Call)
         and isinstance(integrand_tree.body.func, ast.Name)
@@ -2054,6 +2058,9 @@ def _prepare_real_antiderivative(
         and integrand_tree.body.args[0].id == variable
     ):
         antiderivative = f"log(cosh({variable}))"
+    elif inverse_tanh_integrand_sign is not None:
+        prefix = "" if inverse_tanh_integrand_sign > 0 else "-"
+        antiderivative = f"{prefix}atanh({variable})"
     elif (
         isinstance(integrand_tree.body, ast.Call)
         and isinstance(integrand_tree.body.func, ast.Name)
@@ -2124,6 +2131,11 @@ def _prepare_real_antiderivative(
     )
     if inverse_hyperbolic_cosh_arguments is None:
         return None
+    inverse_hyperbolic_tanh_arguments = _inverse_hyperbolic_tanh_arguments(
+        tree.body
+    )
+    if inverse_hyperbolic_tanh_arguments is None:
+        return None
     for index, argument in enumerate(inverse_trig_arguments):
         argument_lean = _render_real_calculus_node(
             argument,
@@ -2172,6 +2184,36 @@ def _prepare_real_antiderivative(
         domain_binders.append(f"({hypothesis_name} : 1 < {argument_lean})")
         domain_condition_names.append(hypothesis_name)
         domain_conditions.append(f"{argument_source} > 1")
+
+    for index, argument in enumerate(inverse_hyperbolic_tanh_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        lower_name = _fresh_identifier(f"h_artanh_lower_{index}", used_names)
+        upper_name = _fresh_identifier(f"h_artanh_upper_{index}", used_names)
+        domain_hypotheses[
+            _inverse_hyperbolic_tanh_hypothesis_key(argument, "lower")
+        ] = lower_name
+        domain_hypotheses[
+            _inverse_hyperbolic_tanh_hypothesis_key(argument, "upper")
+        ] = upper_name
+        domain_binders.extend(
+            [
+                f"({lower_name} : -1 < {argument_lean})",
+                f"({upper_name} : {argument_lean} < 1)",
+            ]
+        )
+        domain_condition_names.extend([lower_name, upper_name])
+        domain_conditions.extend(
+            [f"-1 < {argument_source}", f"{argument_source} < 1"]
+        )
 
     for index, domain_expression in enumerate(domain_expressions):
         key = ast.dump(domain_expression, include_attributes=False)
@@ -2312,6 +2354,16 @@ def _prepare_real_antiderivative(
         derivative_tactic = (
             f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring"
         )
+    artanh_helper_source = (
+        _artanh_derivative_lemma_source()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "atanh"
+            for node in ast.walk(tree.body)
+        )
+        else ""
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
@@ -2320,13 +2372,18 @@ import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Arsinh
 import Mathlib.Analysis.SpecialFunctions.Arcosh
+import Mathlib.Analysis.SpecialFunctions.Artanh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Topology.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.Ring
+
+{artanh_helper_source}
 
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {integrand_lean} {variable} := by
@@ -2380,6 +2437,11 @@ def _prepare_real_derivative(
         tree.body
     )
     if inverse_hyperbolic_cosh_arguments is None:
+        return None
+    inverse_hyperbolic_tanh_arguments = _inverse_hyperbolic_tanh_arguments(
+        tree.body
+    )
+    if inverse_hyperbolic_tanh_arguments is None:
         return None
 
     symbolic = run_symbolic(SymbolicRequest(
@@ -2496,6 +2558,36 @@ def _prepare_real_derivative(
         domain_condition_names.append(hypothesis_name)
         domain_conditions.append(f"{argument_source} > 1")
 
+    for index, argument in enumerate(inverse_hyperbolic_tanh_arguments):
+        argument_lean = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if argument_lean is None:
+            return None
+        argument_source = ast.unparse(argument).replace("**", "^")
+        lower_name = _fresh_identifier(f"h_artanh_lower_{index}", used_names)
+        upper_name = _fresh_identifier(f"h_artanh_upper_{index}", used_names)
+        domain_hypotheses[
+            _inverse_hyperbolic_tanh_hypothesis_key(argument, "lower")
+        ] = lower_name
+        domain_hypotheses[
+            _inverse_hyperbolic_tanh_hypothesis_key(argument, "upper")
+        ] = upper_name
+        domain_binders.extend(
+            [
+                f"({lower_name} : -1 < {argument_lean})",
+                f"({upper_name} : {argument_lean} < 1)",
+            ]
+        )
+        domain_condition_names.extend([lower_name, upper_name])
+        domain_conditions.extend(
+            [f"-1 < {argument_source}", f"{argument_source} < 1"]
+        )
+
     positive_arguments = [*positive_log_arguments, *positive_sqrt_arguments]
     for index, argument in enumerate(positive_arguments):
         argument_key = ast.dump(argument, include_attributes=False)
@@ -2587,6 +2679,16 @@ def _prepare_real_derivative(
         and node.func.id == "tanh"
         for node in ast.walk(tree.body)
     ) else ""
+    artanh_helper_source = (
+        _artanh_derivative_lemma_source()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "atanh"
+            for node in ast.walk(tree.body)
+        )
+        else ""
+    )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
@@ -2595,15 +2697,19 @@ import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Arsinh
 import Mathlib.Analysis.SpecialFunctions.Arcosh
+import Mathlib.Analysis.SpecialFunctions.Artanh
 import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Topology.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.InverseDeriv
 import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.Ring
 
 {tanh_helper_source}
+{artanh_helper_source}
 
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {result_lean} {variable} := by
@@ -3288,6 +3394,7 @@ def _normalize_wolfram_real_functions(source: str) -> str:
                 "arctan": "atan",
                 "arcsinh": "asinh",
                 "arccosh": "acosh",
+                "arctanh": "atanh",
             }.get(function_name, function_name)
             argument = match.group("argument")
             try:
@@ -3480,6 +3587,103 @@ def _inverse_hyperbolic_cosh_hypothesis_key(argument: ast.AST) -> str:
     return f"{ast.dump(argument, include_attributes=False)}:inverse-hyperbolic-cosh"
 
 
+def _inverse_hyperbolic_tanh_arguments(root: ast.AST) -> list[ast.AST] | None:
+    import sympy as _sympy
+
+    arguments: list[ast.AST] = []
+    seen: set[str] = set()
+    for node in ast.walk(root):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "atanh"
+            or len(node.args) != 1
+            or node.keywords
+        ):
+            continue
+        argument = node.args[0]
+        if not _contains_calculus_variable(argument):
+            value = _constant_sympy_expression(argument)
+            if (
+                value is None
+                or value.is_real is not True
+                or _sympy.simplify(value > -1) is not _sympy.true
+                or _sympy.simplify(value < 1) is not _sympy.true
+            ):
+                return None
+            continue
+        key = ast.dump(argument, include_attributes=False)
+        if key not in seen:
+            seen.add(key)
+            arguments.append(argument)
+    return arguments
+
+
+def _inverse_hyperbolic_tanh_hypothesis_key(
+    argument: ast.AST,
+    endpoint: str,
+) -> str:
+    return (
+        f"{ast.dump(argument, include_attributes=False)}:"
+        f"inverse-hyperbolic-tanh:{endpoint}"
+    )
+
+
+def _inverse_hyperbolic_tanh_integrand_sign(
+    integrand: ast.AST,
+    variable: str,
+) -> int | None:
+    import sympy as _sympy
+
+    expression = _real_sympy_expression(integrand)
+    if expression is None:
+        return None
+    symbol = _sympy.Symbol(variable)
+    if expression.free_symbols - {symbol}:
+        return None
+    reciprocal_derivative = 1 / (1 - symbol**2)
+    if _sympy.simplify(expression - reciprocal_derivative) == 0:
+        return 1
+    if _sympy.simplify(expression + reciprocal_derivative) == 0:
+        return -1
+    return None
+
+
+def _artanh_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_artanh {x : ℝ}
+    (h_lower : -1 < x) (h_upper : x < 1) :
+    HasDerivAt Real.artanh (1 / (1 - x ^ 2)) x := by
+  have h_den : 1 - x ≠ 0 := by linarith
+  have h_num : 1 + x ≠ 0 := by linarith
+  have h_sq : 1 - x ^ 2 ≠ 0 := by
+    have h_lower_pos : 0 < 1 + x := by linarith
+    have h_upper_pos : 0 < 1 - x := by linarith
+    have h_product : 0 < (1 - x) * (1 + x) := mul_pos h_upper_pos h_lower_pos
+    nlinarith [h_product]
+  have hq : HasDerivAt (fun y : ℝ => (1 + y) / (1 - y))
+      (((1 : ℝ) - x + (1 + x)) / (1 - x) ^ 2) x := by
+    convert ((hasDerivAt_const x (1 : ℝ)).add (hasDerivAt_id x)).div
+      ((hasDerivAt_const x (1 : ℝ)).sub (hasDerivAt_id x)) h_den using 1
+    · ext y
+      rfl
+    · simp only [Pi.add_apply, Pi.sub_apply, id_eq]
+      field_simp [h_den] <;> ring
+  have hq_ne : (1 + x) / (1 - x) ≠ 0 := div_ne_zero h_num h_den
+  have hscaled := HasDerivAt.const_mul (1 / 2 : ℝ) (hq.log hq_ne)
+  have hscaled' : HasDerivAt
+      (fun y : ℝ => (1 / 2 : ℝ) * Real.log ((1 + y) / (1 - y)))
+      (1 / (1 - x ^ 2)) x := by
+    convert hscaled using 1 <;> simp <;> field_simp [h_den, h_num, h_sq] <;> ring
+  have hlocal : (fun y : ℝ => Real.artanh y) =ᶠ[nhds x]
+      (fun y => (1 / 2 : ℝ) * Real.log ((1 + y) / (1 - y))) := by
+    filter_upwards [isOpen_Ioo.mem_nhds ⟨h_lower, h_upper⟩] with y hy
+    have hycc : y ∈ Set.Icc (-1) 1 := ⟨le_of_lt hy.1, le_of_lt hy.2⟩
+    simp [Real.artanh_eq_half_log hycc]
+  exact hscaled'.congr_of_eventuallyEq hlocal
+
+"""
+
+
 def _unwrap_real_abs(node: ast.AST) -> ast.AST:
     if (
         isinstance(node, ast.Call)
@@ -3564,6 +3768,7 @@ def _constant_sympy_expression(node: ast.AST):
             "sin": _sympy.sin,
             "cos": _sympy.cos,
             "tan": _sympy.tan,
+            "atanh": _sympy.atanh,
             "exp": _sympy.exp,
             "sinh": _sympy.sinh,
             "cosh": _sympy.cosh,
@@ -3628,6 +3833,7 @@ def _real_sympy_expression(
             "asin": _sympy.asin,
             "acos": _sympy.acos,
             "atan": _sympy.atan,
+            "atanh": _sympy.atanh,
             "asinh": _sympy.asinh,
             "acosh": _sympy.acosh,
             "exp": _sympy.exp,
@@ -3754,6 +3960,7 @@ def _render_real_calculus_node(
             "asin": "Real.arcsin",
             "acos": "Real.arccos",
             "atan": "Real.arctan",
+            "atanh": "Real.artanh",
             "asinh": "Real.arsinh",
             "acosh": "Real.arcosh",
             "exp": "Real.exp",
@@ -4118,6 +4325,56 @@ def _derivative_proof_term(
             return (
                 f"(wolfram_hasDerivAt_tanh {rendered_argument}).comp "
                 f"{point} ({inner})"
+            )
+        if node.func.id == "atanh":
+            argument = node.args[0]
+            if not any(
+                isinstance(child, ast.Name) and child.id == variable
+                for child in ast.walk(argument)
+            ):
+                rendered_argument = _render_real_calculus_node(
+                    argument, set(), {"nodes": 0}, 0
+                )
+                if rendered_argument is None:
+                    return None
+                return (
+                    f"(hasDerivAt_const {point} "
+                    f"(Real.artanh {rendered_argument}))"
+                )
+            rendered_argument = _render_real_calculus_node(
+                argument,
+                set(),
+                {"nodes": 0},
+                0,
+                allow_variable_denominators=True,
+            )
+            lower_hypothesis = (domain_hypotheses or {}).get(
+                _inverse_hyperbolic_tanh_hypothesis_key(argument, "lower")
+            )
+            upper_hypothesis = (domain_hypotheses or {}).get(
+                _inverse_hyperbolic_tanh_hypothesis_key(argument, "upper")
+            )
+            inner = _derivative_proof_term(
+                argument,
+                variable,
+                function_variable,
+                point,
+                state,
+                depth + 1,
+                domain_hypotheses,
+                positive_hypotheses,
+            )
+            if (
+                rendered_argument is None
+                or lower_hypothesis is None
+                or upper_hypothesis is None
+                or inner is None
+            ):
+                return None
+            return (
+                "(wolfram_hasDerivAt_artanh "
+                f"(x := {rendered_argument}) {lower_hypothesis} "
+                f"{upper_hypothesis}).comp {point} ({inner})"
             )
         if node.func.id == "acosh":
             argument = node.args[0]
