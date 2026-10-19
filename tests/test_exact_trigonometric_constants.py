@@ -21,6 +21,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Sin[Pi/8]": "sqrt(2 - sqrt(2))/2",
             "Sin[Pi/16]": "sqrt(2 - sqrt(2 + sqrt(2)))/2",
             "Sin[Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Sin[Pi/64]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2)))))/2",
+            "Sin[Pi/128]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))))/2",
             "Sin[3Pi/8]": "sqrt(2 + sqrt(2))/2",
             "Cos[3Pi/8]": "sqrt(2 - sqrt(2))/2",
             "Sin[7Pi/16]": "sqrt(2 + sqrt(2 + sqrt(2)))/2",
@@ -33,6 +35,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[2Pi/5]": "(sqrt(5) - 1)/4",
             "Sin[3Pi/10]": "(1 + sqrt(5))/4",
             "Cos[3Pi/10]": "sqrt(10 - 2*sqrt(5))/4",
+            "Sin[31Pi/64]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2)))))/2",
+            "Cos[63Pi/128]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))))/2",
             "Cos[Pi]": "-1",
             "Cos[Pi/2]": "0",
             "Cos[Pi/3]": "1/2",
@@ -43,6 +47,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[Pi/8]": "sqrt(2 + sqrt(2))/2",
             "Cos[Pi/16]": "sqrt(2 + sqrt(2 + sqrt(2)))/2",
             "Cos[Pi/32]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Cos[Pi/64]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2)))))/2",
+            "Cos[Pi/128]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))))/2",
             "Tan[Pi]": "0",
             "Tan[Pi/3]": "sqrt(3)",
             "Tan[Pi/4]": "1",
@@ -80,6 +86,10 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[3Pi/8]",
             "Cos[5Pi/8]",
             "Cos[3Pi/10]",
+            "Sin[Pi/64]",
+            "Cos[Pi/128]",
+            "Sin[31Pi/64]",
+            "Cos[63Pi/128]",
             "Sin[-Pi]",
             "Cos[Pi/8]",
             "Cos[-Pi/3]",
@@ -98,7 +108,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
         self.assertIsNone(prepare_computation("Sin[Pi/7]", 10))
         self.assertIsNone(prepare_computation("Sin[3Pi/16]", 10))
         self.assertIsNone(prepare_computation("Tan[3Pi/8]", 10))
-        self.assertIsNone(prepare_computation("Cos[Pi/64]", 10))
+        self.assertIsNone(prepare_computation("Sin[Pi/8192]", 10))
+        self.assertIsNone(prepare_computation("Cos[Pi/8192]", 10))
         self.assertIsNone(prepare_computation("Tan[Pi/2]", 10))
         self.assertIsNone(prepare_computation("Sin[pi/6]", 10))
 

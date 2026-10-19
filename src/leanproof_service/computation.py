@@ -67,6 +67,7 @@ _FINITE_SUM_PRODUCT = re.compile(
     r"(?P<lower>[^,{}]+?)\s*,\s*(?P<upper>[^,{}]+?)\s*\}\s*\]\s*"
 )
 _TRIG_EXPAND_MAX_MULTIPLE = 12
+_MAX_DYADIC_PI_DENOMINATOR_EXPONENT = 12
 _EXACT_PI_TRIG_VALUES: dict[
     str, dict[int, tuple[str, str, str]]
 ] = {
@@ -191,6 +192,61 @@ _EXACT_PI_TRIG_SUPPORTING_LEMMAS = {
   positivity
 """,
 }
+
+
+def _sqrt_two_add_series_expression(depth: int, *, lean: bool) -> str:
+    if depth <= 0:
+        return "0"
+    sqrt = "Real.sqrt" if lean else "sqrt"
+    expression = f"{sqrt} 2" if lean else "sqrt(2)"
+    for _ in range(1, depth):
+        expression = (
+            f"{sqrt} (2 + {expression})"
+            if lean
+            else f"sqrt(2 + {expression})"
+        )
+    return expression
+
+
+def _exact_dyadic_pi_trig_value(
+    function: str,
+    denominator: int,
+) -> tuple[tuple[str, str, str], str] | None:
+    if (
+        function not in {"sin", "cos"}
+        or denominator < 64
+        or denominator & (denominator - 1)
+    ):
+        return None
+    exponent = denominator.bit_length() - 1
+    if exponent > _MAX_DYADIC_PI_DENOMINATOR_EXPONENT:
+        return None
+
+    if function == "cos":
+        depth = exponent - 1
+        display_root = _sqrt_two_add_series_expression(depth, lean=False)
+        lean_root = _sqrt_two_add_series_expression(depth, lean=True)
+        display_result = f"{display_root}/2"
+        lean_result = f"({lean_root}) / 2"
+        supporting_index = depth
+        mathlib_theorem = "cos_pi_over_two_pow"
+    else:
+        depth = exponent - 2
+        display_inner = _sqrt_two_add_series_expression(depth, lean=False)
+        lean_inner = _sqrt_two_add_series_expression(depth, lean=True)
+        display_result = f"sqrt(2 - {display_inner})/2"
+        lean_result = f"Real.sqrt (2 - {lean_inner}) / 2"
+        supporting_index = depth
+        mathlib_theorem = "sin_pi_over_two_pow_succ"
+
+    lemma_name = f"wolfram_{function}_pi_div_{denominator}"
+    theorem_source = f"""theorem {lemma_name} :
+    Real.{function} (Real.pi / {denominator}) = {lean_result} := by
+  rw [show Real.pi / {denominator} = Real.pi / 2 ^ {exponent} by norm_num,
+    Real.{mathlib_theorem} {supporting_index}]
+  simp [Real.sqrtTwoAddSeries]
+"""
+    return (display_result, lean_result, lemma_name), theorem_source
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -322,6 +378,27 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
         return None
 
     function = match.group("function").lower()
+    dynamic_supporting_lemmas: dict[str, str] = {}
+
+    def exact_trig_value(
+        requested_function: str,
+        requested_denominator: int,
+    ) -> tuple[str, str, str] | None:
+        value = _EXACT_PI_TRIG_VALUES.get(requested_function, {}).get(
+            requested_denominator
+        )
+        if value is not None:
+            return value
+        dyadic_value = _exact_dyadic_pi_trig_value(
+            requested_function,
+            requested_denominator,
+        )
+        if dyadic_value is None:
+            return None
+        value, source = dyadic_value
+        dynamic_supporting_lemmas[value[2]] = source
+        return value
+
     try:
         numerator = int(match.group("numerator") or "1")
         denominator = int(match.group("denominator") or "1")
@@ -355,7 +432,7 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
         reciprocal = 1 / base_angle
         if reciprocal.denominator == 1:
             base_denominator = reciprocal.numerator
-            value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(base_denominator)
+            value = exact_trig_value(function, base_denominator)
             if value is None:
                 return None
             base_expression = f"(Real.pi / {base_denominator})"
@@ -370,9 +447,7 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
                 return None
             base_denominator = complement_reciprocal.numerator
             complementary_function = "cos" if function == "sin" else "sin"
-            value = _EXACT_PI_TRIG_VALUES.get(
-                complementary_function, {}
-            ).get(base_denominator)
+            value = exact_trig_value(complementary_function, base_denominator)
             if value is None:
                 return None
             base_expression = (
@@ -419,9 +494,15 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
   rw [{", ".join(base_lemmas)}] <;> norm_num
 """
     supporting_lemmas = "\n".join(
-        _EXACT_PI_TRIG_SUPPORTING_LEMMAS[lemma]
+        dynamic_supporting_lemmas.get(
+            lemma,
+            _EXACT_PI_TRIG_SUPPORTING_LEMMAS.get(lemma, ""),
+        )
         for lemma in base_lemmas
-        if lemma in _EXACT_PI_TRIG_SUPPORTING_LEMMAS
+        if (
+            lemma in dynamic_supporting_lemmas
+            or lemma in _EXACT_PI_TRIG_SUPPORTING_LEMMAS
+        )
     )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 
