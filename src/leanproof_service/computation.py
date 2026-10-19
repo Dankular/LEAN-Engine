@@ -1320,7 +1320,7 @@ def _build_exact_radical_interval(
             right = _build_exact_radical_interval(node.right, scale, proof_lines, state)
             if left is None or right is None:
                 return None
-            return _build_nonnegative_product_interval(
+            return _build_sign_definite_product_interval(
                 left,
                 right,
                 scale,
@@ -1406,6 +1406,104 @@ def _build_nonnegative_product_interval(
         ]
     )
     return lower, upper, expression, name
+
+
+def _negate_certified_interval(
+    interval: tuple[Fraction, Fraction, str, str],
+    proof_lines: list[str],
+    state: dict[str, int],
+) -> tuple[Fraction, Fraction, str, str]:
+    lower, upper, expression, interval_name = interval
+    negated_expression = f"(-({expression}))"
+    negated_name = _next_numeric_interval_name(state)
+    proof_lines.append(
+        f"have {negated_name} : {_lean_rational(-upper)} \u2264 {negated_expression} \u2227 "
+        f"{negated_expression} \u2264 {_lean_rational(-lower)} := by "
+        f"constructor <;> linarith [{interval_name}.1, {interval_name}.2]"
+    )
+    return -upper, -lower, negated_expression, negated_name
+
+
+def _build_sign_definite_product_interval(
+    left: tuple[Fraction, Fraction, str, str],
+    right: tuple[Fraction, Fraction, str, str],
+    scale: int,
+    proof_lines: list[str],
+    state: dict[str, int],
+) -> tuple[Fraction, Fraction, str, str] | None:
+    left_lower, left_upper, left_expression, _ = left
+    right_lower, right_upper, right_expression, _ = right
+    expression = f"(({left_expression}) * ({right_expression}))"
+
+    if left_lower >= 0 and right_lower >= 0:
+        return _build_nonnegative_product_interval(
+            left, right, scale, proof_lines, state
+        )
+
+    if left_upper <= 0 and right_upper <= 0:
+        positive_left = _negate_certified_interval(left, proof_lines, state)
+        positive_right = _negate_certified_interval(right, proof_lines, state)
+        positive_product = _build_nonnegative_product_interval(
+            positive_left, positive_right, scale, proof_lines, state
+        )
+        if positive_product is None:
+            return None
+        lower, upper, positive_expression, positive_name = positive_product
+        name = _next_numeric_interval_name(state)
+        proof_lines.extend(
+            [
+                f"have {name}_eq : {expression} = {positive_expression} := by ring",
+                f"have {name} : {_lean_rational(lower)} \u2264 {expression} \u2227 "
+                f"{expression} \u2264 {_lean_rational(upper)} := by",
+                f"  rw [{name}_eq]",
+                f"  exact {positive_name}",
+            ]
+        )
+        return lower, upper, expression, name
+
+    if left_upper <= 0 and right_lower >= 0:
+        positive_left = _negate_certified_interval(left, proof_lines, state)
+        positive_product = _build_nonnegative_product_interval(
+            positive_left, right, scale, proof_lines, state
+        )
+        if positive_product is None:
+            return None
+        positive_lower, positive_upper, positive_expression, positive_name = positive_product
+        lower, upper = -positive_upper, -positive_lower
+        name = _next_numeric_interval_name(state)
+        proof_lines.extend(
+            [
+                f"have {name}_eq : {expression} = -({positive_expression}) := by ring",
+                f"have {name} : {_lean_rational(lower)} \u2264 {expression} \u2227 "
+                f"{expression} \u2264 {_lean_rational(upper)} := by",
+                f"  rw [{name}_eq]",
+                f"  constructor <;> linarith [{positive_name}.1, {positive_name}.2]",
+            ]
+        )
+        return lower, upper, expression, name
+
+    if left_lower >= 0 and right_upper <= 0:
+        positive_right = _negate_certified_interval(right, proof_lines, state)
+        positive_product = _build_nonnegative_product_interval(
+            left, positive_right, scale, proof_lines, state
+        )
+        if positive_product is None:
+            return None
+        positive_lower, positive_upper, positive_expression, positive_name = positive_product
+        lower, upper = -positive_upper, -positive_lower
+        name = _next_numeric_interval_name(state)
+        proof_lines.extend(
+            [
+                f"have {name}_eq : {expression} = -({positive_expression}) := by ring",
+                f"have {name} : {_lean_rational(lower)} \u2264 {expression} \u2227 "
+                f"{expression} \u2264 {_lean_rational(upper)} := by",
+                f"  rw [{name}_eq]",
+                f"  constructor <;> linarith [{positive_name}.1, {positive_name}.2]",
+            ]
+        )
+        return lower, upper, expression, name
+
+    return None
 
 
 def _render_exact_radical_lean(node: ast.AST) -> str | None:

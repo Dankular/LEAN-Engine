@@ -141,6 +141,9 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[Sqrt[Pi], 10]": "1.772453851",
             "N[Pi+Sqrt[2], 15]": "4.55580621596289",
             "N[Pi*Sqrt[2], 15]": "4.44288293815837",
+            "N[(Pi-4)*(Sqrt[2]-2), 15]": "0.502843381486400",
+            "N[(4-Pi)*(Sqrt[2]-2), 15]": "-0.502843381486400",
+            "N[(Pi-4)*(2-Sqrt[2]), 15]": "-0.502843381486400",
         }
         for code, expected_value in cases.items():
             with self.subTest(code=code):
@@ -279,6 +282,7 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[Pi, 21]",
             "N[Pi - 3, 20]",
             "N[Pi^2, 20]",
+            "N[(Pi - 628318530717958647693/200000000000000000000)*Sqrt[2], 3]",
             "N[Sqrt[-2]]",
             "N[Sqrt[x]]",
             "N[1/3, 0]",
