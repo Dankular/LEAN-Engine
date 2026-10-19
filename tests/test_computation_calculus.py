@@ -1,6 +1,6 @@
 import unittest
 
-from leanproof_service.computation import prepare_computation
+from leanproof_service.computation import _parse_exact_radical_basis, prepare_computation
 from leanproof_service.input_syntax import parse_math_input
 from leanproof_service.symbolic import SymbolicRequest, run_symbolic
 
@@ -55,6 +55,12 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
             "Integrate[Sin[x], {x, -Pi/4, 0}]": "-1 + sqrt(2)/2",
             "Integrate[Sin[x+Pi/4], {x, 0, Pi/4}]": "sqrt(2)/2",
             "Integrate[Cos[x+Pi/4], {x, 0, Pi/4}]": "1 - sqrt(2)/2",
+            "Integrate[Cos[x], {x, 0, Pi/8}]": "sqrt(1/2 - sqrt(2)/4)",
+            "Integrate[Sin[x], {x, 0, Pi/8}]": "1 - sqrt(sqrt(2)/4 + 1/2)",
+            "Integrate[Cos[x], {x, Pi/8, Pi/4}]": "-sqrt(1/2 - sqrt(2)/4) + sqrt(2)/2",
+            "Integrate[Sin[x+Pi/8], {x, 0, Pi/8}]": "-sqrt(2)/2 + sqrt(sqrt(2)/4 + 1/2)",
+            "Integrate[Cos[x+Pi/8], {x, 0, Pi/8}]": "-sqrt(1/2 - sqrt(2)/4) + sqrt(2)/2",
+            "Integrate[Sin[x], {x, -Pi/8, Pi/8}]": "0",
         }
         for code, expected_result in cases.items():
             with self.subTest(code=code):
@@ -74,9 +80,26 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
     def test_nonzero_phase_is_not_claimed_by_the_exact_endpoint_path(self) -> None:
         self.assertIsNone(prepare_computation("Integrate[Sin[x+1], {x, 0, Pi}]", 10))
 
-    def test_non_quarter_pi_bounds_and_endpoint_phases_remain_unsupported(self) -> None:
+    def test_non_supported_pi_bounds_and_endpoint_phases_remain_unsupported(self) -> None:
         self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/3}]", 10))
         self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/4}]", 10))
+        self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/16}]", 10))
+        self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/8}]", 10))
+
+
+class ExactRadicalBasisTests(unittest.TestCase):
+    def test_parser_normalizes_nested_radical_products_and_powers(self) -> None:
+        cases = {
+            "sqrt(2)*sqrt(2+sqrt(2))": (0, 0, 1, 1),
+            "sqrt(2+sqrt(2))*sqrt(2-sqrt(2))": (0, 1, 0, 0),
+            "sqrt(2+sqrt(2))**2": (2, 1, 0, 0),
+        }
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                self.assertEqual(_parse_exact_radical_basis(expression), expected)
+
+    def test_parser_rejects_radicals_outside_the_supported_basis(self) -> None:
+        self.assertIsNone(_parse_exact_radical_basis("sqrt(3)"))
 
 
 class InverseTrigonometricAntiderivativeTests(unittest.TestCase):

@@ -1735,15 +1735,15 @@ def _prepare_pi_bounded_sin_cos_integral(
     lower_multiple = _parse_rational_pi_multiple(normalized_lower)
     upper_multiple = _parse_rational_pi_multiple(normalized_upper)
     allowed_multiples = {
-        Fraction(-1), Fraction(-1, 2), Fraction(-1, 4), Fraction(0),
-        Fraction(1, 4), Fraction(1, 2), Fraction(1),
+        Fraction(-1), Fraction(-1, 2), Fraction(-1, 4), Fraction(-1, 8),
+        Fraction(0), Fraction(1, 8), Fraction(1, 4), Fraction(1, 2), Fraction(1),
     }
     if lower_multiple not in allowed_multiples or upper_multiple not in allowed_multiples:
         return None
     endpoint_multiples = {
-        Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(0),
-        Fraction(1, 4), Fraction(1, 2), Fraction(1), Fraction(2),
-        Fraction(-1, 4),
+        Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(-1, 4),
+        Fraction(-1, 8), Fraction(0), Fraction(1, 8), Fraction(1, 4),
+        Fraction(1, 2), Fraction(1), Fraction(2),
     }
     lower_phase = slope * lower_multiple + phase_offset
     upper_phase = slope * upper_multiple + phase_offset
@@ -1765,14 +1765,13 @@ def _prepare_pi_bounded_sin_cos_integral(
             "Symbolic worker returned no exact trigonometric integral"
         )
         return Computation("", "", backend_error=str(diagnostic)[:1000])
-    result_surd = _parse_quadratic_surd(symbolic["result"])
-    if result_surd is None:
+    exact_radical_result = _parse_exact_radical_basis(symbolic["result"])
+    if exact_radical_result is None:
         return None
-    rational_result, radical_result = result_surd
     if any(
         abs(value.numerator).bit_length() > 256
         or value.denominator.bit_length() > 256
-        for value in result_surd
+        for value in exact_radical_result
     ):
         return None
 
@@ -1782,7 +1781,7 @@ def _prepare_pi_bounded_sin_cos_integral(
     lean_upper_phase = _lean_pi_multiple(upper_phase)
     lean_slope = _lean_rational(slope)
     lean_phase_offset = _lean_rational(phase_offset)
-    lean_result = _lean_quadratic_surd(rational_result, radical_result)
+    lean_result = _lean_exact_radical_basis(exact_radical_result)
     if integrand.func.id == "sin":
         endpoint_function = "cos"
         primitive = "fun t : ℝ => -Real.cos (a * t + b * Real.pi) / a"
@@ -1827,7 +1826,8 @@ def _prepare_pi_bounded_sin_cos_integral(
             f"    rw [hfunction]\n"
             f"    exact hprimitive"
         )
-    if Fraction(1, 4) in {abs(lower_phase), abs(upper_phase)}:
+    special_endpoint_phases = {Fraction(1, 8), Fraction(1, 4)}
+    if any(abs(phase) in special_endpoint_phases for phase in (lower_phase, upper_phase)):
         endpoint_lemmas = _pi_trig_simplification_lemmas(
             endpoint_function, (lower_phase, upper_phase)
         )
@@ -1941,6 +1941,10 @@ def _lean_pi_multiple(coefficient: Fraction) -> str:
         return "(Real.pi / 4)"
     if coefficient == Fraction(-1, 4):
         return "(-(Real.pi / 4))"
+    if coefficient == Fraction(1, 8):
+        return "(Real.pi / 8)"
+    if coefficient == Fraction(-1, 8):
+        return "(-(Real.pi / 8))"
     raise ValueError("unsupported rational multiple of pi")
 
 
@@ -1951,6 +1955,7 @@ def _pi_trig_simplification_lemmas(
     names: list[str] = []
     value_lemmas = {
         Fraction(0): f"Real.{function}_zero",
+        Fraction(1, 8): f"Real.{function}_pi_div_eight",
         Fraction(1, 4): f"Real.{function}_pi_div_four",
         Fraction(1, 2): f"Real.{function}_pi_div_two",
         Fraction(1): f"Real.{function}_pi",
@@ -6712,36 +6717,87 @@ def _parse_exact_rational(source: str) -> Fraction | None:
     return _constant_fraction(tree.body)
 
 
-def _parse_quadratic_surd(source: str) -> tuple[Fraction, Fraction] | None:
-    """Parse an exact value in Q(sqrt(2)), returned as rational and radical parts."""
+def _parse_exact_radical_basis(
+    source: str,
+) -> tuple[Fraction, Fraction, Fraction, Fraction] | None:
+    """Parse Q-linear combinations of 1, sqrt(2), sqrt(2+sqrt(2)), sqrt(2-sqrt(2))."""
     exact_source = _normalize_decimal_literals(source)
     if exact_source is None:
         return None
     try:
-        parsed = parse_math_input(exact_source)
-        tree = ast.parse(parsed.expression, mode="eval")
-    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        tree = ast.parse(exact_source, mode="eval")
+    except (ValueError, SyntaxError, RecursionError):
         return None
 
-    def form(node: ast.AST) -> tuple[Fraction, Fraction] | None:
+    zero = (Fraction(0), Fraction(0), Fraction(0), Fraction(0))
+    one = (Fraction(1), Fraction(0), Fraction(0), Fraction(0))
+    sqrt_two = (Fraction(0), Fraction(1), Fraction(0), Fraction(0))
+    sqrt_two_plus = (Fraction(0), Fraction(0), Fraction(1), Fraction(0))
+    sqrt_two_minus = (Fraction(0), Fraction(0), Fraction(0), Fraction(1))
+
+    basis_products = {
+        (0, 0): one,
+        (0, 1): sqrt_two,
+        (0, 2): sqrt_two_plus,
+        (0, 3): sqrt_two_minus,
+        (1, 1): (Fraction(2), Fraction(0), Fraction(0), Fraction(0)),
+        (1, 2): (Fraction(0), Fraction(0), Fraction(1), Fraction(1)),
+        (1, 3): (Fraction(0), Fraction(0), Fraction(1), Fraction(-1)),
+        (2, 2): (Fraction(2), Fraction(1), Fraction(0), Fraction(0)),
+        (2, 3): sqrt_two,
+        (3, 3): (Fraction(2), Fraction(-1), Fraction(0), Fraction(0)),
+    }
+
+    def multiply(
+        left: tuple[Fraction, Fraction, Fraction, Fraction],
+        right: tuple[Fraction, Fraction, Fraction, Fraction],
+    ) -> tuple[Fraction, Fraction, Fraction, Fraction]:
+        result = [Fraction(0), Fraction(0), Fraction(0), Fraction(0)]
+        for left_index, left_coefficient in enumerate(left):
+            if left_coefficient == 0:
+                continue
+            for right_index, right_coefficient in enumerate(right):
+                if right_coefficient == 0:
+                    continue
+                product = basis_products[tuple(sorted((left_index, right_index)))]
+                for result_index, value in enumerate(product):
+                    result[result_index] += left_coefficient * right_coefficient * value
+        return tuple(result)  # type: ignore[return-value]
+
+    def form(
+        node: ast.AST,
+    ) -> tuple[Fraction, Fraction, Fraction, Fraction] | None:
         rational = _constant_fraction(node)
         if rational is not None:
-            return rational, Fraction(0)
+            return rational, Fraction(0), Fraction(0), Fraction(0)
         if isinstance(node, ast.Call):
             if (
                 isinstance(node.func, ast.Name)
                 and node.func.id == "sqrt"
                 and len(node.args) == 1
                 and not node.keywords
-                and _constant_fraction(node.args[0]) == 2
             ):
-                return Fraction(0), Fraction(1)
+                radicand = form(node.args[0])
+                if radicand == (Fraction(2), Fraction(0), Fraction(0), Fraction(0)):
+                    return sqrt_two
+                if radicand == (Fraction(2), Fraction(1), Fraction(0), Fraction(0)):
+                    return sqrt_two_plus
+                if radicand == (Fraction(2), Fraction(-1), Fraction(0), Fraction(0)):
+                    return sqrt_two_minus
+                if radicand == (
+                    Fraction(1, 2), Fraction(1, 4), Fraction(0), Fraction(0)
+                ):
+                    return Fraction(0), Fraction(0), Fraction(1, 2), Fraction(0)
+                if radicand == (
+                    Fraction(1, 2), Fraction(-1, 4), Fraction(0), Fraction(0)
+                ):
+                    return Fraction(0), Fraction(0), Fraction(0), Fraction(1, 2)
             return None
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             value = form(node.operand)
             if value is None or isinstance(node.op, ast.UAdd):
                 return value
-            return -value[0], -value[1]
+            return tuple(-component for component in value)  # type: ignore[return-value]
         if not isinstance(node, ast.BinOp):
             return None
         left = form(node.left)
@@ -6749,30 +6805,27 @@ def _parse_quadratic_surd(source: str) -> tuple[Fraction, Fraction] | None:
         if left is None or right is None:
             return None
         if isinstance(node.op, ast.Add):
-            return left[0] + right[0], left[1] + right[1]
+            return tuple(a + b for a, b in zip(left, right))  # type: ignore[return-value]
         if isinstance(node.op, ast.Sub):
-            return left[0] - right[0], left[1] - right[1]
+            return tuple(a - b for a, b in zip(left, right))  # type: ignore[return-value]
         if isinstance(node.op, ast.Mult):
-            return (
-                left[0] * right[0] + 2 * left[1] * right[1],
-                left[0] * right[1] + left[1] * right[0],
-            )
-        if isinstance(node.op, ast.Div) and right[1] == 0 and right[0] != 0:
-            return left[0] / right[0], left[1] / right[0]
+            return multiply(left, right)
+        if isinstance(node.op, ast.Div) and right[1:] == zero[1:] and right[0] != 0:
+            return tuple(value / right[0] for value in left)  # type: ignore[return-value]
         if isinstance(node.op, ast.Pow):
             exponent = _constant_fraction(node.right)
             if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
                 return None
-            result = (Fraction(1), Fraction(0))
+            result = one
             for _ in range(exponent.numerator):
-                result = (
-                    result[0] * left[0] + 2 * result[1] * left[1],
-                    result[0] * left[1] + result[1] * left[0],
-                )
+                result = multiply(result, left)
             return result
         return None
 
-    return form(tree.body)
+    try:
+        return form(tree.body)
+    except RecursionError:
+        return None
 
 
 def _fraction_text(value: Fraction) -> str:
@@ -6842,11 +6895,28 @@ def _lean_rational(value: Fraction) -> str:
     return f"(({value.numerator} : ℝ) / {value.denominator})"
 
 
-def _lean_quadratic_surd(rational: Fraction, radical: Fraction) -> str:
-    if radical == 0:
-        return _lean_rational(rational)
-    radical_term = f"({_lean_rational(abs(radical))} * Real.sqrt 2)"
-    if rational == 0:
-        return f"(-{radical_term})" if radical < 0 else radical_term
-    operation = "-" if radical < 0 else "+"
-    return f"({_lean_rational(rational)} {operation} {radical_term})"
+def _lean_exact_radical_basis(
+    coefficients: tuple[Fraction, Fraction, Fraction, Fraction],
+) -> str:
+    basis = (
+        "",
+        "Real.sqrt 2",
+        "Real.sqrt (2 + Real.sqrt 2)",
+        "Real.sqrt (2 - Real.sqrt 2)",
+    )
+    terms: list[str] = []
+    for coefficient, radical in zip(coefficients, basis):
+        if coefficient == 0:
+            continue
+        if radical:
+            term = f"({_lean_rational(abs(coefficient))} * {radical})"
+        else:
+            term = _lean_rational(abs(coefficient))
+        if not terms:
+            terms.append(f"-{term}" if coefficient < 0 else term)
+        else:
+            operation = "-" if coefficient < 0 else "+"
+            terms.append(f" {operation} {term}")
+    if not terms:
+        return _lean_rational(Fraction(0))
+    return f"({' '.join(terms)})"
