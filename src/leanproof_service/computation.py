@@ -696,25 +696,42 @@ def _rational_denominator_vanishes_at_symbolic_point(
     variable: str,
     point: ast.AST,
 ) -> bool:
-    import sympy as _sympy
-
-    point_expression = _real_sympy_expression(point)
-    if point_expression is None:
-        return True
-    variable_symbol = _sympy.Symbol(variable)
     for denominator in _variable_denominators(expression):
-        denominator_expression = _real_sympy_expression(denominator)
-        if denominator_expression is None:
-            return True
-        try:
-            at_point = _sympy.simplify(
-                denominator_expression.subs(variable_symbol, point_expression)
-            )
-        except (TypeError, ValueError, RecursionError):
+        at_point = _rational_node_value_at_point(
+            denominator, variable, None, point
+        )
+        if at_point is None:
             return True
         if at_point == 0 or at_point.is_zero is True:
             return True
     return False
+
+
+def _rational_node_value_at_point(
+    node: ast.AST,
+    variable: str,
+    point: Fraction | None,
+    point_tree: ast.AST | None,
+) -> object | None:
+    import sympy as _sympy
+
+    expression = _real_sympy_expression(node)
+    if expression is None:
+        return None
+    if point is not None:
+        point_expression = _sympy.Rational(point.numerator, point.denominator)
+    elif point_tree is not None:
+        point_expression = _real_sympy_expression(point_tree)
+        if point_expression is None:
+            return None
+    else:
+        return None
+    try:
+        return _sympy.simplify(
+            expression.subs(_sympy.Symbol(variable), point_expression)
+        )
+    except (TypeError, ValueError, RecursionError):
+        return None
 
 
 def _prepare_removable_rational_limit(
@@ -740,8 +757,8 @@ def _prepare_removable_rational_limit(
         return None
 
     simplified_source = simplified["result"]
-    simplified_lean, simplified_symbols = _render_polynomial_lean(simplified_source)
-    result_lean, result_symbols = _render_polynomial_lean(limit_result)
+    simplified_lean, simplified_symbols = _render_rational_limit_lean(simplified_source)
+    result_lean, result_symbols = _render_rational_limit_lean(limit_result)
     expression_lean, expression_symbols = _render_rational_limit_lean(expression_source)
     if simplified_lean is None or result_lean is None or expression_lean is None:
         return None
@@ -754,25 +771,33 @@ def _prepare_removable_rational_limit(
     if not denominators:
         return None
     vanishing_denominators: list[tuple[ast.AST, Fraction, int]] = []
+    nonvanishing_denominators: list[tuple[ast.AST, Fraction | None]] = []
     for denominator in denominators:
-        if point is not None:
-            denominator_value = _exact_rational_node_value(
-                denominator, variable, point
-            )
+        denominator_value = _rational_node_value_at_point(
+            denominator, variable, point, point_tree
+        )
+        if denominator_value is None:
+            return None
+        if denominator_value == 0 or getattr(denominator_value, "is_zero", None) is True:
             vanishing_factor = _vanishing_affine_power(
                 denominator, variable, point
-            )
-            if denominator_value != 0 or vanishing_factor is None:
-                return None
-        else:
-            if point_tree is None:
-                return None
-            vanishing_factor = _vanishing_affine_power_at_symbolic_point(
-                denominator, variable, point_tree
-            )
+            ) if point is not None else None
+            if point is None:
+                if point_tree is None:
+                    return None
+                vanishing_factor = _vanishing_affine_power_at_symbolic_point(
+                    denominator, variable, point_tree
+                )
             if vanishing_factor is None:
                 return None
-        vanishing_denominators.append((denominator, *vanishing_factor))
+            vanishing_denominators.append((denominator, *vanishing_factor))
+        else:
+            rational_value = None
+            if getattr(denominator_value, "is_Rational", False):
+                rational_value = Fraction(
+                    int(denominator_value.p), int(denominator_value.q)
+                )
+            nonvanishing_denominators.append((denominator, rational_value))
 
     used_names = (
         expression_symbols | simplified_symbols | result_symbols | point_symbols | {variable}
@@ -785,14 +810,14 @@ def _prepare_removable_rational_limit(
         0,
         substitutions={variable: limit_variable},
     )
-    simplified_expression = _render_polynomial_node(
+    simplified_expression = _render_rational_limit_node(
         simplified_tree.body,
         set(),
         {"nodes": 0},
         0,
         substitutions={variable: limit_variable},
     )
-    simplified_value = _render_polynomial_node(
+    simplified_value = _render_rational_limit_node(
         simplified_tree.body,
         set(),
         {"nodes": 0},
@@ -824,11 +849,117 @@ def _prepare_removable_rational_limit(
     if continuity_proof is None:
         return None
 
+    denominator_continuity_proofs: list[tuple[str, str, str, str, str, str]] = []
+    domain_binders = continuity_state["domain_binders"]
+    domain_conditions = continuity_state["domain_conditions"]
+    assumed_denominators = continuity_state["assumed_denominators"]
+    denominator_assumptions = continuity_state["denominator_assumptions"]
+    if (
+        not isinstance(domain_binders, list)
+        or not isinstance(domain_conditions, list)
+        or not isinstance(assumed_denominators, list)
+        or not isinstance(denominator_assumptions, list)
+    ):
+        return None
+    for index, (denominator, rational_value) in enumerate(nonvanishing_denominators):
+        denominator_body = _render_rational_limit_node(
+            denominator,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: limit_variable},
+        )
+        denominator_at_point = _render_rational_limit_node(
+            denominator,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_lean},
+        )
+        if denominator_body is None or denominator_at_point is None:
+            return None
+        denominator_continuity = _rational_continuity_proof(
+            denominator,
+            variable,
+            point,
+            point_lean,
+            point_display,
+            continuity_state,
+            0,
+        )
+        if denominator_continuity is None:
+            return None
+
+        point_nonzero = next(
+            (
+                name
+                for name, expression in assumed_denominators
+                if expression == denominator_at_point
+            ),
+            None,
+        )
+        if point_nonzero is None:
+            point_nonzero = next(
+                (
+                    name
+                    for name, expression in denominator_assumptions
+                    if expression == denominator_at_point
+                ),
+                None,
+            )
+        if point_nonzero is None:
+            point_nonzero = _fresh_identifier(
+                f"h_limit_denominator_at_point_{index}", continuity_state["used_names"]
+            )
+            if rational_value is not None:
+                if rational_value == 0:
+                    return None
+                denominator_assumptions.append((point_nonzero, denominator_at_point))
+            else:
+                domain_binders.append(
+                    f"({point_nonzero} : {denominator_at_point} ≠ 0)"
+                )
+                assumed_denominators.append((point_nonzero, denominator_at_point))
+                denominator_source = ast.unparse(denominator).replace("**", "^")
+                if any(
+                    isinstance(child, ast.Name) and child.id == variable
+                    for child in ast.walk(denominator)
+                ):
+                    condition = (
+                        f"{denominator_source} ≠ 0 at {variable} = {point_display}"
+                    )
+                else:
+                    condition = f"{denominator_source} ≠ 0"
+                domain_conditions.append(condition)
+
+        hden_continuous = _fresh_identifier(
+            f"h_limit_denominator_continuous_{index}", continuity_state["used_names"]
+        )
+        hden_eventually = _fresh_identifier(
+            f"h_limit_denominator_eventually_{index}", continuity_state["used_names"]
+        )
+        hden_eventually_within = _fresh_identifier(
+            f"h_limit_denominator_eventually_within_{index}",
+            continuity_state["used_names"],
+        )
+        denominator_continuity_proofs.append(
+            (
+                hden_continuous,
+                hden_eventually,
+                hden_eventually_within,
+                denominator_body,
+                denominator_continuity,
+                point_nonzero,
+            )
+        )
+
     theorem_symbols = sorted(
         (expression_symbols | simplified_symbols | result_symbols | point_symbols)
         - {variable, limit_variable}
     )
-    binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
+    binders = " ".join(
+        [*(f"({name} : ℝ)" for name in theorem_symbols), *domain_binders]
+    )
     theorem_binders = f" {binders}" if binders else ""
     hcont = _fresh_identifier("h_limit_continuous", used_names)
     hvalue = _fresh_identifier("h_limit_value", used_names)
@@ -875,12 +1006,62 @@ def _prepare_removable_rational_limit(
         denominator_proofs.append(denominator_proof)
         denominator_names.append(hden)
 
-    field_simp = f"field_simp [{', '.join(denominator_names)}] <;> ring"
-    denominator_proof_source = "\n".join(
+    eventual_names: list[str] = []
+    eventual_hypotheses: list[str] = []
+    eventual_proof_blocks: list[str] = []
+    for (
+        hden_continuous,
+        hden_eventually,
+        hden_eventually_within,
+        denominator_body,
+        denominator_continuity,
+        point_nonzero,
+    ) in denominator_continuity_proofs:
+        event_variable = _fresh_identifier("limit_neighborhood_variable", used_names)
+        event_body = denominator_body.replace(limit_variable, event_variable)
+        eventual_names.append(hden_eventually_within)
+        eventual_hypothesis = _fresh_identifier(
+            "h_limit_denominator_nonzero", used_names
+        )
+        eventual_hypotheses.append(eventual_hypothesis)
+        eventual_proof_blocks.append(
+            f"  have {hden_continuous} : ContinuousAt "
+            f"(fun {event_variable} : ℝ => {event_body}) {point_lean} := "
+            f"{denominator_continuity}\n"
+            f"  have {hden_eventually} : ∀ᶠ {event_variable} in nhds {point_lean}, "
+            f"{event_body} ≠ 0 := {hden_continuous}.eventually_ne {point_nonzero}\n"
+            f"  have {hden_eventually_within} : ∀ᶠ {event_variable} in "
+            f"nhdsWithin {point_lean} ({{{point_lean}}}ᶜ), {event_body} ≠ 0 := "
+            f"{hden_eventually}.filter_mono nhdsWithin_le_nhds"
+        )
+
+    all_denominator_names = [*denominator_names, *eventual_hypotheses]
+    field_simp = f"field_simp [{', '.join(all_denominator_names)}] <;> ring"
+    point_denominator_proof_source = "\n".join(
+        f"  have {name} : {denominator} ≠ 0 := by norm_num"
+        for name, denominator in denominator_assumptions
+    )
+    point_denominator_proof_source = (
+        f"{point_denominator_proof_source}\n"
+        if point_denominator_proof_source
+        else ""
+    )
+    value_denominator_names = [
+        *(name for name, _ in assumed_denominators),
+        *(name for name, _ in denominator_assumptions),
+    ]
+    value_proof = (
+        f"field_simp [{', '.join(value_denominator_names)}] <;> ring"
+        if value_denominator_names
+        else "ring"
+    )
+    vanishing_denominator_proof_source = "\n".join(
         "  " + line
         for proof in denominator_proofs
         for line in proof.splitlines()
     )
+    eventual_proof_source = "\n".join(eventual_proof_blocks)
+    eventual_proof_source = f"{eventual_proof_source}\n" if eventual_proof_source else ""
     source = f"""import Mathlib.Basic.Real.Basic
 import Mathlib.Topology.Instances.Real.Lemmas
 import Mathlib.Topology.Continuous
@@ -891,15 +1072,17 @@ import Mathlib.Tactic.Ring
 theorem wolfram_language_compute{theorem_binders} :
     Filter.Tendsto (fun {limit_variable} : ℝ => {expression})
       (nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)) (nhds {result_lean}) := by
-  have {hcont} : ContinuousAt (fun {limit_variable} : ℝ => {real_simplified_expression})
+{point_denominator_proof_source}  have {hcont} : ContinuousAt (fun {limit_variable} : ℝ => {real_simplified_expression})
       {point_lean} := {continuity_proof}
-  have {hvalue} : {real_simplified_value} = {result_lean} := by ring
-  have {heq} : (fun {limit_variable} : ℝ => {expression}) =ᶠ[
+  have {hvalue} : {real_simplified_value} = {result_lean} := by
+    {value_proof}
+{eventual_proof_source}  have {heq} : (fun {limit_variable} : ℝ => {expression}) =ᶠ[
       nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)]
       (fun {limit_variable} : ℝ => {real_simplified_expression}) := by
-    filter_upwards [self_mem_nhdsWithin] with {limit_variable} {hfilter_mem}
+    filter_upwards [self_mem_nhdsWithin{''.join(', ' + name for name in eventual_names)}]
+        with {limit_variable} {hfilter_mem}{''.join(' ' + name for name in eventual_hypotheses)}
     have {hpoint} : {limit_variable} ≠ {point_lean} := by simpa using {hfilter_mem}
-{denominator_proof_source}
+{vanishing_denominator_proof_source}
     {field_simp}
   have {hlim} : Filter.Tendsto (fun {limit_variable} : ℝ => {real_simplified_expression})
       (nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)) (nhds {result_lean}) := by
@@ -913,6 +1096,7 @@ theorem wolfram_language_compute{theorem_binders} :
     return Computation(
         limit_result.replace("**", "^"),
         source,
+        domain_conditions=tuple(dict.fromkeys(domain_conditions)),
         real_parameters=tuple(theorem_symbols),
     )
 

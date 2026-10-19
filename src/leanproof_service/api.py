@@ -308,7 +308,7 @@ def capabilities() -> dict[str, object]:
                         "indefinite polynomial antiderivatives",
                         "definite integrals of supported expressions with exact rational bounds",
                         "finite sums and products of rational-coefficient polynomials over inclusive integer ranges of up to 128 terms",
-                        "finite limits of bounded rational functions at exact rational or bounded real-polynomial points, with explicit denominator conditions and selected affine-factor removable singularities",
+                        "finite limits of bounded rational functions at exact rational or bounded real-polynomial points, including selected mixed-denominator removable singularities with explicit conditions",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
@@ -401,7 +401,7 @@ def capabilities() -> dict[str, object]:
                     "syntax": "Limit[expression, {variable, point}]",
                     "domain": "bounded rational functions over the reals with real parameters",
                     "point": "exact rational with numerator and denominator up to 256 bits, or a rational-coefficient polynomial in real parameters of total degree at most 64 and coefficient components up to 256 bits",
-                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero values at the point as explicit domain conditions; the removable-singularity path is supported only when every nonconstant denominator vanishes at the point and is an affine rational expression or a positive integer power of a nonzero rational-slope affine factor, with simplification yielding a bounded polynomial; Lean then proves eventual equality on the punctured neighborhood before checking the exact value",
+                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero values at the point as explicit domain conditions; selected removable singularities are supported when each vanishing denominator is an affine rational expression or a positive integer power of a nonzero rational-slope affine factor, while any other denominator must be nonzero at the point; Lean proves those denominators remain nonzero nearby and proves eventual equality on the punctured neighborhood before checking the exact value",
                 },
                 "rational_function_limits": {
                     "operators": ["+", "-", "*", "/", "^"],
@@ -412,7 +412,7 @@ def capabilities() -> dict[str, object]:
                     "variable_domain": "real numbers; symbolic denominator values at the limit point are explicit proof conditions",
                     "symbolic_point_maximum_total_degree": 64,
                     "symbolic_points": "bounded rational-coefficient polynomials in real parameters; free real parameter names are returned in evidence.real_parameters, and nonconstant denominators must be nonzero after substitution except for supported removable singularities",
-                    "removable_singularities": "supported only when every nonconstant denominator vanishes at the point; at exact rational points, denominators must be affine rational expressions or positive integer powers thereof; at symbolic polynomial points, denominators must be positive integer powers of nonzero rational-slope affine factors; simplification must yield a bounded polynomial",
+                    "removable_singularities": "at least one nonconstant denominator must vanish at the point; each vanishing denominator must be an affine rational expression or a positive integer power of a nonzero rational-slope affine factor; remaining denominators require explicit nonzero-at-point conditions and are proved nonzero in a neighborhood; simplification must yield a bounded rational function",
                 },
                 "derivative": {
                     "syntax": "D[expression, variable]",
