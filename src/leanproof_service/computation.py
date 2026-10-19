@@ -69,6 +69,9 @@ _FINITE_SUM_PRODUCT = re.compile(
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
+    # Wolfram Language uses case-sensitive `Pi`; the shared parser reserves lowercase `pi`.
+    if re.search(r"\bpi\b|π", code):
+        return None
     if re.fullmatch(r"\s*Sin\s*\[\s*Pi\s*\]\s*", code):
         source = """import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 
@@ -1622,6 +1625,56 @@ def _linear_rational_form(
     return None
 
 
+def _linear_rational_pi_form(
+    node: ast.AST,
+    variable: str,
+) -> tuple[Fraction, Fraction, Fraction] | None:
+    """Return the x slope, Pi coefficient, and rational offset of an affine form."""
+    constant = _constant_fraction(node)
+    if constant is not None:
+        return Fraction(0), Fraction(0), constant
+    if isinstance(node, ast.Name):
+        if node.id == variable:
+            return Fraction(1), Fraction(0), Fraction(0)
+        if node.id == "pi":
+            return Fraction(0), Fraction(1), Fraction(0)
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _linear_rational_pi_form(node.operand, variable)
+        if value is None or isinstance(node.op, ast.UAdd):
+            return value
+        return -value[0], -value[1], -value[2]
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _linear_rational_pi_form(node.left, variable)
+    right = _linear_rational_pi_form(node.right, variable)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return tuple(left[index] + right[index] for index in range(3))
+    if isinstance(node.op, ast.Sub):
+        return tuple(left[index] - right[index] for index in range(3))
+    if isinstance(node.op, ast.Mult):
+        left_is_rational = left[0] == 0 and left[1] == 0
+        right_is_rational = right[0] == 0 and right[1] == 0
+        if left_is_rational:
+            return tuple(value * left[2] for value in right)
+        if right_is_rational:
+            return tuple(value * right[2] for value in left)
+        return None
+    if isinstance(node.op, ast.Div) and right[0] == 0 and right[1] == 0 and right[2] != 0:
+        return tuple(value / right[2] for value in left)
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1:
+            return None
+        if exponent == 0:
+            return Fraction(0), Fraction(0), Fraction(1)
+        if exponent == 1:
+            return left
+    return None
+
+
 def _prepare_pi_bounded_sin_cos_integral(
     expression_source: str,
     variable: str,
@@ -1629,6 +1682,11 @@ def _prepare_pi_bounded_sin_cos_integral(
     upper_source: str,
     time_limit_seconds: float,
 ) -> Computation | None:
+    if "π" in expression_source or any(
+        match.group(0) != "Pi"
+        for match in re.finditer(r"\bpi\b", expression_source, re.IGNORECASE)
+    ):
+        return None
     normalized_source = _normalize_wolfram_real_functions(expression_source)
     exact_source = _normalize_decimal_literals(normalized_source)
     if exact_source is None:
@@ -1647,15 +1705,26 @@ def _prepare_pi_bounded_sin_cos_integral(
         and not integrand.keywords
     ):
         return None
-    argument_form = _linear_rational_form(integrand.args[0], variable)
+    argument_source = ast.unparse(integrand.args[0])
+    argument_lean, _ = _render_real_calculus_lean(
+        argument_source, allow_variable_denominators=False
+    )
+    integrand_lean, _ = _render_real_calculus_lean(
+        parsed.expression, allow_variable_denominators=False
+    )
+    argument_form = _linear_rational_pi_form(integrand.args[0], variable)
     if argument_form is None:
         return None
-    slope, intercept = argument_form
+    slope, phase_offset, rational_offset = argument_form
     if (
         slope == 0
-        or intercept != 0
+        or rational_offset != 0
         or abs(slope.numerator).bit_length() > 256
         or slope.denominator.bit_length() > 256
+        or abs(phase_offset.numerator).bit_length() > 256
+        or phase_offset.denominator.bit_length() > 256
+        or argument_lean is None
+        or integrand_lean is None
     ):
         return None
 
@@ -1672,8 +1741,8 @@ def _prepare_pi_bounded_sin_cos_integral(
         Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(0),
         Fraction(1, 2), Fraction(1), Fraction(2),
     }
-    lower_phase = slope * lower_multiple
-    upper_phase = slope * upper_multiple
+    lower_phase = slope * lower_multiple + phase_offset
+    upper_phase = slope * upper_multiple + phase_offset
     if lower_phase not in endpoint_multiples or upper_phase not in endpoint_multiples:
         return None
 
@@ -1705,32 +1774,43 @@ def _prepare_pi_bounded_sin_cos_integral(
     lean_lower_phase = _lean_pi_multiple(lower_phase)
     lean_upper_phase = _lean_pi_multiple(upper_phase)
     lean_slope = _lean_rational(slope)
+    lean_phase_offset = _lean_rational(phase_offset)
     lean_result = _lean_rational(result)
     if integrand.func.id == "sin":
-        primitive = "fun t : ℝ => -Real.cos (a * t) / a"
+        primitive = "fun t : ℝ => -Real.cos (a * t + b * Real.pi) / a"
         primitive_derivative = (
-            f"have hcos : HasDerivAt (fun y : ℝ => Real.cos (a * y)) "
-            f"(-Real.sin (a * x) * a) x := by\n"
-            f"      convert (Real.hasDerivAt_cos (a * x)).comp x "
-            f"(hasDerivAt_const_mul a) using 1\n"
+            f"have harg : {argument_lean} = a * {variable} + b * Real.pi := by\n"
+            f"      norm_num [a, b] <;> ring\n"
+            f"    have hlinear : HasDerivAt (fun y : ℝ => a * y + b * Real.pi) a {variable} := by\n"
+            f"      convert (hasDerivAt_const_mul a).add_const (b * Real.pi) using 1\n"
+            f"    have hcos : HasDerivAt (fun y : ℝ => Real.cos (a * y + b * Real.pi)) "
+            f"(-Real.sin (a * {variable} + b * Real.pi) * a) {variable} := by\n"
+            f"      convert (Real.hasDerivAt_cos (a * {variable} + b * Real.pi)).comp {variable} hlinear using 1\n"
             f"      ext y\n"
-            f"      rfl\n"
-            f"    convert hcos.neg.div_const a using 1\n"
-            f"    field_simp [ha]\n"
-            f"    <;> ring"
+            f"      simp\n"
+            f"    have hprimitive : HasDerivAt F (Real.sin (a * {variable} + b * Real.pi)) {variable} := by\n"
+            f"      convert hcos.neg.div_const a using 1\n"
+            f"      field_simp [ha]\n"
+            f"      <;> ring\n"
+            f"    simpa [harg] using hprimitive"
         )
     else:
-        primitive = "fun t : ℝ => Real.sin (a * t) / a"
+        primitive = "fun t : ℝ => Real.sin (a * t + b * Real.pi) / a"
         primitive_derivative = (
-            f"have hsin : HasDerivAt (fun y : ℝ => Real.sin (a * y)) "
-            f"(Real.cos (a * x) * a) x := by\n"
-            f"      convert (Real.hasDerivAt_sin (a * x)).comp x "
-            f"(hasDerivAt_const_mul a) using 1\n"
+            f"have harg : {argument_lean} = a * {variable} + b * Real.pi := by\n"
+            f"      norm_num [a, b] <;> ring\n"
+            f"    have hlinear : HasDerivAt (fun y : ℝ => a * y + b * Real.pi) a {variable} := by\n"
+            f"      convert (hasDerivAt_const_mul a).add_const (b * Real.pi) using 1\n"
+            f"    have hsin : HasDerivAt (fun y : ℝ => Real.sin (a * y + b * Real.pi)) "
+            f"(Real.cos (a * {variable} + b * Real.pi) * a) {variable} := by\n"
+            f"      convert (Real.hasDerivAt_sin (a * {variable} + b * Real.pi)).comp {variable} hlinear using 1\n"
             f"      ext y\n"
-            f"      rfl\n"
-            f"    convert hsin.div_const a using 1\n"
-            f"    field_simp [ha]\n"
-            f"    <;> ring"
+            f"      simp\n"
+            f"    have hprimitive : HasDerivAt F (Real.cos (a * {variable} + b * Real.pi)) {variable} := by\n"
+            f"      convert hsin.div_const a using 1\n"
+            f"      field_simp [ha]\n"
+            f"      <;> ring\n"
+            f"    simpa [harg] using hprimitive"
         )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -1740,31 +1820,31 @@ import Mathlib.Tactic.NormNum
 import Mathlib.Tactic.FieldSimp
 
 theorem wolfram_language_compute :
-    (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} ({lean_slope} * {variable})) = {lean_result} := by
+    (∫ {variable} in {lean_lower}..{lean_upper}, {integrand_lean}) = {lean_result} := by
   let a : ℝ := {lean_slope}
+  let b : ℝ := {lean_phase_offset}
   have ha : a ≠ 0 := by norm_num [a]
   let F : ℝ → ℝ := {primitive}
-  change (∫ {variable} in {lean_lower}..{lean_upper}, Real.{integrand.func.id} (a * {variable})) = {lean_result}
-  have hderiv : ∀ x ∈ Set.uIcc {lean_lower} {lean_upper},
-      HasDerivAt F (Real.{integrand.func.id} (a * x)) x := by
-    intro x hx
+  have hderiv : ∀ {variable} ∈ Set.uIcc {lean_lower} {lean_upper},
+      HasDerivAt F (Real.{integrand.func.id} {argument_lean}) {variable} := by
+    intro {variable} hx
     {primitive_derivative}
   have hcont : ContinuousOn
-      (fun x : ℝ => Real.{integrand.func.id} (a * x))
+      (fun {variable} : ℝ => {integrand_lean})
       (Set.uIcc {lean_lower} {lean_upper}) := by
     fun_prop
   have hint : IntervalIntegrable
-      (fun x : ℝ => Real.{integrand.func.id} (a * x))
+      (fun {variable} : ℝ => {integrand_lean})
       MeasureTheory.volume {lean_lower} {lean_upper} := by
     exact hcont.intervalIntegrable
-  have h_lower_phase : a * {lean_lower} = {lean_lower_phase} := by
-    norm_num [a] <;> ring
-  have h_upper_phase : a * {lean_upper} = {lean_upper_phase} := by
-    norm_num [a] <;> ring
+  have h_lower_phase : a * {lean_lower} + b * Real.pi = {lean_lower_phase} := by
+    norm_num [a, b] <;> ring
+  have h_upper_phase : a * {lean_upper} + b * Real.pi = {lean_upper_phase} := by
+    norm_num [a, b] <;> ring
   rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
   simp only [F]
   rw [h_upper_phase, h_lower_phase]
-  norm_num [a, Real.sin_pi_div_two,
+  norm_num [a, b, Real.sin_pi_div_two,
     Real.sin_pi, Real.sin_neg, Real.sin_two_pi, Real.cos_pi_div_two,
     Real.cos_neg, Real.cos_pi, Real.cos_two_pi]
 
@@ -4624,7 +4704,7 @@ theorem wolfram_language_compute ({variable} : ℝ) :
 
 
 def _normalize_wolfram_real_functions(source: str) -> str:
-    normalized = re.sub(r"\bPi\b", "pi", source, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bPi\b", "pi", source)
     for _ in range(64):
         def normalize_function(match: re.Match[str]) -> str:
             function_name = match.group("function").lower()
