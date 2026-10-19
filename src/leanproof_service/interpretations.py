@@ -216,9 +216,18 @@ def query_with_interpretations(
     by_id = {item["id"]: item for item in registry["assumptions"]}
     unit_literal = _UNIT_LITERAL.fullmatch(source_query) or _UNIT_LITERAL.fullmatch(query)
     trig = _TRIG_QUERY.fullmatch(query)
-    compound = None
+    compound = (
+        _compound_interpretation(query, selections, registry, by_id)
+        if any("@" in selection for selection in selections)
+        else None
+    )
     explicit_typed_quantity: dict[str, Any] | None = None
-    if unit_literal:
+    if compound is not None:
+        expression = compound["expression"]
+        typed_ast = compound["typed_ast"]
+        classifier = compound["classifier"]
+        assumption_payload = compound["assumptions"]
+    elif unit_literal:
         number = unit_literal.group("number")
         unit_alias = unit_literal.group("unit").casefold()
         if unit_alias == "m":
@@ -1553,22 +1562,65 @@ def _compound_interpretation(
     grouped_matches["LogBase"].extend(log_matches)
     active_types = {kind for kind, matches in grouped_matches.items() if matches}
     selected_by_type: dict[str, dict[str, Any]] = {}
+    selected_by_occurrence: dict[str, dict[int, dict[str, Any]]] = {}
     if len(selections) != len(set(selections)):
         raise AssumptionSelectionError("assumption selections cannot contain duplicates")
     if selections and not active_types:
         raise AssumptionSelectionError("assumption selection is not applicable to this input")
     for selection in selections:
-        item = by_id.get(selection)
+        assumption_id = selection
+        occurrence_index: int | None = None
+        if "@" in selection:
+            possible_id, possible_index = selection.rsplit("@", 1)
+            if possible_index.isdecimal():
+                # A query is capped at 4,000 characters, so a longer decimal
+                # index cannot refer to an occurrence in that query. Reject it
+                # before int() so arbitrarily long request values stay a 422.
+                if len(possible_index) > 9:
+                    raise AssumptionSelectionError(
+                        "assumption occurrence index is out of range"
+                    )
+                assumption_id = possible_id
+                occurrence_index = int(possible_index)
+                if occurrence_index < 1:
+                    raise AssumptionSelectionError(
+                        "assumption occurrence indexes start at 1"
+                    )
+        item = by_id.get(assumption_id)
         if item is None:
             raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
         kind = item["type"]
-        if kind not in active_types or selection not in {
-            candidate["id"] for candidate in candidates_by_type[kind]
+        if kind not in active_types or assumption_id not in {
+            candidate["id"] for candidate in candidates_by_type.get(kind, [])
         }:
-            raise AssumptionSelectionError(f"assumption {selection} is incompatible with this input")
-        if kind in selected_by_type:
-            raise AssumptionSelectionError("select at most one assumption value for each assumption type")
-        selected_by_type[kind] = item
+            raise AssumptionSelectionError(
+                f"assumption {assumption_id} is incompatible with this input"
+            )
+        if occurrence_index is not None:
+            if occurrence_index > len(grouped_matches[kind]):
+                raise AssumptionSelectionError(
+                    f"assumption occurrence {kind}:{occurrence_index} is not present in this input"
+                )
+            if kind in selected_by_type:
+                raise AssumptionSelectionError(
+                    f"use either a query-wide or per-occurrence selection for {kind}"
+                )
+            occurrence_choices = selected_by_occurrence.setdefault(kind, {})
+            if occurrence_index in occurrence_choices:
+                raise AssumptionSelectionError(
+                    f"select at most one value for {kind} occurrence {occurrence_index}"
+                )
+            occurrence_choices[occurrence_index] = item
+        else:
+            if kind in selected_by_occurrence:
+                raise AssumptionSelectionError(
+                    f"use either a query-wide or per-occurrence selection for {kind}"
+                )
+            if kind in selected_by_type:
+                raise AssumptionSelectionError(
+                    "select at most one assumption value for each assumption type"
+                )
+            selected_by_type[kind] = item
 
     assumption_payload: list[dict[str, Any]] = []
     ambiguity_rankings: list[dict[str, Any]] = []
@@ -1578,25 +1630,40 @@ def _compound_interpretation(
             continue
         candidates = candidates_by_type[kind]
         ranking = _rank_candidates(query, candidates)
-        chosen = selected_by_type.get(kind) or next(
-            item for item in candidates if item["service_default"]
-        )
-        selection_source = "caller_override" if kind in selected_by_type else "service_default"
+        default_choice = next(item for item in candidates if item["service_default"])
+        global_choice = selected_by_type.get(kind)
+        per_occurrence_choices = selected_by_occurrence.get(kind, {})
+        if global_choice is not None:
+            selection_source = "caller_override"
+        elif per_occurrence_choices:
+            selection_source = "per_occurrence_override"
+        else:
+            selection_source = "service_default"
         occurrence_values = [
             {
+                "id": f"{kind}:{index}",
                 "function": match.group("function").lower() if kind == "AngleUnit" else "log",
                 "argument": match.group("number"),
+                "selected": (
+                    global_choice or per_occurrence_choices.get(index) or default_choice
+                )["id"],
+                "selection_source": (
+                    "caller_override"
+                    if global_choice is not None
+                    else "per_occurrence_override"
+                    if index in per_occurrence_choices
+                    else "service_default"
+                ),
             }
-            for match in matches
+            for index, match in enumerate(matches, 1)
         ]
         ambiguity_rankings.append({
             "type": kind,
             "occurrences": occurrence_values,
             "ranking": ranking,
         })
-        assumption_payload.append({
+        assumption_item = {
             "type": kind,
-            "selected": chosen["id"],
             "selection_source": selection_source,
             "registry_version": registry["registry_version"],
             "occurrences": occurrence_values,
@@ -1608,9 +1675,15 @@ def _compound_interpretation(
                 }
                 for item in candidates
             ],
-        })
+        }
+        selected_ids = {item["selected"] for item in occurrence_values}
+        if len(selected_ids) == 1:
+            assumption_item["selected"] = next(iter(selected_ids))
+        assumption_payload.append(assumption_item)
 
-        for match in matches:
+        for index, match in enumerate(matches, 1):
+            chosen = global_choice or per_occurrence_choices.get(index) or default_choice
+            occurrence_id = f"{kind}:{index}"
             if kind == "AngleUnit":
                 function = match.group("function").lower()
                 number = match.group("number")
@@ -1621,7 +1694,8 @@ def _compound_interpretation(
                 resolved_calls.append({
                     "function": function,
                     "argument": {"kind": "quantity", "magnitude": number, "unit": unit},
-                    "selection_source": selection_source,
+                    "selection_source": occurrence_values[index - 1]["selection_source"],
+                    "occurrence_id": occurrence_id,
                 })
             else:
                 number = match.group("number")
@@ -1631,7 +1705,8 @@ def _compound_interpretation(
                     "function": "log",
                     "argument": {"kind": "number", "value": number},
                     "base": base,
-                    "selection_source": selection_source,
+                    "selection_source": occurrence_values[index - 1]["selection_source"],
+                    "occurrence_id": occurrence_id,
                 })
             replacements.append((match.start(), match.end(), replacement))
 

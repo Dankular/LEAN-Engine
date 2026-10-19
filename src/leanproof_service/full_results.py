@@ -2840,6 +2840,15 @@ def _append_assumptions(root: ET.Element, assumptions: list[dict[str, Any]]) -> 
                 if isinstance(content, (str, int, float, bool))
             }
             ET.SubElement(item, "value", value_attributes)
+        for occurrence in assumption.get("occurrences", []):
+            if not isinstance(occurrence, dict):
+                continue
+            occurrence_attributes = {
+                key: _xml_value(content)
+                for key, content in occurrence.items()
+                if isinstance(content, (str, int, float, bool))
+            }
+            ET.SubElement(item, "occurrence", occurrence_attributes)
 
 
 def _append_sources(root: ET.Element, sources: list[dict[str, Any]]) -> None:

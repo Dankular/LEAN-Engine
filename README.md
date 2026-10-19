@@ -50,6 +50,16 @@ Supported results include Lean evidence. For this example, the derivative is che
 - **Queries and assumptions:** Full Results-style query responses, interpretation candidates, and explicit service-owned assumption IDs.
 - **Factual lookups:** configured Wikidata, DBnomics, NIST CODATA, GeoNames, and Open-Meteo adapters. Retrieved facts include source data; they are not Lean proofs.
 
+### Assumption overrides
+
+`/v2/query` returns candidate assumptions and applies service defaults unless the caller selects an alternative. A query-wide ID applies to every matching ambiguous call; `@N` selects one-based occurrence `N` for angle and parenthesized-log calls. For example, this selects degrees for the first trig call while leaving later calls at the default:
+
+```text
+GET /v2/query?input=sin%2830%29%2Bcos%2860%29&assumption=angle%3Adegrees%401&output=json
+```
+
+Per-occurrence overrides are also available through repeated `assumption` parameters. For one assumption type, do not combine a query-wide choice with per-occurrence choices.
+
 Computation routes require the bearer token. `/healthz`, `/readyz`, and `/docs` are public. GeoNames lookups also require `GEONAMES_USERNAME`.
 
 Natural-language theorem generation requires an OpenAI-compatible model server. The dev script defaults to a local server at port 8081; override these before startup if needed:
