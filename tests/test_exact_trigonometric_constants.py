@@ -16,6 +16,8 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Sin[Pi/3]": "sqrt(3)/2",
             "Sin[Pi/4]": "sqrt(2)/2",
             "Sin[Pi/6]": "1/2",
+            "Sin[Pi/5]": "sqrt(10 - 2*sqrt(5))/4",
+            "Sin[Pi/10]": "(sqrt(5) - 1)/4",
             "Sin[Pi/8]": "sqrt(2 - sqrt(2))/2",
             "Sin[Pi/16]": "sqrt(2 - sqrt(2 + sqrt(2)))/2",
             "Sin[Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
@@ -27,11 +29,17 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[15Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
             "Sin[5Pi/8]": "sqrt(2 + sqrt(2))/2",
             "Cos[5Pi/8]": "-sqrt(2 - sqrt(2))/2",
+            "Sin[2Pi/5]": "sqrt(10 + 2*sqrt(5))/4",
+            "Cos[2Pi/5]": "(sqrt(5) - 1)/4",
+            "Sin[3Pi/10]": "(1 + sqrt(5))/4",
+            "Cos[3Pi/10]": "sqrt(10 - 2*sqrt(5))/4",
             "Cos[Pi]": "-1",
             "Cos[Pi/2]": "0",
             "Cos[Pi/3]": "1/2",
             "Cos[Pi/4]": "sqrt(2)/2",
             "Cos[Pi/6]": "sqrt(3)/2",
+            "Cos[Pi/5]": "(1 + sqrt(5))/4",
+            "Cos[Pi/10]": "sqrt(10 + 2*sqrt(5))/4",
             "Cos[Pi/8]": "sqrt(2 + sqrt(2))/2",
             "Cos[Pi/16]": "sqrt(2 + sqrt(2 + sqrt(2)))/2",
             "Cos[Pi/32]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
@@ -60,13 +68,18 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
     def test_representative_values_are_checked_by_lean(self) -> None:
         cases = (
             "Sin[Pi/6]",
+            "Sin[Pi/5]",
+            "Sin[Pi/10]",
+            "Cos[Pi/10]",
             "Sin[2Pi/3]",
+            "Sin[2Pi/5]",
             "Cos[2Pi/3]",
             "Tan[2Pi/3]",
             "Sin[2Pi]",
             "Sin[3Pi/8]",
             "Cos[3Pi/8]",
             "Cos[5Pi/8]",
+            "Cos[3Pi/10]",
             "Sin[-Pi]",
             "Cos[Pi/8]",
             "Cos[-Pi/3]",
@@ -82,7 +95,7 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
                 self.assertEqual(result.status, "checked", result.diagnostics)
 
     def test_unlisted_angles_and_tangent_poles_remain_unsupported(self) -> None:
-        self.assertIsNone(prepare_computation("Sin[Pi/5]", 10))
+        self.assertIsNone(prepare_computation("Sin[Pi/7]", 10))
         self.assertIsNone(prepare_computation("Sin[3Pi/16]", 10))
         self.assertIsNone(prepare_computation("Tan[3Pi/8]", 10))
         self.assertIsNone(prepare_computation("Cos[Pi/64]", 10))

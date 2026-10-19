@@ -76,6 +76,16 @@ _EXACT_PI_TRIG_VALUES: dict[
         3: ("sqrt(3)/2", "Real.sqrt 3 / 2", "Real.sin_pi_div_three"),
         4: ("sqrt(2)/2", "Real.sqrt 2 / 2", "Real.sin_pi_div_four"),
         6: ("1/2", "1 / 2", "Real.sin_pi_div_six"),
+        5: (
+            "sqrt(10 - 2*sqrt(5))/4",
+            "Real.sqrt (10 - 2 * Real.sqrt 5) / 4",
+            "wolfram_sin_pi_div_five",
+        ),
+        10: (
+            "(sqrt(5) - 1)/4",
+            "(Real.sqrt 5 - 1) / 4",
+            "wolfram_sin_pi_div_ten",
+        ),
         8: (
             "sqrt(2 - sqrt(2))/2",
             "Real.sqrt (2 - Real.sqrt 2) / 2",
@@ -98,6 +108,16 @@ _EXACT_PI_TRIG_VALUES: dict[
         3: ("1/2", "1 / 2", "Real.cos_pi_div_three"),
         4: ("sqrt(2)/2", "Real.sqrt 2 / 2", "Real.cos_pi_div_four"),
         6: ("sqrt(3)/2", "Real.sqrt 3 / 2", "Real.cos_pi_div_six"),
+        5: (
+            "(1 + sqrt(5))/4",
+            "(1 + Real.sqrt 5) / 4",
+            "Real.cos_pi_div_five",
+        ),
+        10: (
+            "sqrt(10 + 2*sqrt(5))/4",
+            "Real.sqrt (10 + 2 * Real.sqrt 5) / 4",
+            "wolfram_cos_pi_div_ten",
+        ),
         8: (
             "sqrt(2 + sqrt(2))/2",
             "Real.sqrt (2 + Real.sqrt 2) / 2",
@@ -120,6 +140,56 @@ _EXACT_PI_TRIG_VALUES: dict[
         4: ("1", "1", "Real.tan_pi_div_four"),
         6: ("1/sqrt(3)", "1 / Real.sqrt 3", "Real.tan_pi_div_six"),
     },
+}
+_EXACT_PI_TRIG_SUPPORTING_LEMMAS = {
+    "wolfram_sin_pi_div_five": """theorem wolfram_sin_pi_div_five :
+    Real.sin (Real.pi / 5) = Real.sqrt (10 - 2 * Real.sqrt 5) / 4 := by
+  have h5 : Real.sqrt 5 ^ 2 = (5 : ℝ) := by
+    rw [Real.sq_sqrt (by norm_num : (0 : ℝ) ≤ 5)]
+  have h0 : 0 < Real.pi / 5 := by positivity
+  have hpi : Real.pi / 5 < Real.pi := by nlinarith [Real.pi_pos]
+  rw [Real.sin_eq_sqrt_one_sub_cos_sq h0.le hpi.le, Real.cos_pi_div_five]
+  have hrad : 0 ≤ 10 - 2 * Real.sqrt 5 := by nlinarith [h5]
+  have hsqrt := Real.sq_sqrt hrad
+  have hrad_eq :
+      1 - ((1 + Real.sqrt 5) / 4) ^ 2 =
+        (Real.sqrt (10 - 2 * Real.sqrt 5) / 4) ^ 2 := by
+    nlinarith [h5, hsqrt]
+  rw [hrad_eq, Real.sqrt_sq_eq_abs, abs_of_nonneg]
+  positivity
+""",
+    "wolfram_sin_pi_div_ten": """theorem wolfram_sin_pi_div_ten :
+    Real.sin (Real.pi / 10) = (Real.sqrt 5 - 1) / 4 := by
+  have h5 : Real.sqrt 5 ^ 2 = (5 : ℝ) := by
+    rw [Real.sq_sqrt (by norm_num : (0 : ℝ) ≤ 5)]
+  have h0 : 0 ≤ Real.pi / 5 := by positivity
+  have h2 : Real.pi / 5 ≤ 2 * Real.pi := by nlinarith [Real.pi_pos]
+  rw [show Real.pi / 10 = (Real.pi / 5) / 2 by ring,
+    Real.sin_half_eq_sqrt h0 h2, Real.cos_pi_div_five]
+  have hrad_eq :
+      (1 - (1 + Real.sqrt 5) / 4) / 2 =
+        ((Real.sqrt 5 - 1) / 4) ^ 2 := by
+    nlinarith [h5]
+  rw [hrad_eq, Real.sqrt_sq_eq_abs, abs_of_nonneg]
+  nlinarith [h5, Real.sqrt_nonneg (5 : ℝ)]
+""",
+    "wolfram_cos_pi_div_ten": """theorem wolfram_cos_pi_div_ten :
+    Real.cos (Real.pi / 10) = Real.sqrt (10 + 2 * Real.sqrt 5) / 4 := by
+  have h5 : Real.sqrt 5 ^ 2 = (5 : ℝ) := by
+    rw [Real.sq_sqrt (by norm_num : (0 : ℝ) ≤ 5)]
+  have hlo : -Real.pi ≤ Real.pi / 5 := by nlinarith [Real.pi_pos]
+  have hhi : Real.pi / 5 ≤ Real.pi := by nlinarith [Real.pi_pos]
+  rw [show Real.pi / 10 = (Real.pi / 5) / 2 by ring,
+    Real.cos_half hlo hhi, Real.cos_pi_div_five]
+  have hrad : 0 ≤ 10 + 2 * Real.sqrt 5 := by positivity
+  have hsqrt := Real.sq_sqrt hrad
+  have hrad_eq :
+      (1 + (1 + Real.sqrt 5) / 4) / 2 =
+        (Real.sqrt (10 + 2 * Real.sqrt 5) / 4) ^ 2 := by
+    nlinarith [h5, hsqrt]
+  rw [hrad_eq, Real.sqrt_sq_eq_abs, abs_of_nonneg]
+  positivity
+""",
 }
 
 
@@ -343,12 +413,19 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
     lean_multiple = _lean_rational(pi_multiple)
     proof = f"""by
   have hangle : {lean_multiple} * Real.pi = {angle_decomposition} := by
-    norm_num <;> ring
+    norm_num
+    all_goals ring
   rw [hangle, {identity}]
   rw [{", ".join(base_lemmas)}] <;> norm_num
 """
+    supporting_lemmas = "\n".join(
+        _EXACT_PI_TRIG_SUPPORTING_LEMMAS[lemma]
+        for lemma in base_lemmas
+        if lemma in _EXACT_PI_TRIG_SUPPORTING_LEMMAS
+    )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 
+{supporting_lemmas}
 theorem wolfram_language_compute :
     Real.{function} ({lean_multiple} * Real.pi) = {lean_result} := {proof}
 

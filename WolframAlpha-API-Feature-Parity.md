@@ -44,12 +44,13 @@ configured key directly or as a bearer token.
 The CAG route also evaluates exact Sin, Cos, and selected Tan values for bounded
 rational multiples of Pi. It reduces the coefficient by integer periods and reflection,
 then accepts a base angle of zero or Pi/d. Sin and Cos also accept half-pi complements
-Pi/2 - Pi/d for d = 8, 16, and 32. Sin and Cos support d = 2, 3, 4, 6, 8, 16, and
-32; Tan supports d = 3, 4, and 6, with poles rejected. The rational numerator and
-denominator are limited to 256 bits. Lean checks period, reflection, and cofunction
-identities plus the Mathlib base value. For example, Sin[2 Pi/3] reduces to
-Sin[Pi - Pi/3], and Sin[3 Pi/8] reduces to Cos[Pi/8]. Other reduced angles and
-arbitrary numeric angles remain unsupported.
+Pi/2 - Pi/d for d = 5, 8, 10, 16, and 32. Sin and Cos support d = 2, 3, 4, 5, 6, 8,
+10, 16, and 32; Tan supports d = 3, 4, and 6, with poles rejected. The rational
+numerator and denominator are limited to 256 bits. Lean checks period, reflection, and
+cofunction identities plus the Mathlib base values; the fifth and tenth angle values use
+Lean derivations from Mathlib's cosine-at-Pi/5 theorem. For example, Sin[2 Pi/3]
+reduces to Sin[Pi - Pi/3], Sin[3 Pi/8] reduces to Cos[Pi/8], and Sin[2 Pi/5] reduces
+to Cos[Pi/10]. Other reduced angles and arbitrary numeric angles remain unsupported.
 
 The CAG endpoint and `/v2/query?verify=true` also support finite `Sum` and `Product`
 over inclusive integer bounds when the integrand and result fit the rational-polynomial
