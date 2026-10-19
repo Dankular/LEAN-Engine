@@ -2176,7 +2176,10 @@ def _prepare_real_antiderivative(
     if coth_arguments is None:
         return None
     csch_arguments = _csch_arguments(integrand_tree.body)
-    if csch_arguments is None or csch_arguments:
+    if csch_arguments is None:
+        return None
+    csch_affine = _direct_csch_affine_integrand(integrand_tree.body, variable)
+    if csch_arguments and csch_affine is None:
         return None
     coth_affine = _direct_coth_affine_integrand(
         integrand_tree.body, variable
@@ -2242,6 +2245,16 @@ def _prepare_real_antiderivative(
             if slope == 1
             else f"({sech_antiderivative})/({_fraction_text(slope)})"
         )
+    elif csch_affine is not None:
+        argument, slope = csch_affine
+        csch_antiderivative = (
+            f"log(abs(tanh(({ast.unparse(argument)})/2)))"
+        )
+        antiderivative = (
+            csch_antiderivative
+            if slope == 1
+            else f"({csch_antiderivative})/({_fraction_text(slope)})"
+        )
     if coth_arguments:
         antiderivative = _wrap_coth_log_abs(antiderivative)
     try:
@@ -2262,6 +2275,7 @@ def _prepare_real_antiderivative(
         *_variable_denominators(tree.body),
         *_log_arguments(tree.body),
         *(_sinh_call(argument) for argument in coth_arguments),
+        *(_sinh_call(argument) for argument in csch_arguments),
     ]
     domain_hypotheses: dict[str, str] = {}
     positive_hypotheses: dict[str, str] = {}
@@ -2541,6 +2555,28 @@ def _prepare_real_antiderivative(
         )
         if direct_sech_argument_lean is None:
             return None
+    direct_csch_argument_lean = None
+    csch_half_argument_lean = None
+    csch_tanh_hypothesis = None
+    if csch_affine is not None:
+        direct_csch_argument_lean = _render_real_calculus_node(
+            csch_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            allow_variable_denominators=True,
+        )
+        if direct_csch_argument_lean is None:
+            return None
+        csch_half_argument_lean = f"({direct_csch_argument_lean} / 2)"
+        csch_tanh_arguments = _log_arguments(tree.body)
+        if not csch_tanh_arguments:
+            return None
+        csch_tanh_hypothesis = domain_hypotheses.get(
+            ast.dump(csch_tanh_arguments[0], include_attributes=False)
+        )
+        if csch_tanh_hypothesis is None:
+            return None
     if has_coth:
         identities = _coth_identity_terms(integrand_tree.body, tree.body)
         derivative_tactic = (
@@ -2548,6 +2584,18 @@ def _prepare_real_antiderivative(
             f"nlinarith [{', '.join(identities)}]"
         ) if identities else (
             f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring"
+        )
+    elif csch_affine is not None:
+        csch_field_simp_arguments = [
+            *domain_condition_names,
+            f"ne_of_gt (Real.cosh_pos {csch_half_argument_lean})",
+            "(wolfram_sinh_ne_zero_of_tanh "
+            f"{csch_half_argument_lean} {csch_tanh_hypothesis})",
+        ]
+        derivative_tactic = (
+            "simp [id_eq, Real.tanh_eq_sinh_div_cosh] <;> "
+            f"field_simp [{', '.join(csch_field_simp_arguments)}] <;> "
+            f"nlinarith [wolfram_csch_identity {direct_csch_argument_lean}]"
         )
     elif has_hyperbolic_tangent:
         derivative_tactic = (
@@ -2580,10 +2628,16 @@ def _prepare_real_antiderivative(
         )
         else ""
     )
+    tanh_helper_source = (
+        _tanh_derivative_lemma_source() if has_hyperbolic_tangent else ""
+    )
     coth_helper_source = (
         _coth_derivative_lemma_source()
         if has_coth
         else ""
+    )
+    sinh_double_helper_source = (
+        _sinh_double_lemma_source() if csch_affine is not None else ""
     )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
@@ -2605,7 +2659,9 @@ import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.Ring
 
 {artanh_helper_source}
+{tanh_helper_source}
 {coth_helper_source}
+{sinh_double_helper_source}
 
 theorem wolfram_language_compute{theorem_binders} :
     HasDerivAt (fun {function_variable} : ℝ => {rendered}) {integrand_lean} {variable} := by
@@ -4267,6 +4323,42 @@ def _direct_sech_affine_integrand(
     return argument, slope
 
 
+def _direct_csch_affine_integrand(
+    root: ast.AST,
+    variable: str,
+) -> tuple[ast.AST, Fraction] | None:
+    import sympy as _sympy
+
+    if (
+        not isinstance(root, ast.Call)
+        or not isinstance(root.func, ast.Name)
+        or root.func.id != "csch"
+        or len(root.args) != 1
+        or root.keywords
+    ):
+        return None
+    argument = root.args[0]
+    expression = _real_sympy_expression(argument)
+    symbol = _sympy.Symbol(variable)
+    if expression is None or expression.free_symbols - {symbol}:
+        return None
+    try:
+        polynomial = _sympy.Poly(expression, symbol, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return None
+    if polynomial.degree() > 1:
+        return None
+    coefficient = polynomial.coeff_monomial(symbol)
+    if (
+        not isinstance(coefficient, _sympy.Rational)
+        or coefficient.q != 1
+        or coefficient <= 0
+    ):
+        return None
+    slope = Fraction(int(coefficient.p), int(coefficient.q))
+    return argument, slope
+
+
 def _coth_identity_terms(*roots: ast.AST) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
@@ -4338,6 +4430,39 @@ def _csch_derivative_lemma_source() -> str:
   have hquot := (hasDerivAt_const x (1 : ℝ)).div (Real.hasDerivAt_sinh x) hsinh
   convert hquot using 1
   field_simp [hsinh]
+  ring
+
+"""
+
+
+def _tanh_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_tanh (x : ℝ) :
+    HasDerivAt Real.tanh (1 - (Real.tanh x) ^ 2) x := by
+  have hcosh : Real.cosh x ≠ 0 := ne_of_gt (Real.cosh_pos x)
+  convert (Real.hasDerivAt_sinh x).div (Real.hasDerivAt_cosh x) hcosh using 1
+  all_goals
+    first
+    | ext y; simp [Real.tanh_eq_sinh_div_cosh]
+    | rw [Real.tanh_eq_sinh_div_cosh]; field_simp [hcosh] <;> ring
+
+"""
+
+
+def _sinh_double_lemma_source() -> str:
+    return """theorem wolfram_sinh_ne_zero_of_tanh (x : ℝ)
+    (h : Real.tanh x ≠ 0) : Real.sinh x ≠ 0 := by
+  rw [Real.tanh_eq_sinh_div_cosh] at h
+  exact (div_ne_zero_iff.mp h).1
+
+theorem wolfram_sinh_double (x : ℝ) :
+    Real.sinh x = 2 * Real.sinh (x / 2) * Real.cosh (x / 2) := by
+  rw [show x = x / 2 + x / 2 by ring, Real.sinh_add]
+  ring
+
+theorem wolfram_csch_identity (x : ℝ) :
+    2 * Real.sinh (x / 2) * Real.cosh (x / 2) =
+      Real.sinh x * (Real.cosh (x / 2) ^ 2 - Real.sinh (x / 2) ^ 2) := by
+  rw [Real.cosh_sq_sub_sinh_sq, ← wolfram_sinh_double]
   ring
 
 """
@@ -4965,7 +5090,11 @@ def _derivative_proof_term(
                 domain_hypotheses,
                 positive_hypotheses,
             )
-            return f"({inner}).log ({domain_proof})" if inner is not None else None
+            return (
+                f"({inner}).log (by simpa [Function.comp_def] using {domain_proof})"
+                if inner is not None
+                else None
+            )
         if node.func.id == "tan":
             argument = node.args[0]
             if not any(
