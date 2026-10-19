@@ -99,6 +99,33 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
         self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/32}]", 10))
 
 
+class TrigonometricExpansionTests(unittest.TestCase):
+    def test_integer_multiple_expansions_are_prepared_for_lean(self) -> None:
+        cases = {
+            "TrigExpand@Sin[4x]": ("Sin[x]^3", "Cos[x]"),
+            "TrigExpand@Cos[5x+y]": ("Sin[x]^5", "Cos[x]^5", "Sin[y]", "Cos[y]"),
+            "TrigExpand[Sin[8x-y]]": ("Sin[x]^7", "Cos[x]^8", "Sin[y]", "Cos[y]"),
+            "TrigExpand@Sin[4x+3y]": ("Sin[x]^3", "Cos[y]^3", "Sin[y]^3"),
+        }
+        for code, expected_fragments in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 20)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, computation.display_result)
+                self.assertIn("linear_combination", computation.lean_source)
+                self.assertIn("Real.sin_sq_add_cos_sq", computation.lean_source)
+                self.assertIn("#print axioms wolfram_language_compute", computation.lean_source)
+
+    def test_multiplier_limit_is_twelve(self) -> None:
+        computation = prepare_computation("TrigExpand@Cos[12x]", 20)
+        self.assertIsNotNone(computation)
+        assert computation is not None
+        self.assertIn("Cos[x]^12", computation.display_result)
+        self.assertIsNone(prepare_computation("TrigExpand@Sin[13x]", 20))
+
+
 class ExactRadicalBasisTests(unittest.TestCase):
     def test_parser_normalizes_nested_radical_products_and_powers(self) -> None:
         cases = {

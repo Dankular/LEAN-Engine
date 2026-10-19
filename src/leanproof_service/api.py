@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from time import monotonic
 from typing import Annotated
@@ -389,7 +390,7 @@ def capabilities() -> dict[str, object]:
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Selected rational-frequency definite Sin/Cos integrals with exact Pi-multiple bounds",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
-                    "TrigExpand for bounded additive and doubled/tripled Sin/Cos arguments, with a Lean proof of the identity",
+                    "TrigExpand for bounded additive and integer-multiple Sin/Cos arguments through 12x, with a Lean proof of the identity",
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
                     "Solve for univariate degree-at-most-four equations with complete rational factorization or exact real quadratic roots, and bounded rational linear systems over Reals",
                 ],
@@ -413,9 +414,15 @@ def capabilities() -> dict[str, object]:
                 "trigonometric_expansion": {
                     "syntax": ["TrigExpand@expression", "TrigExpand[expression]"],
                     "functions": ["Sin", "Cos"],
-                    "argument_scope": "bounded sums/differences of variables and integer multiples 2 or 3 of one variable",
+                    "argument_scope": "bounded sums/differences of variables and integer multiples 2 through 12 of one variable",
                     "proof": "SymPy proposes the expansion; Lean checks the identity over the reals before the result is returned",
-                    "examples": ["TrigExpand@Sin[2x]", "TrigExpand@Cos[3x]", "TrigExpand[Sin[3x+y]]"],
+                    "examples": [
+                        "TrigExpand@Sin[2x]",
+                        "TrigExpand@Cos[3x]",
+                        "TrigExpand@Sin[4x]",
+                        "TrigExpand[Sin[8x-y]]",
+                        "TrigExpand@Cos[12x]",
+                    ],
                 },
                 "limit": {
                     "syntax": "Limit[expression, {variable, point}]",
@@ -1153,7 +1160,7 @@ def _compat_response(
 
 
 def _format_wolfram_output(line: int, value: str) -> str:
-    spacing = "" if all(character in "0123456789/-" for character in value) else " "
+    spacing = "" if re.fullmatch(r"-?\d+", value) else " "
     return f"Out[{line}]={spacing}{value}"
 
 

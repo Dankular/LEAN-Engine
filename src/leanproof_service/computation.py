@@ -66,6 +66,7 @@ _FINITE_SUM_PRODUCT = re.compile(
     r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
     r"(?P<lower>[^,{}]+?)\s*,\s*(?P<upper>[^,{}]+?)\s*\}\s*\]\s*"
 )
+_TRIG_EXPAND_MAX_MULTIPLE = 12
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -324,6 +325,7 @@ def _prepare_trig_expand(
         for node in calls
     ):
         return None
+    scaled_terms = _trigexpand_scaled_terms(expression_tree.body)
 
     symbolic = run_symbolic(SymbolicRequest(
         operation="trigexpand",
@@ -359,19 +361,86 @@ def _prepare_trig_expand(
     expanded_lean, expanded_symbols = _render_real_calculus_lean(result)
     if original_lean is None or expanded_lean is None:
         return None
+    pythagorean_quotients = _trigexpand_pythagorean_quotients(
+        expression_tree.body,
+        result_tree.body,
+        sorted(original_symbols | expanded_symbols),
+    )
+    if pythagorean_quotients is None:
+        return None
     binders = " ".join(
         f"({name} : ℝ)" for name in sorted(original_symbols | expanded_symbols)
     )
     theorem_binders = f" {binders}" if binders else ""
+    rewrite_names: list[str] = []
+    rewrite_declarations: list[str] = []
+    used_names = set(original_symbols | expanded_symbols)
+    max_by_variable: dict[str, int] = {}
+    right_multiples_by_variable: dict[str, set[int]] = {}
+    for multiple, variable_name, coefficient_on_right in scaled_terms:
+        max_by_variable[variable_name] = max(
+            multiple,
+            max_by_variable.get(variable_name, 1),
+        )
+        if coefficient_on_right:
+            right_multiples_by_variable.setdefault(variable_name, set()).add(multiple)
+    for variable_index, variable_name in enumerate(sorted(original_symbols)):
+        for multiple in range(2, max_by_variable.get(variable_name, 1) + 1):
+            left_name = f"h_trig_left_{variable_index}_{multiple}"
+            while left_name in used_names:
+                left_name = f"_{left_name}"
+            used_names.add(left_name)
+            left_angle = f"({multiple} : ℝ) * {variable_name}"
+            if multiple == 2:
+                split_angle = f"{variable_name} + {variable_name}"
+            else:
+                split_angle = f"({multiple - 1} : ℝ) * {variable_name} + {variable_name}"
+            rewrite_declarations.append(
+                f"  have {left_name} : {left_angle} = {split_angle} := by ring"
+            )
+            rewrite_names.append(left_name)
+            if multiple in right_multiples_by_variable.get(variable_name, set()):
+                right_name = f"h_trig_right_{variable_index}_{multiple}"
+                while right_name in used_names:
+                    right_name = f"_{right_name}"
+                used_names.add(right_name)
+                rewrite_declarations.append(
+                    f"  have {right_name} : {variable_name} * ({multiple} : ℝ) = "
+                    f"{split_angle} := by rw [mul_comm, {left_name}]"
+                )
+                rewrite_names.append(right_name)
+    rewrite_rules = [
+        *rewrite_names,
+        "Real.sin_add", "Real.sin_sub", "Real.cos_add", "Real.cos_sub",
+        "Real.sin_neg", "Real.cos_neg",
+    ]
+    norm_declarations: list[str] = []
+    quotient_terms: list[str] = []
+    for variable_index, (variable_name, quotient) in enumerate(pythagorean_quotients):
+        norm_name = f"h_trig_norm_{variable_index}"
+        while norm_name in used_names:
+            norm_name = f"_{norm_name}"
+        used_names.add(norm_name)
+        norm_declarations.append(
+            f"  have {norm_name} : Real.sin {variable_name} ^ 2 + "
+            f"Real.cos {variable_name} ^ 2 = 1 := Real.sin_sq_add_cos_sq {variable_name}"
+        )
+        quotient_terms.append(f"({quotient}) * {norm_name}")
+    rewrite_declarations.extend(norm_declarations)
+    rewrite_block = "\n".join(rewrite_declarations)
+    rewrite_prelude = f"{rewrite_block}\n" if rewrite_block else ""
+    equality_tactic = (
+        f"linear_combination (norm := ring_nf) {' + '.join(quotient_terms)}"
+        if quotient_terms
+        else "ring"
+    )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 import Mathlib.Tactic.Ring
 
 theorem wolfram_language_compute{theorem_binders} :
     {original_lean} = {expanded_lean} := by
-  simp only [Real.sin_add, Real.sin_sub, Real.cos_add, Real.cos_sub,
-    Real.sin_neg, Real.cos_neg, Real.sin_two_mul, Real.cos_two_mul,
-    Real.sin_three_mul, Real.cos_three_mul]
-  <;> ring
+{rewrite_prelude}  simp only [{", ".join(rewrite_rules)}]
+  {equality_tactic}
 
 #print axioms wolfram_language_compute
 """
@@ -383,18 +452,8 @@ def _trigexpand_argument_supported(node: ast.AST) -> bool:
         return node.id != "pi" and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id) is not None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         return _trigexpand_argument_supported(node.operand)
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-        return (
-            isinstance(node.left, ast.Constant)
-            and node.left.value in {2, 3}
-            and isinstance(node.right, ast.Name)
-            and _trigexpand_argument_supported(node.right)
-        ) or (
-            isinstance(node.right, ast.Constant)
-            and node.right.value in {2, 3}
-            and isinstance(node.left, ast.Name)
-            and _trigexpand_argument_supported(node.left)
-        )
+    if _trigexpand_scaled_term(node) is not None:
+        return True
     return (
         isinstance(node, ast.BinOp)
         and isinstance(node.op, (ast.Add, ast.Sub))
@@ -412,19 +471,221 @@ def _trigexpand_argument_has_sum(node: ast.AST) -> bool:
 
 
 def _trigexpand_argument_has_scaled_term(node: ast.AST) -> bool:
+    if _trigexpand_scaled_term(node) is not None:
+        return True
     if isinstance(node, ast.BinOp):
-        is_scaled = isinstance(node.op, ast.Mult) and (
-            (isinstance(node.left, ast.Constant) and node.left.value in {2, 3} and isinstance(node.right, ast.Name))
-            or (isinstance(node.right, ast.Constant) and node.right.value in {2, 3} and isinstance(node.left, ast.Name))
-        )
-        return (
-            is_scaled
-            or _trigexpand_argument_has_scaled_term(node.left)
-            or _trigexpand_argument_has_scaled_term(node.right)
-        )
+        return _trigexpand_argument_has_scaled_term(node.left) or _trigexpand_argument_has_scaled_term(node.right)
     if isinstance(node, ast.UnaryOp):
         return _trigexpand_argument_has_scaled_term(node.operand)
     return False
+
+
+def _trigexpand_scaled_term(node: ast.AST) -> tuple[int, str, bool] | None:
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+        return None
+    if (
+        isinstance(node.left, ast.Constant)
+        and type(node.left.value) is int
+        and 2 <= node.left.value <= _TRIG_EXPAND_MAX_MULTIPLE
+        and isinstance(node.right, ast.Name)
+    ):
+        return node.left.value, node.right.id, False
+    if (
+        isinstance(node.right, ast.Constant)
+        and type(node.right.value) is int
+        and 2 <= node.right.value <= _TRIG_EXPAND_MAX_MULTIPLE
+        and isinstance(node.left, ast.Name)
+    ):
+        return node.right.value, node.left.id, True
+    return None
+
+
+def _trigexpand_scaled_terms(node: ast.AST) -> set[tuple[int, str, bool]]:
+    result: set[tuple[int, str, bool]] = set()
+    if isinstance(node, ast.BinOp):
+        scaled = _trigexpand_scaled_term(node)
+        if scaled is not None:
+            result.add(scaled)
+        result.update(_trigexpand_scaled_terms(node.left))
+        result.update(_trigexpand_scaled_terms(node.right))
+    elif isinstance(node, ast.UnaryOp):
+        result.update(_trigexpand_scaled_terms(node.operand))
+    elif isinstance(node, ast.Call):
+        for argument in node.args:
+            result.update(_trigexpand_scaled_terms(argument))
+    return result
+
+
+def _trigexpand_argument_linear_form(node: ast.AST) -> dict[str, int] | None:
+    coefficients: dict[str, int] = {}
+
+    def collect(current: ast.AST, sign: int) -> bool:
+        if isinstance(current, ast.Name):
+            coefficients[current.id] = coefficients.get(current.id, 0) + sign
+            return True
+        if isinstance(current, ast.UnaryOp) and isinstance(current.op, (ast.UAdd, ast.USub)):
+            return collect(current.operand, sign if isinstance(current.op, ast.UAdd) else -sign)
+        if isinstance(current, ast.BinOp) and isinstance(current.op, (ast.Add, ast.Sub)):
+            if not collect(current.left, sign):
+                return False
+            return collect(
+                current.right,
+                sign if isinstance(current.op, ast.Add) else -sign,
+            )
+        scaled = _trigexpand_scaled_term(current)
+        if scaled is not None:
+            multiple, variable, _coefficient_on_right = scaled
+            coefficients[variable] = coefficients.get(variable, 0) + sign * multiple
+            return True
+        return False
+
+    if not collect(node, 1):
+        return None
+    return {name: value for name, value in coefficients.items() if value != 0}
+
+
+def _trigexpand_pythagorean_quotients(
+    original: ast.AST,
+    expanded: ast.AST,
+    variables: list[str],
+) -> list[tuple[str, str]] | None:
+    import sympy as sp
+
+    trig_symbols = {
+        name: (sp.Symbol(f"__trig_sin_{index}"), sp.Symbol(f"__trig_cos_{index}"))
+        for index, name in enumerate(sorted(variables))
+    }
+    multiple_cache: dict[tuple[str, int], tuple[sp.Expr, sp.Expr]] = {}
+
+    def multiple_pair(name: str, multiple: int) -> tuple[sp.Expr, sp.Expr]:
+        key = name, multiple
+        cached = multiple_cache.get(key)
+        if cached is not None:
+            return cached
+        sine_atom, cosine_atom = trig_symbols[name]
+        if multiple == 0:
+            return sp.Integer(0), sp.Integer(1)
+        if multiple < 0:
+            positive_sine, positive_cosine = multiple_pair(name, -multiple)
+            result = -positive_sine, positive_cosine
+            multiple_cache[key] = result
+            return result
+        sine, cosine = sine_atom, cosine_atom
+        for _ in range(2, multiple + 1):
+            sine, cosine = (
+                sp.expand(sine * cosine_atom + cosine * sine_atom),
+                sp.expand(cosine * cosine_atom - sine * sine_atom),
+            )
+        result = sine, cosine
+        multiple_cache[key] = result
+        return result
+
+    def angle_pair(argument: ast.AST) -> tuple[sp.Expr, sp.Expr] | None:
+        linear_form = _trigexpand_argument_linear_form(argument)
+        if linear_form is None:
+            return None
+        sine, cosine = sp.Integer(0), sp.Integer(1)
+        for name, multiple in sorted(linear_form.items()):
+            if name not in trig_symbols:
+                return None
+            term_sine, term_cosine = multiple_pair(name, multiple)
+            sine, cosine = (
+                sp.expand(sine * term_cosine + cosine * term_sine),
+                sp.expand(cosine * term_cosine - sine * term_sine),
+            )
+        return sine, cosine
+
+    def polynomial(node: ast.AST) -> sp.Expr | None:
+        if isinstance(node, ast.Constant):
+            if type(node.value) is int:
+                return sp.Integer(node.value)
+            if isinstance(node.value, float):
+                return sp.Rational(str(node.value))
+            return None
+        if isinstance(node, ast.Name):
+            return sp.Symbol(node.id)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = polynomial(node.operand)
+            if value is None:
+                return None
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp):
+            left = polynomial(node.left)
+            right = polynomial(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, ast.Add):
+                return sp.expand(left + right)
+            if isinstance(node.op, ast.Sub):
+                return sp.expand(left - right)
+            if isinstance(node.op, ast.Mult):
+                return sp.expand(left * right)
+            if isinstance(node.op, ast.Div) and right.is_Rational and right != 0:
+                return sp.expand(left / right)
+            if isinstance(node.op, ast.Pow) and right.is_Integer and 0 <= right <= 16:
+                return sp.expand(left ** int(right))
+            return None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            pair = angle_pair(node.args[0]) if len(node.args) == 1 and not node.keywords else None
+            if pair is None:
+                return None
+            if node.func.id == "sin":
+                return pair[0]
+            if node.func.id == "cos":
+                return pair[1]
+        return None
+
+    try:
+        difference = polynomial(original)
+        candidate = polynomial(expanded)
+        if difference is None or candidate is None:
+            return None
+        difference = sp.expand(difference - candidate)
+        if difference == 0:
+            return []
+        sine_cosine_relations = [
+            sine_atom ** 2 + cosine_atom ** 2 - 1
+            for sine_atom, cosine_atom in trig_symbols.values()
+        ]
+        if not sine_cosine_relations:
+            return None
+        generators = sorted(
+            set().union(*(relation.free_symbols for relation in sine_cosine_relations))
+            | difference.free_symbols,
+            key=str,
+        )
+        quotients, remainder = sp.reduced(
+            difference,
+            sine_cosine_relations,
+            *generators,
+            domain=sp.QQ,
+        )
+        if remainder != 0:
+            return None
+        result: list[tuple[str, str]] = []
+        for (name, (sine_atom, cosine_atom)), quotient in zip(
+            trig_symbols.items(),
+            quotients,
+        ):
+            quotient = sp.expand(quotient)
+            if quotient == 0:
+                continue
+            source = sp.sstr(quotient).replace("**", "^")
+            for variable_name, (atom_sine, atom_cosine) in trig_symbols.items():
+                source = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(str(atom_sine))}(?![A-Za-z0-9_])",
+                    f"(Real.sin {variable_name})",
+                    source,
+                )
+                source = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(str(atom_cosine))}(?![A-Za-z0-9_])",
+                    f"(Real.cos {variable_name})",
+                    source,
+                )
+            result.append((name, source))
+        return result
+    except (ArithmeticError, RecursionError, TypeError, ValueError, sp.PolynomialError):
+        return None
 
 
 def _real_ast_to_wolfram(node: ast.AST) -> str:
