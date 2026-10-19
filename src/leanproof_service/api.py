@@ -1410,7 +1410,14 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
                         "type": "object",
                         "required": ["code"],
                         "properties": {
-                            "code": {"type": "string", "maxLength": 4000},
+                            "code": {
+                                "type": "string",
+                                "maxLength": 4000,
+                                "description": (
+                                    "Wolfram Language code or a supported FreeformPrompt "
+                                    "for provider-backed natural-language results"
+                                ),
+                            },
                             "line": {"type": "integer", "default": 1},
                             "maxChars": {"type": "integer", "default": 10000},
                             "timeConstraint": {"type": "integer", "default": 60},
@@ -1443,6 +1450,18 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     import asyncio
 
     effective_budget = compute_request.timeConstraint
+    try:
+        freeform_prompt = _freeform_prompt_text(compute_request.code)
+    except ValueError as exc:
+        return _compat_response(501, str(exc), request_id)
+
+    if freeform_prompt is not None:
+        return await _compute_freeform_prompt(
+            freeform_prompt,
+            compute_request,
+            request_id,
+        )
+
     evaluation_started = monotonic()
     computation = await asyncio.to_thread(
         prepare_computation,
@@ -1520,6 +1539,170 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content=body)
 
 
+async def _compute_freeform_prompt(
+    prompt: str,
+    compute_request: ComputeRequest,
+    request_id: str,
+) -> JSONResponse:
+    import asyncio
+
+    budget = float(compute_request.timeConstraint)
+    query_budget = budget * 0.60
+    proof_budget = budget * 0.35
+    format_budget = budget * 0.05
+    started = monotonic()
+    try:
+        response = await asyncio.to_thread(
+            execute_query,
+            prompt,
+            None,
+            ["plaintext"],
+            parse_timeout_seconds=min(5.0, query_budget),
+            scan_timeout_seconds=query_budget,
+            format_timeout_seconds=format_budget,
+            pod_timeout_seconds=format_budget,
+            total_timeout_seconds=query_budget,
+            verify=True,
+            proof_timeout_seconds=proof_budget,
+        )
+    except FullResultsBackendError as exc:
+        return _compat_response(
+            exc.status_code,
+            str(exc),
+            request_id,
+            evidence={"stage": "freeform_prompt", "error_code": exc.error_code},
+        )
+    except FullResultsRequestError as exc:
+        return _compat_response(501, str(exc), request_id)
+
+    elapsed = monotonic() - started
+    query_result = response.get("queryresult")
+    if not isinstance(query_result, dict):
+        return _compat_response(500, "The query backend returned an invalid response", request_id)
+
+    query_evidence = query_result.get("evidence")
+    if not isinstance(query_evidence, dict):
+        query_evidence = {}
+    formal_verification = query_evidence.get("formal_verification")
+    if not isinstance(formal_verification, dict):
+        formal_verification = None
+    timed_out = (
+        elapsed > budget
+        or bool(query_result.get("timedout"))
+        or bool(query_result.get("timedoutpods"))
+        or query_evidence.get("kind") in {"provider_timeout", "symbolic_timeout"}
+        or (formal_verification is not None and formal_verification.get("status") == "timeout")
+    )
+    if timed_out:
+        return _compat_response(
+            200,
+            _evaluation_time_exceeded(compute_request.timeConstraint),
+            request_id,
+            success=True,
+            evidence={
+                "kind": "evaluation_timeout",
+                "elapsed_seconds": round(elapsed, 6),
+                "time_constraint_requested": compute_request.timeConstraint,
+            },
+        )
+
+    if query_result.get("error"):
+        warnings = query_result.get("warnings")
+        warning_text = [
+            str(item.get("text", "")) if isinstance(item, dict) else str(item)
+            for item in warnings
+        ] if isinstance(warnings, list) else []
+        warning_text = [item for item in warning_text if item]
+        message = "The free-form query backend returned an error"
+        if warning_text:
+            message = " ".join(warning_text)
+        return _compat_response(
+            500,
+            message,
+            request_id,
+            evidence={"kind": "freeform_query_error", "query_evidence": query_evidence},
+        )
+
+    if not query_result.get("success"):
+        tips = query_result.get("tips")
+        if not isinstance(tips, list):
+            tips = []
+        message = "The free-form prompt did not match a supported query"
+        tip_text = [
+            str(item.get("text", "")) if isinstance(item, dict) else str(item)
+            for item in tips
+        ]
+        tip_text = [item for item in tip_text if item]
+        if tip_text:
+            message = " ".join(tip_text)
+        return _compat_response(
+            501,
+            message,
+            request_id,
+            evidence={
+                "kind": "freeform_prompt_unresolved",
+                "tips": tips,
+                "assumptions": query_result.get("assumptions", []),
+            },
+        )
+
+    pods = query_result.get("pods")
+    if not isinstance(pods, list):
+        pods = []
+    result_pod = next(
+        (pod for pod in pods if isinstance(pod, dict) and pod.get("id") == "Result"),
+        None,
+    )
+    if result_pod is None:
+        result_pod = next(
+            (pod for pod in pods if isinstance(pod, dict) and pod.get("primary")),
+            None,
+        )
+    subpods = result_pod.get("subpods") if isinstance(result_pod, dict) else None
+    first_subpod = subpods[0] if isinstance(subpods, list) and subpods else None
+    value = first_subpod.get("plaintext") if isinstance(first_subpod, dict) else None
+    if not isinstance(value, str) or not value:
+        return _compat_response(
+            501,
+            "The free-form prompt produced no supported plain-text result",
+            request_id,
+            evidence={
+                "kind": "freeform_prompt_unresolved",
+                "assumptions": query_result.get("assumptions", []),
+                "qualification": query_result.get("qualification"),
+            },
+        )
+
+    verified = bool(formal_verification and formal_verification.get("verified"))
+    evidence: dict[str, object] = {
+        "kind": "lean_kernel_checked" if verified else "freeform_query",
+        "verified": verified,
+        "query_id": query_result.get("queryid"),
+        "interpretation": query_result.get("interpretation"),
+        "classification": query_result.get("classification"),
+        "sources": query_result.get("sources", []),
+        "qualification": query_result.get("qualification"),
+        "source_evidence": query_evidence,
+    }
+    if formal_verification is not None:
+        evidence["formal_verification"] = formal_verification
+
+    result_text = _limit_output(
+        _format_wolfram_output(compute_request.line, value),
+        compute_request.maxChars,
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "result": result_text,
+            "code": 200,
+            "success": True,
+            "uuid": request_id,
+            "evidence": evidence,
+        },
+    )
+
+
 async def _run_computation(computation: Computation, timeout_seconds: float):
     import asyncio
 
@@ -1546,6 +1729,32 @@ def _compat_response(
 def _format_wolfram_output(line: int, value: str) -> str:
     spacing = "" if re.fullmatch(r"-?\d+", value) else " "
     return f"Out[{line}]={spacing}{value}"
+
+
+def _freeform_prompt_text(code: str) -> str | None:
+    stripped = code.strip()
+    if stripped.startswith("="):
+        prompt = stripped[1:].strip()
+        if not prompt:
+            raise ValueError("The free-form prompt after '=' cannot be empty")
+        return prompt
+
+    marker = re.match(r"^(?:\\\[FreeformPrompt\]|FreeformPrompt)(?=\s*\[)", stripped)
+    if marker is None:
+        return None
+    match = re.fullmatch(
+        r'\s*(?:\\\[FreeformPrompt\]|FreeformPrompt)\s*\[\s*("(?:\\.|[^"\\])*")\s*\]\s*',
+        stripped,
+    )
+    if match is None:
+        raise ValueError("FreeformPrompt expects exactly one quoted text prompt")
+    try:
+        prompt = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError("FreeformPrompt contains an invalid string literal") from exc
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("FreeformPrompt expects a non-empty text prompt")
+    return prompt.strip()
 
 
 def _evaluation_time_exceeded(seconds: int) -> str:

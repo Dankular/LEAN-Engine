@@ -1623,6 +1623,12 @@ def _provider_request(
         input_text,
         re.IGNORECASE,
     )
+    population_suffix = re.fullmatch(
+        r"\s*(.+?)\s+population\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    population = population or population_suffix
     if population:
         query = population.group(1).strip()
         if query.casefold() in {"of", "in"}:

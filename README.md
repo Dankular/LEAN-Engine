@@ -52,6 +52,8 @@ Supported results include Lean evidence. For this example, the derivative is che
 
 ## API areas
 
+The Wolfram-compatible CAG route also accepts `FreeformPrompt["France population"]` and the leading `=` prompt form for supported provider-backed natural-language lookups. These results retain provider provenance; retrieved facts are not Lean proofs. Unsupported or ambiguous prompts return suggestions.
+
 - **Proofs and counterexamples:** typed claims and bounded arithmetic formulas, checked with Lean or searched with Z3.
 - **Symbolic computation:** a bounded expression grammar for algebra, calculus, and solving.
 - **Wolfram-compatible route:** a supported subset of `WolframLanguageCompute`, including exact arithmetic, Lean-checked additive and integer-multiple sine/cosine `TrigExpand` through 12x, selected calculus (including exact π-bound integrals of rational-frequency sine and cosine with rational `Pi` phase shifts, including ±Pi/4 bounds with Lean-checked `sqrt(2)` results and ±Pi/8, ±Pi/16, and ±Pi/32 bounds with nested radicals), rational-function limits at rational or bounded real-polynomial points, selected removable singularities with explicit or Lean-verified factorizations of bounded polynomial denominators and conditions for factors that stay nonzero at the point, finite sums/products, real polynomial solving through degree eight for polynomials that factor completely over the rationals, and bounded linear systems.
