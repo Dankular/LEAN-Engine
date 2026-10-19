@@ -56,17 +56,53 @@ class FullResultsNumericEvaluationTests(unittest.TestCase):
         self.assertIs(queryresult["evidence"]["verified"], False)
         self.assertNotIn("DecimalApproximation", [pod["id"] for pod in queryresult["pods"]])
 
-    def test_verify_marks_numeric_approximation_as_outside_lean_fragment(self) -> None:
-        response = self.client.get(
-            "/v2/query",
-            params={"input": "N[Pi, 30]", "verify": "true", "output": "json"},
-            headers=self.headers,
-        )
+    def test_verify_certifies_supported_numeric_approximation(self) -> None:
+        cases = {
+            "N[Pi, 30]": "3.14159265358979323846264338328",
+            "N[Sin[Pi/6], 40]": "0.5000000000000000000000000000000000000000",
+        }
+        for expression, expected_value in cases.items():
+            with self.subTest(expression=expression):
+                response = self.client.get(
+                    "/v2/query",
+                    params={"input": expression, "verify": "true", "output": "json"},
+                    headers=self.headers,
+                )
 
-        self.assertEqual(response.status_code, 200)
-        formal = response.json()["queryresult"]["evidence"]["formal_verification"]
-        self.assertEqual(formal["status"], "unsupported")
-        self.assertIs(formal["verified"], False)
+                self.assertEqual(response.status_code, 200, response.text)
+                queryresult = response.json()["queryresult"]
+                evidence = queryresult["evidence"]
+                formal = evidence["formal_verification"]
+                result_pod = next(
+                    pod for pod in queryresult["pods"] if pod["id"] == "Result"
+                )
+                approximation = formal["numeric_approximation"]
+                self.assertEqual(formal["status"], "checked")
+                self.assertIs(formal["verified"], True)
+                self.assertEqual(formal["claim_type"], "numeric_approximation")
+                self.assertTrue(formal["result_match"])
+                self.assertEqual(formal["axiom_audit"]["status"], "passed")
+                self.assertEqual(approximation["value"], expected_value)
+                self.assertEqual(
+                    result_pod["subpods"][0]["plaintext"],
+                    approximation["value"],
+                )
+                if "Pi, 30" in expression:
+                    self.assertIn("pi_lower_bound", formal["lean_source"])
+
+    def test_verify_leaves_unsupported_numeric_approximations_unverified(self) -> None:
+        for expression in ("N[Exp[1], 30]", "N[Pi, 101]"):
+            with self.subTest(expression=expression):
+                response = self.client.get(
+                    "/v2/query",
+                    params={"input": expression, "verify": "true", "output": "json"},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                formal = response.json()["queryresult"]["evidence"]["formal_verification"]
+                self.assertEqual(formal["status"], "unsupported")
+                self.assertIs(formal["verified"], False)
 
 
 if __name__ == "__main__":

@@ -695,6 +695,7 @@ def execute_query(
     result_text = str(symbolic.get("result", ""))
     formal_verification = None
     if verify:
+        proof_started = perf_counter()
         formal_verification = _verify_query_computation(
             interpreted,
             symbolic_request,
@@ -702,11 +703,20 @@ def execute_query(
             proof_timeout_seconds,
             symbolic_result=symbolic.get("result"),
         )
+        # The Lean proof stage has its own prooftimeout, separate from the query
+        # scan/format deadline. Preserve the full formatting budget after it ends.
+        deadline += perf_counter() - proof_started
         verified_result = formal_verification.pop("_verified_result", None)
         if isinstance(verified_result, str):
             # Exact trigonometric values can have different exact radical forms in
             # SymPy and the Lean-backed CAG route. Display the value Lean proved.
             result_text = verified_result
+            if (
+                symbolic_request.operation == "numeric"
+                and formal_verification["status"] == "checked"
+            ):
+                symbolic["result"] = verified_result
+                symbolic["result_mathml"] = None
         elapsed = perf_counter() - started
     candidate_pods = [
         {"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100},
@@ -868,10 +878,17 @@ def execute_query(
             "formal_verification": formal_verification,
         }
         if formal_verification["status"] == "checked":
-            qualification = (
-                "Lean checked the computation theorem for the selected interpretation. "
-                "The theorem source and assumption choices are included in the response."
-            )
+            if symbolic_request.operation == "numeric":
+                approximation = formal_verification["numeric_approximation"]
+                qualification = (
+                    "Lean proved that the displayed decimal differs from the exact "
+                    f"value by at most {approximation['absolute_error_bound']}."
+                )
+            else:
+                qualification = (
+                    "Lean checked the computation theorem for the selected interpretation. "
+                    "The theorem source and assumption choices are included in the response."
+                )
         else:
             qualification = (
                 f"The symbolic result is not Lean-verified: {formal_verification['reason']}"
@@ -917,6 +934,15 @@ def _verify_query_computation(
         max(0.001, min(timeout_seconds, 60.0)),
     )
     if computation is None:
+        if request.operation == "numeric":
+            return {
+                "status": "unsupported",
+                "verified": False,
+                "reason": (
+                    "This numeric expression is outside the certified CAG approximation "
+                    "fragment or exceeds its supported precision."
+                ),
+            }
         return {
             "status": "unsupported",
             "verified": False,
@@ -937,8 +963,19 @@ def _verify_query_computation(
             "verified": False,
             "reason": computation.backend_error,
         }
+    if request.operation == "numeric" and (
+        computation.numeric_precision is None
+        or computation.numeric_error_bound is None
+    ):
+        return {
+            "status": "unsupported",
+            "verified": False,
+            "reason": "The numeric backend did not produce a certified approximation bound.",
+        }
 
-    if request.operation == "solve" and request.variable is not None:
+    if request.operation == "numeric":
+        query_normalized = candidate_normalized = None
+    elif request.operation == "solve" and request.variable is not None:
         query_normalized = _symbolic_solve_signature(
             symbolic_result,
             request.variable,
@@ -952,7 +989,7 @@ def _verify_query_computation(
         candidate_normalized = _canonical_formula(
             computation.display_result.replace("^", "**")
         )
-    if (
+    if request.operation != "numeric" and (
         query_normalized is None
         or candidate_normalized is None
         or query_normalized != candidate_normalized
@@ -978,19 +1015,50 @@ def _verify_query_computation(
     verification: dict[str, Any] = {
         "status": lean_result.status,
         "verified": lean_result.status == "checked",
-        "claim_type": _query_claim_type(request, code),
+        "claim_type": (
+            "numeric_approximation"
+            if request.operation == "numeric"
+            else _query_claim_type(request, code)
+        ),
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
         "assumptions": interpreted.get("assumptions", []),
         "scope": (
-            "checks the exact selected formula and result under the listed real-parameter "
-            "and domain conditions; "
-            "it does not verify the English language-to-formula translation"
+            (
+                "proves that the exact selected numeric expression differs from the "
+                "reported decimal by no more than the stated rational absolute-error bound"
+            )
+            if request.operation == "numeric"
+            else (
+                "checks the exact selected formula and result under the listed real-parameter "
+                "and domain conditions; "
+                "it does not verify the English language-to-formula translation"
+            )
         ),
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
         "lean_source": lean_result.source,
         "result_match": not computation.proof_result_authoritative,
     }
-    if lean_result.status == "checked" and computation.proof_result_authoritative:
+    if request.operation == "numeric":
+        certified_value = computation.display_result
+        try:
+            if Fraction(Decimal(query_result)) == Fraction(Decimal(certified_value)):
+                # Preserve the query's requested decimal formatting when it denotes
+                # the same exact rational as the value Lean checked.
+                certified_value = query_result
+        except (InvalidOperation, OverflowError, ValueError):
+            pass
+        verification["numeric_approximation"] = {
+            "value": certified_value,
+            "precision_significant_digits": computation.numeric_precision,
+            "absolute_error_bound": computation.numeric_error_bound,
+            "claim": (
+                "the exact mathematical value differs from value by at most this bound"
+            ),
+        }
+        verification["result_match"] = lean_result.status == "checked"
+        if lean_result.status == "checked":
+            verification["_verified_result"] = certified_value
+    elif lean_result.status == "checked" and computation.proof_result_authoritative:
         verification["result_match"] = True
         verification["_verified_result"] = computation.display_result
     if computation.domain_conditions:
@@ -1008,6 +1076,14 @@ def _verify_query_computation(
 
 
 def _query_computation_code(request: SymbolicRequest) -> str | None:
+    if request.operation == "numeric" and request.expression is not None:
+        expression = re.sub(
+            r"\bpi\b",
+            "Pi",
+            request.expression,
+            flags=re.IGNORECASE,
+        )
+        return f"N[{expression}, {request.numeric_precision}]"
     if request.operation in {"simplify", "expand", "factor"} and request.expression is not None:
         exact_trig_code = _query_exact_trigonometric_code(request.expression)
         if request.operation == "simplify" and exact_trig_code is not None:
