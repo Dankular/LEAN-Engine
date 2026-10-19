@@ -746,10 +746,14 @@ def _prepare_removable_rational_limit(
     point_symbols: set[str],
     time_limit_seconds: float,
 ) -> Computation | None:
+    symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
+    remaining_symbolic_time = symbolic_deadline - monotonic()
+    if remaining_symbolic_time <= 0.001:
+        return Computation("", "", timed_out=True)
     simplified = run_symbolic(SymbolicRequest(
         operation="simplify",
         expression=expression_source,
-        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+        time_limit_seconds=max(0.001, min(remaining_symbolic_time, 60.0)),
     ))
     if simplified.get("timed_out"):
         return Computation("", "", timed_out=True)
@@ -783,7 +787,15 @@ def _prepare_removable_rational_limit(
         if denominator_value is None:
             return None
         if denominator_value == 0 or getattr(denominator_value, "is_zero", None) is True:
-            factors = _flatten_multiplicative_factors(denominator)
+            remaining_symbolic_time = symbolic_deadline - monotonic()
+            if remaining_symbolic_time <= 0.001:
+                return Computation("", "", timed_out=True)
+            factors, factor_timed_out = _factor_limit_denominator(
+                denominator,
+                max(0.001, min(remaining_symbolic_time, 60.0)),
+            )
+            if factor_timed_out:
+                return Computation("", "", timed_out=True)
             if factors is None:
                 return None
             group_index = len(vanishing_denominators)
@@ -963,7 +975,7 @@ def _prepare_removable_rational_limit(
                 denominator_assumptions.append((point_nonzero, denominator_at_point))
             else:
                 domain_binders.append(
-                    f"({point_nonzero} : {denominator_at_point} ≠ 0)"
+                    f"({point_nonzero} : ({denominator_at_point} : ℝ) ≠ 0)"
                 )
                 assumed_denominators.append((point_nonzero, denominator_at_point))
                 denominator_source = ast.unparse(denominator).replace("**", "^")
@@ -1028,7 +1040,7 @@ def _prepare_removable_rational_limit(
         point_nonzero,
     ) in denominator_continuity_proofs:
         event_variable = _fresh_identifier("limit_neighborhood_variable", used_names)
-        event_body = denominator_body.replace(limit_variable, event_variable)
+        event_body = f"({denominator_body.replace(limit_variable, event_variable)} : ℝ)"
         eventual_names.append(hden_eventually_within)
         eventual_hypothesis = _fresh_identifier(
             "h_limit_denominator_nonzero", used_names
@@ -1047,6 +1059,8 @@ def _prepare_removable_rational_limit(
 
     denominator_proofs: list[str] = []
     denominator_names: list[str] = []
+    factorization_names: list[str] = []
+    factor_nonzero_names: list[str] = []
     for index, (denominator, components) in enumerate(vanishing_denominators):
         denominator_used_names = continuity_state["used_names"]
         if not isinstance(denominator_used_names, set):
@@ -1081,10 +1095,11 @@ def _prepare_removable_rational_limit(
             )
             if component_body is None:
                 return None
+            component_value = f"({component_body} : ℝ)"
             component_term = (
-                f"({component_body})"
+                f"({component_value})"
                 if exponent == 1
-                else f"({component_body}) ^ {exponent}"
+                else f"({component_value} ^ {exponent})"
             )
             component_terms.append(component_term)
             component_name = _fresh_identifier(
@@ -1092,6 +1107,7 @@ def _prepare_removable_rational_limit(
                 denominator_used_names,
             )
             component_names.append(component_name)
+            factor_nonzero_names.append(component_name)
 
             if component_kind == "vanishing":
                 if slope is None:
@@ -1121,7 +1137,7 @@ def _prepare_removable_rational_limit(
                         f"    apply {hpoint}",
                         "    linarith",
                         f"  have {hslope} : {slope_lean} ≠ 0 := by norm_num",
-                        f"  have {hfactor} : {component_body} = {affine_factor} := by ring",
+                        f"  have {hfactor} : {component_value} = {affine_factor} := by ring",
                         f"  have {component_name} : {component_term} ≠ 0 := by",
                         f"    rw [{hfactor}]",
                     ]
@@ -1154,6 +1170,7 @@ def _prepare_removable_rational_limit(
         hfactorization = _fresh_identifier(
             f"h_limit_denominator_product_{index}", denominator_used_names
         )
+        factorization_names.append(hfactorization)
         product_term = " * ".join(component_terms)
         product_nonzero = component_names[0]
         for component_name in component_names[1:]:
@@ -1175,10 +1192,15 @@ def _prepare_removable_rational_limit(
         in enumerate(nonvanishing_denominators)
         if group_index is None
     ]
-    all_denominator_names = [*denominator_names, *direct_eventual_hypotheses]
+    all_denominator_names = [
+        *factor_nonzero_names,
+        *denominator_names,
+        *direct_eventual_hypotheses,
+        *factorization_names,
+    ]
     field_simp = f"field_simp [{', '.join(all_denominator_names)}] <;> ring"
     point_denominator_proof_source = "\n".join(
-        f"  have {name} : {denominator} ≠ 0 := by norm_num"
+        f"  have {name} : ({denominator} : ℝ) ≠ 0 := by norm_num"
         for name, denominator in denominator_assumptions
     )
     point_denominator_proof_source = (
@@ -1202,6 +1224,11 @@ def _prepare_removable_rational_limit(
     )
     eventual_proof_source = "\n".join(eventual_proof_blocks)
     eventual_proof_source = f"{eventual_proof_source}\n" if eventual_proof_source else ""
+    factorization_rewrite_source = (
+        f"    rw [{', '.join(factorization_names)}]\n"
+        if factorization_names
+        else ""
+    )
     source = f"""import Mathlib.Basic.Real.Basic
 import Mathlib.Topology.Instances.Real.Lemmas
 import Mathlib.Topology.Continuous
@@ -1223,6 +1250,7 @@ theorem wolfram_language_compute{theorem_binders} :
         with {limit_variable} {hfilter_mem}{''.join(' ' + name for name in eventual_hypotheses)}
     have {hpoint} : {limit_variable} ≠ {point_lean} := by simpa using {hfilter_mem}
 {vanishing_denominator_proof_source}
+{factorization_rewrite_source}
     {field_simp}
   have {hlim} : Filter.Tendsto (fun {limit_variable} : ℝ => {real_simplified_expression})
       (nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)) (nhds {result_lean}) := by
@@ -1268,6 +1296,44 @@ def _flatten_multiplicative_factors(
     if not collect(node, 1) or not factors:
         return None
     return factors
+
+
+def _factor_limit_denominator(
+    node: ast.AST,
+    time_limit_seconds: float,
+) -> tuple[list[tuple[ast.AST, int]] | None, bool]:
+    explicit_factors = _flatten_multiplicative_factors(node)
+    if explicit_factors is None:
+        return None, False
+    try:
+        expression_source = ast.unparse(node)
+    except (RecursionError, ValueError):
+        return explicit_factors, False
+    factored = run_symbolic(SymbolicRequest(
+        operation="factor",
+        expression=expression_source,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if factored.get("timed_out"):
+        return None, True
+    if factored.get("error") or not isinstance(factored.get("result"), str):
+        return explicit_factors, False
+    try:
+        factored_tree = ast.parse(factored["result"], mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return explicit_factors, False
+    factors = _flatten_multiplicative_factors(factored_tree.body)
+    if factors is None or len(factors) > 256:
+        return explicit_factors, False
+    if any(not 1 <= multiplicity <= 16 for _factor, multiplicity in factors):
+        return explicit_factors, False
+    if any(
+        _render_rational_limit_node(factor, set(), {"nodes": 0}, 0) is None
+        or _variable_denominators(factor)
+        for factor, _multiplicity in factors
+    ):
+        return explicit_factors, False
+    return factors, False
 
 
 def _vanishing_affine_power(
