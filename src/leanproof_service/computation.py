@@ -1736,14 +1736,15 @@ def _prepare_pi_bounded_sin_cos_integral(
     upper_multiple = _parse_rational_pi_multiple(normalized_upper)
     allowed_multiples = {
         Fraction(-1), Fraction(-1, 2), Fraction(-1, 4), Fraction(-1, 8),
-        Fraction(0), Fraction(1, 8), Fraction(1, 4), Fraction(1, 2), Fraction(1),
+        Fraction(-1, 16), Fraction(0), Fraction(1, 16), Fraction(1, 8),
+        Fraction(1, 4), Fraction(1, 2), Fraction(1),
     }
     if lower_multiple not in allowed_multiples or upper_multiple not in allowed_multiples:
         return None
     endpoint_multiples = {
         Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(-1, 4),
-        Fraction(-1, 8), Fraction(0), Fraction(1, 8), Fraction(1, 4),
-        Fraction(1, 2), Fraction(1), Fraction(2),
+        Fraction(-1, 8), Fraction(-1, 16), Fraction(0), Fraction(1, 16),
+        Fraction(1, 8), Fraction(1, 4), Fraction(1, 2), Fraction(1), Fraction(2),
     }
     lower_phase = slope * lower_multiple + phase_offset
     upper_phase = slope * upper_multiple + phase_offset
@@ -1826,7 +1827,9 @@ def _prepare_pi_bounded_sin_cos_integral(
             f"    rw [hfunction]\n"
             f"    exact hprimitive"
         )
-    special_endpoint_phases = {Fraction(1, 8), Fraction(1, 4)}
+    special_endpoint_phases = {
+        Fraction(1, 16), Fraction(1, 8), Fraction(1, 4)
+    }
     if any(abs(phase) in special_endpoint_phases for phase in (lower_phase, upper_phase)):
         endpoint_lemmas = _pi_trig_simplification_lemmas(
             endpoint_function, (lower_phase, upper_phase)
@@ -1874,7 +1877,7 @@ theorem wolfram_language_compute :
 
 #print axioms wolfram_language_compute
 """
-    return Computation(str(symbolic["result"]), source)
+    return Computation(_format_exact_radical_basis(exact_radical_result), source)
 
 
 def _parse_rational_pi_multiple(source: str) -> Fraction | None:
@@ -1945,6 +1948,10 @@ def _lean_pi_multiple(coefficient: Fraction) -> str:
         return "(Real.pi / 8)"
     if coefficient == Fraction(-1, 8):
         return "(-(Real.pi / 8))"
+    if coefficient == Fraction(1, 16):
+        return "(Real.pi / 16)"
+    if coefficient == Fraction(-1, 16):
+        return "(-(Real.pi / 16))"
     raise ValueError("unsupported rational multiple of pi")
 
 
@@ -1955,6 +1962,7 @@ def _pi_trig_simplification_lemmas(
     names: list[str] = []
     value_lemmas = {
         Fraction(0): f"Real.{function}_zero",
+        Fraction(1, 16): f"Real.{function}_pi_div_sixteen",
         Fraction(1, 8): f"Real.{function}_pi_div_eight",
         Fraction(1, 4): f"Real.{function}_pi_div_four",
         Fraction(1, 2): f"Real.{function}_pi_div_two",
@@ -6719,8 +6727,8 @@ def _parse_exact_rational(source: str) -> Fraction | None:
 
 def _parse_exact_radical_basis(
     source: str,
-) -> tuple[Fraction, Fraction, Fraction, Fraction] | None:
-    """Parse Q-linear combinations of 1, sqrt(2), sqrt(2+sqrt(2)), sqrt(2-sqrt(2))."""
+) -> tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction] | None:
+    """Parse exact sums of rational multiples of the supported trig radicals."""
     exact_source = _normalize_decimal_literals(source)
     if exact_source is None:
         return None
@@ -6729,75 +6737,129 @@ def _parse_exact_radical_basis(
     except (ValueError, SyntaxError, RecursionError):
         return None
 
-    zero = (Fraction(0), Fraction(0), Fraction(0), Fraction(0))
-    one = (Fraction(1), Fraction(0), Fraction(0), Fraction(0))
-    sqrt_two = (Fraction(0), Fraction(1), Fraction(0), Fraction(0))
-    sqrt_two_plus = (Fraction(0), Fraction(0), Fraction(1), Fraction(0))
-    sqrt_two_minus = (Fraction(0), Fraction(0), Fraction(0), Fraction(1))
+    Value = tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction]
+
+    def vector(*coefficients: int | Fraction) -> Value:
+        values = tuple(Fraction(value) for value in coefficients)
+        return values + (Fraction(0),) * (6 - len(values))  # type: ignore[return-value]
+
+    zero = vector()
+    one = vector(1)
+    sqrt_two = vector(0, 1)
+    sqrt_two_plus = vector(0, 0, 1)
+    sqrt_two_minus = vector(0, 0, 0, 1)
+    sqrt_two_plus_nested = vector(0, 0, 0, 0, 1)
+    sqrt_two_minus_nested = vector(0, 0, 0, 0, 0, 1)
+    half_sqrt_two = vector(0, Fraction(1, 2))
+    half_sqrt_two_plus = vector(0, 0, Fraction(1, 2))
+    half_sqrt_two_minus = vector(0, 0, 0, Fraction(1, 2))
+    half_sqrt_two_plus_nested = vector(0, 0, 0, 0, Fraction(1, 2))
+    half_sqrt_two_minus_nested = vector(0, 0, 0, 0, 0, Fraction(1, 2))
+
+    def negate(value: Value) -> Value:
+        return tuple(-component for component in value)  # type: ignore[return-value]
+
+    def add(left: Value, right: Value) -> Value:
+        return tuple(a + b for a, b in zip(left, right))  # type: ignore[return-value]
+
+    def subtract(left: Value, right: Value) -> Value:
+        return tuple(a - b for a, b in zip(left, right))  # type: ignore[return-value]
 
     basis_products = {
         (0, 0): one,
         (0, 1): sqrt_two,
         (0, 2): sqrt_two_plus,
         (0, 3): sqrt_two_minus,
-        (1, 1): (Fraction(2), Fraction(0), Fraction(0), Fraction(0)),
-        (1, 2): (Fraction(0), Fraction(0), Fraction(1), Fraction(1)),
-        (1, 3): (Fraction(0), Fraction(0), Fraction(1), Fraction(-1)),
-        (2, 2): (Fraction(2), Fraction(1), Fraction(0), Fraction(0)),
+        (0, 4): sqrt_two_plus_nested,
+        (0, 5): sqrt_two_minus_nested,
+        (1, 1): vector(2),
+        (1, 2): add(sqrt_two_plus, sqrt_two_minus),
+        (1, 3): subtract(sqrt_two_plus, sqrt_two_minus),
+        (2, 2): vector(2, 1),
         (2, 3): sqrt_two,
-        (3, 3): (Fraction(2), Fraction(-1), Fraction(0), Fraction(0)),
+        (3, 3): vector(2, -1),
+        (4, 4): vector(2, 0, 1),
+        (4, 5): sqrt_two_minus,
+        (5, 5): vector(2, 0, -1),
     }
 
-    def multiply(
-        left: tuple[Fraction, Fraction, Fraction, Fraction],
-        right: tuple[Fraction, Fraction, Fraction, Fraction],
-    ) -> tuple[Fraction, Fraction, Fraction, Fraction]:
-        result = [Fraction(0), Fraction(0), Fraction(0), Fraction(0)]
+    def multiply(left: Value, right: Value) -> Value | None:
+        result = [Fraction(0)] * 6
         for left_index, left_coefficient in enumerate(left):
             if left_coefficient == 0:
                 continue
             for right_index, right_coefficient in enumerate(right):
                 if right_coefficient == 0:
                     continue
-                product = basis_products[tuple(sorted((left_index, right_index)))]
+                product = basis_products.get(tuple(sorted((left_index, right_index))))
+                if product is None:
+                    return None
                 for result_index, value in enumerate(product):
                     result[result_index] += left_coefficient * right_coefficient * value
         return tuple(result)  # type: ignore[return-value]
 
     def form(
         node: ast.AST,
-    ) -> tuple[Fraction, Fraction, Fraction, Fraction] | None:
+    ) -> Value | None:
         rational = _constant_fraction(node)
         if rational is not None:
-            return rational, Fraction(0), Fraction(0), Fraction(0)
+            return vector(rational)
         if isinstance(node, ast.Call):
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "sqrt"
-                and len(node.args) == 1
-                and not node.keywords
-            ):
+            if isinstance(node.func, ast.Name) and len(node.args) == 1 and not node.keywords:
+                if node.func.id in {"sin", "cos"}:
+                    angle_form = _rational_pi_form(node.args[0])
+                    if angle_form is not None and angle_form[1] == 0:
+                        coefficient = angle_form[0]
+                        magnitude = abs(coefficient)
+                        if node.func.id == "sin":
+                            trig_values = {
+                                Fraction(0): zero,
+                                Fraction(1, 16): half_sqrt_two_minus_nested,
+                                Fraction(1, 8): half_sqrt_two_minus,
+                                Fraction(1, 4): half_sqrt_two,
+                                Fraction(1, 2): one,
+                                Fraction(1): zero,
+                                Fraction(2): zero,
+                            }
+                            value = trig_values.get(magnitude)
+                            return negate(value) if value is not None and coefficient < 0 else value
+                        trig_values = {
+                            Fraction(0): one,
+                            Fraction(1, 16): half_sqrt_two_plus_nested,
+                            Fraction(1, 8): half_sqrt_two_plus,
+                            Fraction(1, 4): half_sqrt_two,
+                            Fraction(1, 2): zero,
+                            Fraction(1): vector(-1),
+                            Fraction(2): one,
+                        }
+                        return trig_values.get(magnitude)
+                if node.func.id != "sqrt":
+                    return None
                 radicand = form(node.args[0])
-                if radicand == (Fraction(2), Fraction(0), Fraction(0), Fraction(0)):
+                if radicand == vector(2):
                     return sqrt_two
-                if radicand == (Fraction(2), Fraction(1), Fraction(0), Fraction(0)):
+                if radicand == vector(2, 1):
                     return sqrt_two_plus
-                if radicand == (Fraction(2), Fraction(-1), Fraction(0), Fraction(0)):
+                if radicand == vector(2, -1):
                     return sqrt_two_minus
-                if radicand == (
-                    Fraction(1, 2), Fraction(1, 4), Fraction(0), Fraction(0)
-                ):
-                    return Fraction(0), Fraction(0), Fraction(1, 2), Fraction(0)
-                if radicand == (
-                    Fraction(1, 2), Fraction(-1, 4), Fraction(0), Fraction(0)
-                ):
-                    return Fraction(0), Fraction(0), Fraction(0), Fraction(1, 2)
+                if radicand == vector(Fraction(1, 2), Fraction(1, 4)):
+                    return half_sqrt_two_plus
+                if radicand == vector(Fraction(1, 2), Fraction(-1, 4)):
+                    return half_sqrt_two_minus
+                if radicand == vector(2, 0, 1):
+                    return sqrt_two_plus_nested
+                if radicand == vector(2, 0, -1):
+                    return sqrt_two_minus_nested
+                if radicand == vector(Fraction(1, 2), 0, Fraction(1, 4)):
+                    return half_sqrt_two_plus_nested
+                if radicand == vector(Fraction(1, 2), 0, Fraction(-1, 4)):
+                    return half_sqrt_two_minus_nested
             return None
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             value = form(node.operand)
             if value is None or isinstance(node.op, ast.UAdd):
                 return value
-            return tuple(-component for component in value)  # type: ignore[return-value]
+            return negate(value)
         if not isinstance(node, ast.BinOp):
             return None
         left = form(node.left)
@@ -6805,9 +6867,9 @@ def _parse_exact_radical_basis(
         if left is None or right is None:
             return None
         if isinstance(node.op, ast.Add):
-            return tuple(a + b for a, b in zip(left, right))  # type: ignore[return-value]
+            return add(left, right)
         if isinstance(node.op, ast.Sub):
-            return tuple(a - b for a, b in zip(left, right))  # type: ignore[return-value]
+            return subtract(left, right)
         if isinstance(node.op, ast.Mult):
             return multiply(left, right)
         if isinstance(node.op, ast.Div) and right[1:] == zero[1:] and right[0] != 0:
@@ -6818,7 +6880,10 @@ def _parse_exact_radical_basis(
                 return None
             result = one
             for _ in range(exponent.numerator):
-                result = multiply(result, left)
+                product = multiply(result, left)
+                if product is None:
+                    return None
+                result = product
             return result
         return None
 
@@ -6896,13 +6961,15 @@ def _lean_rational(value: Fraction) -> str:
 
 
 def _lean_exact_radical_basis(
-    coefficients: tuple[Fraction, Fraction, Fraction, Fraction],
+    coefficients: tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction],
 ) -> str:
     basis = (
         "",
         "Real.sqrt 2",
         "Real.sqrt (2 + Real.sqrt 2)",
         "Real.sqrt (2 - Real.sqrt 2)",
+        "Real.sqrt (2 + Real.sqrt (2 + Real.sqrt 2))",
+        "Real.sqrt (2 - Real.sqrt (2 + Real.sqrt 2))",
     )
     terms: list[str] = []
     for coefficient, radical in zip(coefficients, basis):
@@ -6920,3 +6987,34 @@ def _lean_exact_radical_basis(
     if not terms:
         return _lean_rational(Fraction(0))
     return f"({' '.join(terms)})"
+
+
+def _format_exact_radical_basis(
+    coefficients: tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction],
+) -> str:
+    basis = (
+        "",
+        "sqrt(2)",
+        "sqrt(2 + sqrt(2))",
+        "sqrt(2 - sqrt(2))",
+        "sqrt(2 + sqrt(2 + sqrt(2)))",
+        "sqrt(2 - sqrt(2 + sqrt(2)))",
+    )
+    terms: list[str] = []
+    for coefficient, radical in zip(coefficients, basis):
+        if coefficient == 0:
+            continue
+        magnitude = abs(coefficient)
+        if not radical:
+            term = _fraction_text(magnitude)
+        else:
+            numerator = "" if magnitude.numerator == 1 else f"{magnitude.numerator}*"
+            term = f"{numerator}{radical}"
+            if magnitude.denominator != 1:
+                term += f"/{magnitude.denominator}"
+        if not terms:
+            terms.append(f"-{term}" if coefficient < 0 else term)
+        else:
+            operation = "-" if coefficient < 0 else "+"
+            terms.append(f" {operation} {term}")
+    return "".join(terms) if terms else "0"
