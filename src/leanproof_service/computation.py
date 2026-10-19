@@ -1475,7 +1475,12 @@ def _prepare_definite_real_integral(
     if integrand_lean is None:
         return None
     csch_arguments = _csch_arguments(expression_tree.body)
-    if csch_arguments is None or csch_arguments:
+    if csch_arguments is None:
+        return None
+    csch_affine = _direct_csch_affine_integrand(
+        expression_tree.body, variable
+    )
+    if csch_arguments and csch_affine is None:
         return None
     explicit_base_log_arguments = {
         ast.dump(node.args[0], include_attributes=False)
@@ -1490,6 +1495,20 @@ def _prepare_definite_real_integral(
     upper = _parse_exact_rational(upper_source)
     if lower is None or upper is None:
         return None
+    csch_endpoint_arguments: tuple[Fraction, Fraction] | None = None
+    if csch_affine is not None:
+        argument = csch_affine[0]
+        lower_argument = _exact_rational_node_value(argument, variable, lower)
+        upper_argument = _exact_rational_node_value(argument, variable, upper)
+        if (
+            lower_argument is None
+            or upper_argument is None
+            or lower_argument == 0
+            or upper_argument == 0
+            or (lower_argument < 0) != (upper_argument < 0)
+        ):
+            return None
+        csch_endpoint_arguments = (lower_argument, upper_argument)
     for node in ast.walk(expression_tree.body):
         if (
             not isinstance(node, ast.Call)
@@ -1525,6 +1544,12 @@ def _prepare_definite_real_integral(
         return Computation("", "", backend_error=str(diagnostic)[:1000])
 
     antiderivative = symbolic["result"]
+    if csch_affine is not None:
+        argument_text = ast.unparse(csch_affine[0])
+        antiderivative = (
+            "log(abs(tanh(("
+            f"{argument_text})/2)))/({_fraction_text(csch_affine[1])})"
+        )
     try:
         antiderivative_tree = ast.parse(antiderivative, mode="eval")
         antiderivative_lean, antiderivative_symbols = _render_real_calculus_lean(
@@ -1554,6 +1579,20 @@ def _prepare_definite_real_integral(
         )
         return Computation("", "", backend_error=str(diagnostic)[:1000])
     definite_result = definite_symbolic["result"]
+    if csch_endpoint_arguments is not None and csch_affine is not None:
+        lower_argument, upper_argument = csch_endpoint_arguments
+        lower_tanh_log = (
+            f"log(abs(tanh(({_fraction_text(lower_argument)})/2)))"
+        )
+        upper_tanh_log = (
+            f"log(abs(tanh(({_fraction_text(upper_argument)})/2)))"
+        )
+        endpoint_difference = f"({upper_tanh_log} - {lower_tanh_log})"
+        definite_result = (
+            endpoint_difference
+            if csch_affine[1] == 1
+            else f"({endpoint_difference})/({_fraction_text(csch_affine[1])})"
+        )
     try:
         definite_result_tree = ast.parse(definite_result, mode="eval")
         definite_result_lean, definite_result_symbols = _render_real_calculus_lean(
@@ -1608,6 +1647,10 @@ def _prepare_definite_real_integral(
             *_variable_denominators(expression_root),
             *_log_arguments(expression_root),
         ]
+        if expression_root is expression_tree.body and csch_arguments:
+            domain_candidates.extend(
+                _sinh_call(argument) for argument in csch_arguments
+            )
         tangent_cosines = _tan_cosine_arguments(expression_root)
         if tangent_cosines is None:
             return None
@@ -2056,6 +2099,48 @@ def _prepare_definite_real_integral(
         domain_hypotheses=domain_hypotheses,
         positive_hypotheses=positive_hypotheses,
     )
+    if csch_affine is not None:
+        csch_tanh_arguments = _log_arguments(antiderivative_tree.body)
+        if not csch_tanh_arguments:
+            return None
+        csch_tanh_hypothesis = domain_hypotheses.get(
+            ast.dump(csch_tanh_arguments[0], include_attributes=False)
+        )
+        csch_sinh_hypothesis = domain_hypotheses.get(
+            ast.dump(_sinh_call(csch_affine[0]), include_attributes=False)
+        )
+        csch_argument_at_point = _render_real_calculus_node(
+            csch_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        csch_argument_derivative_proof = _derivative_proof_term(
+            csch_affine[0],
+            variable,
+            function_variable,
+            point_variable,
+            {"nodes": 0},
+            0,
+            domain_hypotheses=domain_hypotheses,
+            positive_hypotheses=positive_hypotheses,
+        )
+        if (
+            csch_tanh_hypothesis is None
+            or csch_sinh_hypothesis is None
+            or csch_argument_at_point is None
+            or csch_argument_derivative_proof is None
+        ):
+            return None
+        proof = (
+            "((wolfram_hasDerivAt_log_tanh_half "
+            f"{csch_argument_at_point} {csch_tanh_hypothesis} "
+            f"{csch_sinh_hypothesis}).comp {point_variable} "
+            f"({csch_argument_derivative_proof})).div_const "
+            f"({_lean_rational(csch_affine[1])})"
+        )
     if proof is None:
         return None
 
@@ -2093,6 +2178,37 @@ def _prepare_definite_real_integral(
     if interval_domain_lemma_source:
         interval_domain_lemma_source = "\n" + interval_domain_lemma_source
 
+    csch_helper_source = ""
+    hderiv_function_proof = "simp [F, id_eq] <;> ring"
+    hderiv_value_proof = (
+        f"simp [F, id_eq] <;> field_simp{field_simp_arguments} <;> ring"
+    )
+    hcont_proof = "fun_prop"
+    if csch_affine is not None:
+        csch_helper_source = "\n".join(
+            [
+                _tanh_derivative_lemma_source(),
+                _sinh_double_lemma_source(),
+                _csch_primitive_derivative_lemma_source(),
+            ]
+        )
+        if csch_sinh_hypothesis is None:
+            return None
+        hderiv_function_proof = (
+            "simp [F, Function.comp_def, id_eq] <;> ring"
+        )
+        hderiv_value_proof = (
+            f"simp [F, Function.comp_def, id_eq] <;> "
+            f"field_simp{field_simp_arguments} <;> ring"
+        )
+        hcont_proof = (
+            "apply ContinuousOn.div₀\n"
+            "    · exact continuousOn_const\n"
+            "    · fun_prop\n"
+            f"    · intro {point_variable} hpoint\n"
+            f"      exact {csch_sinh_hypothesis}"
+        )
+
     binders = " ".join(
         [
             *(f"({name} : ℝ)" for name in sorted(symbol_names - {variable})),
@@ -2106,6 +2222,7 @@ import Mathlib.Analysis.Calculus.Deriv.Pow
 import Mathlib.Analysis.SpecialFunctions.ExpDeriv
 import Mathlib.Analysis.SpecialFunctions.Log.Deriv
 import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.ArctanDeriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.DerivHyp
@@ -2143,6 +2260,23 @@ theorem wolfram_language_compute{theorem_binders} :
 
 #print axioms wolfram_language_compute
 """
+    if csch_helper_source:
+        source = source.replace(
+            "theorem wolfram_language_compute",
+            f"{csch_helper_source}\n\ntheorem wolfram_language_compute",
+            1,
+        )
+    source = source.replace(
+        "simp [F, id_eq] <;> ring", hderiv_function_proof, 1
+    )
+    source = source.replace(
+        f"simp [F, id_eq] <;> field_simp{field_simp_arguments} <;> ring",
+        hderiv_value_proof,
+        1,
+    )
+    source = source.replace(
+        "    fun_prop\n  have hint", f"    {hcont_proof}\n  have hint", 1
+    )
     return Computation(
         definite_result.replace("**", "^"),
         source,

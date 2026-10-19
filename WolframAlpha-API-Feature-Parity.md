@@ -162,6 +162,11 @@ condition. `Integrate[Csch[a*x+b], x]` supports rational nonzero slopes `a` and
 returns `Log[Abs[Tanh[(a*x+b)/2]]]/a` after Lean checks the derivative using the
 hyperbolic double-angle identity. It returns nonzero conditions for both
 `Tanh[(a*x+b)/2]` and `Sinh[a*x+b]`; nonlinear Csch arguments remain unsupported.
+For definite integrals, exact rational bounds are accepted when the affine
+argument has the same nonzero sign at both endpoints. Lean checks the endpoint
+log-tanh difference through the interval fundamental theorem and returns
+interval-wide nonzero conditions for the sinh denominator and tanh logarithm.
+Bounds that contain or cross a Csch pole are rejected.
 
 `ArcTanh` differentiation is checked under the explicit strict conditions
 `-1 < argument` and `argument < 1`. For `Integrate[1/(1-x^2), x]`, the service
