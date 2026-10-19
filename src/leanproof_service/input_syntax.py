@@ -35,7 +35,8 @@ _GREEK_UNICODE = {
 }
 _FUNCTIONS = {
     "sin", "cos", "tan", "asin", "acos", "atan", "arcsin", "arccos", "arctan",
-    "sinh", "cosh", "tanh", "exp", "log", "ln", "sqrt", "root", "abs", "floor",
+    "sinh", "cosh", "tanh", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
+    "abs", "floor",
     "ceiling",
 }
 _FUNCTION_ALIASES = {"arcsin": "asin", "arccos": "acos", "arctan": "atan"}
@@ -182,7 +183,8 @@ def _latex_command(command: str, source: str, after_command: int) -> tuple[str, 
     function_names = {
         "sin": "sin", "cos": "cos", "tan": "tan", "arcsin": "asin", "arccos": "acos",
         "arctan": "atan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh", "exp": "exp",
-        "log": "log", "ln": "ln", "abs": "abs", "floor": "floor", "ceiling": "ceiling",
+        "sec": "sec", "csc": "csc", "cot": "cot", "log": "log", "ln": "ln", "abs": "abs",
+        "floor": "floor", "ceiling": "ceiling",
     }
     if command in function_names:
         return "function", function_names[command]

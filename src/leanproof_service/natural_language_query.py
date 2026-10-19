@@ -12,7 +12,8 @@ from .input_syntax import MathInputError, parse_math_input
 _IDENTIFIER = r"[A-Za-z][A-Za-z0-9_]{0,31}"
 _FUNCTIONS = {
     "sin", "cos", "tan", "asin", "acos", "atan", "arcsin", "arccos", "arctan",
-    "sinh", "cosh", "tanh", "exp", "log", "ln", "sqrt", "root", "abs",
+    "sinh", "cosh", "tanh", "sec", "csc", "cot", "exp", "log", "ln", "sqrt", "root",
+    "abs",
     "floor", "ceiling",
 }
 _CONSTANTS = {"pi", "E", "I", "oo", "e"}

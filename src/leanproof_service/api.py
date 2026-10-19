@@ -418,9 +418,12 @@ def capabilities() -> dict[str, object]:
                 "derivative": {
                     "syntax": "D[expression, variable]",
                     "proof": "Lean HasDerivAt theorem with axiom audit",
-                    "functions": ["Sin", "Cos", "Tan", "ArcSin", "ArcCos", "ArcTan", "Sqrt", "Exp", "Sinh", "Cosh", "Log"],
+                    "functions": [
+                        "Sin", "Cos", "Tan", "Sec", "Csc", "Cot", "ArcSin", "ArcCos",
+                        "ArcTan", "Sqrt", "Exp", "Sinh", "Cosh", "Log",
+                    ],
                     "assumptions": "all variables are real; differentiation variable is unrestricted",
-                    "domain_conditions": "Tan arguments require nonzero cosine; ArcSin and ArcCos arguments require strict bounds between -1 and 1; variable Sqrt arguments require positivity; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
+                    "domain_conditions": "Tan and Sec arguments require nonzero cosine; Csc and Cot arguments require nonzero sine; ArcSin and ArcCos arguments require strict bounds between -1 and 1; variable Sqrt arguments require positivity; variable denominators require nonzero conditions; real Log arguments require positive conditions; returned in evidence.domain_conditions",
                 },
                 "indefinite_integral": {
                     "syntax": "Integrate[expression, variable]",

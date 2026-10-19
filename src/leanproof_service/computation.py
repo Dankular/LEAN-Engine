@@ -43,7 +43,9 @@ _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
 _WOLFRAM_REAL_FUNCTION = re.compile(
-    r"\b(?P<function>Sin|Cos|Tan|ArcSin|ArcCos|ArcTan|Sqrt|Exp|Sinh|Cosh|Log)\s*\[(?P<argument>[^\[\]]*)\]",
+    r"\b(?P<function>"
+    r"Sin|Cos|Tan|Sec|Csc|Cot|ArcSin|ArcCos|ArcTan|Sqrt|Exp|Sinh|Cosh|Log"
+    r")\s*\[(?P<argument>[^\[\]]*)\]",
     re.IGNORECASE,
 )
 _REAL_POLYNOMIAL_SOLVE = re.compile(
@@ -3094,6 +3096,12 @@ def _normalize_wolfram_real_functions(source: str) -> str:
                 argument = parse_math_input(argument).expression
             except MathInputError:
                 pass
+            if function_name == "sec":
+                return f"(1/cos({argument}))"
+            if function_name == "csc":
+                return f"(1/sin({argument}))"
+            if function_name == "cot":
+                return f"(cos({argument})/sin({argument}))"
             return f"{function_name}({argument})"
 
         normalized, replacements = _WOLFRAM_REAL_FUNCTION.subn(
