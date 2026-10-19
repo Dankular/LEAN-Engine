@@ -1474,19 +1474,37 @@ def _prepare_definite_real_integral(
         return None
     if integrand_lean is None:
         return None
-    if any(
-        isinstance(node, ast.Call)
+    explicit_base_log_arguments = {
+        ast.dump(node.args[0], include_attributes=False)
+        for node in ast.walk(expression_tree.body)
+        if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "log"
         and len(node.args) == 2
-        for node in ast.walk(expression_tree.body)
-    ):
-        return None
+    }
 
     lower = _parse_exact_rational(lower_source)
     upper = _parse_exact_rational(upper_source)
     if lower is None or upper is None:
         return None
+    for node in ast.walk(expression_tree.body):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != "log"
+            or len(node.args) != 2
+        ):
+            continue
+        argument_constant = _constant_fraction(node.args[0])
+        if argument_constant is not None:
+            if argument_constant <= 0:
+                return None
+            continue
+        argument_interval = _affine_interval_values(
+            node.args[0], variable, lower, upper
+        )
+        if argument_interval is None or min(argument_interval) <= 0:
+            return None
 
     symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
     symbolic = run_symbolic(SymbolicRequest(
@@ -1574,6 +1592,14 @@ def _prepare_definite_real_integral(
     seen_domain_expressions: set[str] = set()
     import sympy as _sympy
 
+    log_base_proofs = _log_base_nonzero_proofs(
+        expression_tree.body,
+        antiderivative_tree.body,
+        definite_result_tree.body,
+    )
+    if log_base_proofs is None:
+        return None
+
     for expression_root in (expression_tree.body, antiderivative_tree.body):
         domain_candidates = [
             *_variable_denominators(expression_root),
@@ -1585,11 +1611,15 @@ def _prepare_definite_real_integral(
         domain_candidates.extend(tangent_cosines)
         for candidate in domain_candidates:
             key = ast.dump(candidate, include_attributes=False)
+            if key in log_base_proofs:
+                continue
             if key in seen_domain_expressions:
                 continue
             constant = _constant_fraction(candidate)
             if constant is not None:
                 if constant == 0:
+                    return None
+                if key in explicit_base_log_arguments and constant < 0:
                     return None
                 continue
             seen_domain_expressions.add(key)
@@ -1631,10 +1661,10 @@ def _prepare_definite_real_integral(
     ):
         return None
 
-    domain_hypotheses: dict[str, str] = {}
+    domain_hypotheses: dict[str, str] = dict(log_base_proofs)
     positive_hypotheses: dict[str, str] = {}
     interval_domain_binders: list[str] = []
-    interval_domain_proofs: list[str] = []
+    interval_domain_proofs: list[str] = list(log_base_proofs.values())
     interval_domain_lemmas: list[str] = []
     domain_conditions: list[str] = []
     domain_condition_sympy_expressions: list[object] = []
@@ -1653,6 +1683,52 @@ def _prepare_definite_real_integral(
         affine_values = _affine_interval_values(
             domain_expression, variable, lower, upper
         )
+        if key in explicit_base_log_arguments:
+            if affine_values is not None:
+                affine_lower, affine_upper = affine_values
+                if min(affine_lower, affine_upper) <= 0:
+                    return None
+                hypothesis_name = fresh_name(
+                    f"h_interval_auto_positive_{index}", used_names
+                )
+                positive_hypotheses[key] = (
+                    f"({hypothesis_name} {point_variable} hpoint)"
+                )
+                domain_hypotheses[key] = (
+                    f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+                )
+                interval_domain_lemmas.append(
+                    interval_lemma_source(
+                        hypothesis_name, f"0 < {rendered_domain}"
+                    )
+                )
+                interval_domain_proofs.append(
+                    f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+                )
+                continue
+            hypothesis_name = fresh_name(
+                f"h_interval_positive_{index}", used_names
+            )
+            positive_hypotheses[key] = (
+                f"({hypothesis_name} {point_variable} hpoint)"
+            )
+            domain_hypotheses[key] = (
+                f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+            )
+            interval_domain_binders.append(
+                f"({hypothesis_name} : ∀ {point_variable} : ℝ, "
+                f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+                f"0 < {rendered_domain})"
+            )
+            interval_domain_proofs.append(
+                f"ne_of_gt ({hypothesis_name} {point_variable} hpoint)"
+            )
+            source_expression = ast.unparse(domain_expression).replace("**", "^")
+            domain_conditions.append(
+                f"throughout the closed interval with endpoints {_fraction_text(lower)} "
+                f"and {_fraction_text(upper)}, {source_expression} > 0"
+            )
+            continue
         if affine_values is not None:
             affine_lower, affine_upper = affine_values
             if (affine_lower > 0 and affine_upper > 0) or (
@@ -1714,6 +1790,39 @@ def _prepare_definite_real_integral(
                 f"and {_fraction_text(upper)}, "
                 f"{source_expression} ≠ 0"
             )
+
+    log_argument_keys = {
+        ast.dump(argument, include_attributes=False)
+        for expression_root in (expression_tree.body, antiderivative_tree.body)
+        for argument in _log_arguments(expression_root)
+    }
+    for index, key in enumerate(sorted(log_argument_keys)):
+        if key not in domain_hypotheses:
+            continue
+        argument = next(
+            candidate
+            for expression_root in (expression_tree.body, antiderivative_tree.body)
+            for candidate in _log_arguments(expression_root)
+            if ast.dump(candidate, include_attributes=False) == key
+        )
+        rendered_argument = _render_real_calculus_node(
+            argument,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        if rendered_argument is None:
+            return None
+        lemma_name = fresh_name(f"h_interval_log_nonzero_{index}", used_names)
+        interval_domain_lemmas.append(
+            f"  have {lemma_name} : ∀ {point_variable} : ℝ, "
+            f"{point_variable} ∈ Set.uIcc {lean_lower} {lean_upper} → "
+            f"{rendered_argument} ≠ 0 := by\n"
+            f"    intro {point_variable} hpoint\n"
+            f"    exact {domain_hypotheses[key]}"
+        )
 
     for index, argument in enumerate(inverse_trig_arguments):
         rendered_argument = _render_real_calculus_node(
@@ -1901,6 +2010,7 @@ def _prepare_definite_real_integral(
     · constructor <;> nlinarith [Real.pi_pos]"""
 
     log_equivalence_lemmas: list[tuple[str, str, str]] = []
+    log_reciprocal_lemmas: list[tuple[str, str, str]] = []
     seen_log_equivalences: set[frozenset[str]] = set()
     if len(rendered_log_arguments) <= 32:
         for index, (left_source, left_expression) in enumerate(rendered_log_arguments):
@@ -1908,14 +2018,30 @@ def _prepare_definite_real_integral(
                 equivalence_key = frozenset((left_source, right_source))
                 if equivalence_key in seen_log_equivalences:
                     continue
-                if _sympy.simplify(left_expression + right_expression) != 0:
-                    continue
-                seen_log_equivalences.add(equivalence_key)
-                lemma_name = fresh_name(
-                    f"h_log_sign_{len(log_equivalence_lemmas)}",
-                    used_names,
-                )
-                log_equivalence_lemmas.append((lemma_name, left_source, right_source))
+                if _sympy.simplify(left_expression + right_expression) == 0:
+                    seen_log_equivalences.add(equivalence_key)
+                    lemma_name = fresh_name(
+                        f"h_log_sign_{len(log_equivalence_lemmas)}",
+                        used_names,
+                    )
+                    log_equivalence_lemmas.append(
+                        (lemma_name, left_source, right_source)
+                    )
+                elif (
+                    left_expression.is_Rational is True
+                    and right_expression.is_Rational is True
+                    and left_expression.is_positive is True
+                    and right_expression.is_positive is True
+                    and _sympy.simplify(left_expression * right_expression - 1) == 0
+                ):
+                    seen_log_equivalences.add(equivalence_key)
+                    lemma_name = fresh_name(
+                        f"h_log_reciprocal_{len(log_reciprocal_lemmas)}",
+                        used_names,
+                    )
+                    log_reciprocal_lemmas.append(
+                        (lemma_name, left_source, right_source)
+                    )
 
     proof = _derivative_proof_term(
         antiderivative_tree.body,
@@ -1934,16 +2060,25 @@ def _prepare_definite_real_integral(
         f" [{', '.join(interval_domain_proofs)}]" if interval_domain_proofs else ""
     )
     log_lemma_names = [name for name, _, _ in log_equivalence_lemmas]
-    log_lemma_source = "\n".join(
+    log_sign_lemma_source = "\n".join(
         f"  have {name} : Real.log ({left}) = Real.log ({right}) := by\n"
         f"    rw [show ({left}) = -({right}) by ring]\n"
         f"    exact Real.log_neg_eq_log ({right})"
         for name, left, right in log_equivalence_lemmas
     )
+    log_reciprocal_lemma_source = "\n".join(
+        f"  have {name} : Real.log ({left}) = -Real.log ({right}) := by\n"
+        f"    rw [show ({left} : ℝ) = ({right} : ℝ)⁻¹ by norm_num, Real.log_inv]"
+        for name, left, right in log_reciprocal_lemmas
+    )
+    log_lemma_source = "\n".join(
+        part for part in (log_sign_lemma_source, log_reciprocal_lemma_source) if part
+    )
     if log_lemma_source:
         log_lemma_source = "\n" + log_lemma_source
     final_simp_names = [
         *log_lemma_names,
+        *[name for name, _, _ in log_reciprocal_lemmas],
         *([arcsin_half_lemma_name] if arcsin_half_lemma_name is not None else []),
     ]
     final_simplifier = (

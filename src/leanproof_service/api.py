@@ -388,6 +388,13 @@ def capabilities() -> dict[str, object]:
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
                     "Solve for univariate degree-at-most-two polynomial equations over Reals with rational roots",
                 ],
+                "explicit_base_log": {
+                    "syntax": "Log[base, argument]",
+                    "base": "statically rational, greater than zero, and different from one",
+                    "derivative_and_indefinite_integral": "Lean-checked for supported real expressions with the required positive-argument domain conditions",
+                    "definite_integral": "selected affine arguments that remain positive over exact rational bounds; Lean checks the antiderivative and endpoint result",
+                    "unsupported": ["variable bases", "nonlinear definite-integral arguments"],
+                },
                 "finite_sum_product": {
                     "syntax": (
                         "Sum[expression, {variable, lower, upper}] or "

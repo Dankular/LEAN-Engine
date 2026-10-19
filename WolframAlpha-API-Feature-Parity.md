@@ -88,11 +88,12 @@ the required nonzero conditions `Cos[x] ≠ 0` or `Sin[x] ≠ 0` in
 `evidence.domain_conditions`.
 
 Explicit-base `Log[base, argument]` differentiation and selected indefinite
-integrals now accept a statically rational base greater than zero and different
-from one. The real argument must be positive; the service derives that the
-logarithm of the base is nonzero and Lean checks the derivative certificate.
-Variable bases and definite integrals of explicit-base logarithms remain outside
-this slice.
+integrals accept a statically rational base greater than zero and different from
+one. Selected definite integrals also work when the argument is affine in the
+integration variable and remains positive over the exact rational bounds. The
+service proves the logarithm of the base is nonzero and Lean checks the derivative
+and interval-integral result. Variable bases and nonlinear definite arguments
+remain outside this slice.
 
 `Solve[lhs == rhs, variable, Reals]` supports univariate rational-coefficient
 polynomials of degree at most four when they factor completely over the rationals,
