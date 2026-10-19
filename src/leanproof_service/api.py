@@ -407,9 +407,16 @@ def capabilities() -> dict[str, object]:
                 },
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",
-                    "domain": "univariate rational-coefficient polynomials of degree at most two, including exact real quadratic-radical roots and quadratics with no real roots, plus nonzero constant equations",
-                    "proof": "Lean proves the returned solution set is equivalent to the submitted equation over the reals and audits axioms",
-                    "unsupported": ["complex-domain solving", "systems", "degree above two"],
+                    "system_syntax": "Solve[{eq1, eq2}, {x, y}, Reals]",
+                    "domain": "univariate rational-coefficient polynomials of degree at most four with complete rational factorization, plus exact real quadratic-radical roots and quadratics with no real roots, nonzero constant equations, and rational 2x2 linear systems with unique or empty solution sets",
+                    "proof": "Lean proves the returned solution set is equivalent to the submitted equation or system over the reals and audits axioms",
+                    "unsupported": [
+                        "complex-domain solving",
+                        "nonlinear or larger systems",
+                        "underdetermined systems",
+                        "degree above four",
+                        "degree-three or degree-four polynomials without complete rational factorization",
+                    ],
                 },
                 "definite_integral": {
                     "syntax": "Integrate[expression, {variable, lower, upper}]",

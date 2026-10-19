@@ -49,6 +49,12 @@ _REAL_POLYNOMIAL_SOLVE = re.compile(
     r"(?is)\s*Solve\s*\[\s*(?P<lhs>.+?)\s*==\s*(?P<rhs>.+?)\s*,\s*"
     r"(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*Reals\s*\]\s*"
 )
+_REAL_LINEAR_SYSTEM_SOLVE = re.compile(
+    r"(?is)\s*Solve\s*\[\s*\{\s*(?P<first_equation>[^,{}]+?)\s*,\s*"
+    r"(?P<second_equation>[^,{}]+?)\s*\}\s*,\s*\{\s*"
+    r"(?P<first_variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
+    r"(?P<second_variable>[a-z][a-z0-9_]{0,31})\s*\}\s*,\s*Reals\s*\]\s*"
+)
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -119,6 +125,15 @@ theorem wolfram_language_compute (x : ℝ) :
             real_polynomial_solve.group("lhs"),
             real_polynomial_solve.group("rhs"),
             real_polynomial_solve.group("variable"),
+        )
+
+    real_linear_system_solve = _REAL_LINEAR_SYSTEM_SOLVE.fullmatch(code)
+    if real_linear_system_solve is not None:
+        return _prepare_real_linear_system_solve(
+            real_linear_system_solve.group("first_equation"),
+            real_linear_system_solve.group("second_equation"),
+            real_linear_system_solve.group("first_variable"),
+            real_linear_system_solve.group("second_variable"),
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
@@ -1170,7 +1185,7 @@ def _prepare_real_polynomial_solve(
         return None
     lhs_degree = _bounded_polynomial_degree(lhs_tree.body, variable)
     rhs_degree = _bounded_polynomial_degree(rhs_tree.body, variable)
-    if lhs_degree is None or rhs_degree is None or max(lhs_degree, rhs_degree) > 2:
+    if lhs_degree is None or rhs_degree is None or max(lhs_degree, rhs_degree) > 4:
         return None
 
     lhs_lean, lhs_symbols = _render_polynomial_lean(exact_lhs)
@@ -1191,7 +1206,7 @@ def _prepare_real_polynomial_solve(
         polynomial = _sympy.Poly(lhs_expression - rhs_expression, symbol, domain=_sympy.QQ)
     except (TypeError, ValueError, _sympy.PolynomialError):
         return None
-    if polynomial.is_zero or polynomial.degree() > 2:
+    if polynomial.is_zero or polynomial.degree() > 4:
         return None
     for coefficient in polynomial.all_coeffs():
         if (
@@ -1201,6 +1216,7 @@ def _prepare_real_polynomial_solve(
             return None
 
     roots: list[_RealPolynomialRoot] = []
+    factor_roots: list[_RealPolynomialRoot] = []
     quadratic_coefficients: tuple[Fraction, Fraction, Fraction] | None = None
     discriminant: Fraction | None = None
     if polynomial.degree() > 0:
@@ -1210,21 +1226,28 @@ def _prepare_real_polynomial_solve(
             and all(root.is_Rational for root in roots_with_multiplicity)
         )
         if rational_roots_complete:
-            rational_values = []
-            for root in roots_with_multiplicity:
+            rational_roots = []
+            for root, multiplicity in roots_with_multiplicity.items():
                 root_fraction = Fraction(int(root.p), int(root.q))
                 if (
                     abs(root_fraction.numerator).bit_length() > 256
                     or root_fraction.denominator.bit_length() > 256
                 ):
                     return None
-                rational_values.append(root_fraction)
+                rational_roots.append((root_fraction, multiplicity))
+            rational_values = sorted({root for root, _ in rational_roots})
             roots = [
                 _RealPolynomialRoot(
                     _lean_rational(root),
                     _fraction_text(root),
                 )
-                for root in sorted(set(rational_values))
+                for root in rational_values
+            ]
+            root_by_value = dict(zip(rational_values, roots))
+            factor_roots = [
+                root_by_value[root]
+                for root, multiplicity in sorted(rational_roots)
+                for _ in range(multiplicity)
             ]
         elif polynomial.degree() == 2:
             coefficients = [
@@ -1269,6 +1292,7 @@ def _prepare_real_polynomial_solve(
                             _sympy_real_root_to_wolfram(simplified_root, _sympy),
                         )
                     )
+                factor_roots = roots.copy()
             else:
                 quadratic_coefficients = (leading, linear, constant)
         else:
@@ -1279,6 +1303,7 @@ def _prepare_real_polynomial_solve(
         polynomial_lean,
         variable,
         roots,
+        factor_roots,
         quadratic_coefficients,
         discriminant,
     )
@@ -1290,6 +1315,140 @@ def _prepare_real_polynomial_solve(
     else:
         display_result = "{}"
     return Computation(display_result, proof_source)
+
+
+def _prepare_real_linear_system_solve(
+    first_equation_source: str,
+    second_equation_source: str,
+    first_variable: str,
+    second_variable: str,
+) -> Computation | None:
+    import sympy as _sympy
+
+    variables = (first_variable, second_variable)
+    if first_variable == second_variable:
+        return None
+
+    lean_equations: list[str] = []
+    sympy_equations = []
+    symbols = tuple(_sympy.Symbol(variable) for variable in variables)
+    allowed_variables = set(variables)
+    for equation_source in (first_equation_source, second_equation_source):
+        comparison = re.fullmatch(
+            r"(?is)\s*(?P<lhs>.+?)\s*==\s*(?P<rhs>.+?)\s*",
+            equation_source,
+        )
+        if comparison is None:
+            return None
+        try:
+            parsed_lhs = parse_math_input(comparison.group("lhs"))
+            parsed_rhs = parse_math_input(comparison.group("rhs"))
+        except (MathInputError, ValueError, SyntaxError, RecursionError):
+            return None
+        exact_lhs = _normalize_decimal_literals(parsed_lhs.expression)
+        exact_rhs = _normalize_decimal_literals(parsed_rhs.expression)
+        if exact_lhs is None or exact_rhs is None:
+            return None
+        lhs_lean, lhs_names = _render_polynomial_lean(exact_lhs)
+        rhs_lean, rhs_names = _render_polynomial_lean(exact_rhs)
+        if (
+            lhs_lean is None
+            or rhs_lean is None
+            or (lhs_names | rhs_names) - allowed_variables
+        ):
+            return None
+        try:
+            lhs_tree = ast.parse(exact_lhs, mode="eval")
+            rhs_tree = ast.parse(exact_rhs, mode="eval")
+        except (ValueError, SyntaxError, RecursionError):
+            return None
+        lhs_expression = _real_sympy_expression(lhs_tree.body)
+        rhs_expression = _real_sympy_expression(rhs_tree.body)
+        if lhs_expression is None or rhs_expression is None:
+            return None
+        try:
+            polynomial = _sympy.Poly(
+                lhs_expression - rhs_expression,
+                *symbols,
+                domain=_sympy.QQ,
+            )
+        except (TypeError, ValueError, _sympy.PolynomialError):
+            return None
+        if polynomial.total_degree() > 1:
+            return None
+        for coefficient in polynomial.coeffs():
+            if (
+                abs(int(coefficient.p)).bit_length() > 256
+                or int(coefficient.q).bit_length() > 256
+            ):
+                return None
+
+        sympy_equations.append(polynomial)
+        lean_equations.append(f"(({lhs_lean}) - ({rhs_lean}))")
+
+    matrix = _sympy.Matrix(
+        [
+            [equation.coeff_monomial(symbol) for symbol in symbols]
+            for equation in sympy_equations
+        ]
+    )
+    right_hand_side = _sympy.Matrix(
+        [-equation.coeff_monomial(1) for equation in sympy_equations]
+    )
+    determinant = matrix.det()
+    if determinant != 0:
+        solution = [
+            _sympy.cancel(value)
+            for value in matrix.inv() * right_hand_side
+        ]
+        if not all(value.is_Rational for value in solution):
+            return None
+        solution_fractions = [
+            Fraction(int(value.p), int(value.q)) for value in solution
+        ]
+        result_bindings = ", ".join(
+            f"{variable} -> {_fraction_text(value)}"
+            for variable, value in zip(variables, solution_fractions)
+        )
+        result = "{{" + result_bindings + "}}"
+        result_proposition = " ∧ ".join(
+            f"{variable} = {_lean_rational(value)}"
+            for variable, value in zip(variables, solution_fractions)
+        )
+        forward_proof = """  · rintro ⟨hequation1, hequation2⟩
+    constructor
+    · linarith [hequation1, hequation2]
+    · linarith [hequation1, hequation2]"""
+        backward_proof = f"""  · rintro ⟨h{first_variable}, h{second_variable}⟩
+    subst {first_variable}
+    subst {second_variable}
+    constructor <;> norm_num"""
+    else:
+        if matrix.rank() == matrix.row_join(right_hand_side).rank():
+            return None
+        result = "{}"
+        result_proposition = "False"
+        forward_proof = """  · rintro ⟨hequation1, hequation2⟩
+    linarith [hequation1, hequation2]"""
+        backward_proof = """  · intro hfalse
+    exact False.elim hfalse"""
+
+    system_proposition = " ∧ ".join(
+        f"({equation} = 0)" for equation in lean_equations
+    )
+    source = f"""import Mathlib.Data.Real.Basic
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute ({first_variable} {second_variable} : ℝ) :
+    ({system_proposition}) ↔ ({result_proposition}) := by
+  constructor
+{forward_proof}
+{backward_proof}
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(result, source)
 
 
 def _sympy_real_root_to_wolfram(expression: object, sympy: object) -> str:
@@ -1335,6 +1494,7 @@ def _real_polynomial_solve_proof_source(
     polynomial: str,
     variable: str,
     roots: list[_RealPolynomialRoot],
+    factor_roots: list[_RealPolynomialRoot],
     quadratic_coefficients: tuple[Fraction, Fraction, Fraction] | None,
     discriminant: Fraction | None,
 ) -> str:
@@ -1359,8 +1519,8 @@ def _real_polynomial_solve_proof_source(
     norm_num at hzero
   · intro hfalse
     exact False.elim hfalse"""
-    elif len(roots) == 1:
-        result_proposition = f"{variable} = {roots[0].lean_expression}"
+    elif len(factor_roots) == 1:
+        result_proposition = f"{variable} = {factor_roots[0].lean_expression}"
         proof = f"""  constructor
   · intro hzero
     nlinarith [hzero]
@@ -1369,9 +1529,11 @@ def _real_polynomial_solve_proof_source(
     norm_num"""
     else:
         result_proposition = " ∨ ".join(
-            f"{variable} = {root.lean_expression}" for root in roots
+            f"{variable} = {root.lean_expression}" for root in factor_roots
         )
-        factors = " * ".join(f"({variable} - {root.lean_expression})" for root in roots)
+        factors = " * ".join(
+            f"({variable} - {root.lean_expression})" for root in factor_roots
+        )
         factor_hypotheses = "[hzero]"
         branch_hypotheses = ""
         if discriminant is not None and discriminant > 0:
@@ -1382,19 +1544,49 @@ def _real_polynomial_solve_proof_source(
     Real.sq_sqrt (le_of_lt hdiscriminant)
 """
         solution_tactic = "nlinarith [hsqrt]" if branch_hypotheses else "norm_num"
+        solution_cases: list[str] = []
+
+        def append_solution_cases(
+            case_indent: int,
+            is_nested: bool,
+            remaining_roots: list[_RealPolynomialRoot],
+        ) -> None:
+            prefix = " " * case_indent
+            if len(remaining_roots) == 1:
+                bullet = "· " if is_nested else ""
+                solution_cases.append(f"{prefix}{bullet}subst {variable}")
+                solution_cases.append(
+                    f"{' ' * (case_indent + 2)}{solution_tactic}"
+                )
+                return
+
+            bullet = "· " if is_nested else ""
+            solution_cases.append(
+                f"{prefix}{bullet}rcases hsolutions with hsolution | hsolutions"
+            )
+            child_indent = case_indent + (2 if is_nested else 0)
+            solution_cases.append(
+                f"{' ' * child_indent}· subst {variable}"
+            )
+            solution_cases.append(
+                f"{' ' * (child_indent + 2)}{solution_tactic}"
+            )
+            append_solution_cases(
+                child_indent,
+                True,
+                remaining_roots[1:],
+            )
+
+        append_solution_cases(4, False, factor_roots)
+        converse = "\n".join(solution_cases)
         proof = f"""{branch_hypotheses}  constructor
   · intro hzero
     have hfactor : {factors} = 0 := by nlinarith {factor_hypotheses}
-    rcases mul_eq_zero.mp hfactor with hleft | hright
-    · left
-      nlinarith [hleft]
-    · right
-      nlinarith [hright]
-  · rintro (hsolution | hsolution)
-    · subst {variable}
-      {solution_tactic}
-    · subst {variable}
-      {solution_tactic}"""
+    have hsolutions : {result_proposition} := by
+      simpa only [mul_eq_zero, sub_eq_zero, or_assoc] using hfactor
+    exact hsolutions
+  · intro hsolutions
+{converse}"""
     return f"""import Mathlib.Data.Real.Basic
 import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Tactic.Linarith
