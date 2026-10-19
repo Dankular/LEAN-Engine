@@ -65,5 +65,23 @@ class InverseTrigonometricAntiderivativeTests(unittest.TestCase):
                 self.assertIn("HasDerivAt", computation.lean_source)
 
 
+class ReciprocalTrigonometricAntiderivativeTests(unittest.TestCase):
+    def test_reciprocal_trig_square_integrals_include_pole_conditions(self) -> None:
+        cases = {
+            "Integrate[Sec[x]^2, x]": ("sin(x)/cos(x)", "Cos[x] ≠ 0"),
+            "Integrate[Csc[x]^2, x]": ("-cos(x)/sin(x)", "sin(x) ≠ 0"),
+            "Integrate[Cot[x]^2, x]": ("-x - cos(x)/sin(x)", "sin(x) ≠ 0"),
+        }
+        for code, (expected_result, expected_condition) in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected_result)
+                self.assertIn(expected_condition, computation.domain_conditions)
+                self.assertIn("HasDerivAt", computation.lean_source)
+                self.assertIn("Real.sin_sq_add_cos_sq", computation.lean_source)
+
+
 if __name__ == "__main__":
     unittest.main()

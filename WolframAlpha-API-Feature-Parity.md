@@ -114,6 +114,12 @@ It also supports `Integrate[ArcSin[x], x] = x*asin(x) + sqrt(1 - x^2)` and
 `Integrate[ArcCos[x], x] = x*acos(x) - sqrt(1 - x^2)`; scaled arguments such as
 `Integrate[ArcSin[2x], x]` retain the corresponding strict argument bounds in evidence.
 
+Lean also checks the reciprocal-trigonometric square integrals
+`Integrate[Sec[x]^2, x]`, `Integrate[Csc[x]^2, x]`, and
+`Integrate[Cot[x]^2, x]`. The service returns explicit `Cos[x] != 0` for the
+secant case and `Sin[x] != 0` for the cosecant and cotangent cases. These proofs use the
+sine-cosine identity after differentiating the generated antiderivative.
+
 ## Full Results API feature inventory
 
 The documented parameter groups are:

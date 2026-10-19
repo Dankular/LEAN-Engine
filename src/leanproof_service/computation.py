@@ -2199,11 +2199,40 @@ def _prepare_real_antiderivative(
         for expression_tree in (integrand_tree, tree)
         for node in ast.walk(expression_tree.body)
     )
-    tangent_simp = ", Real.tan_eq_sin_div_cos" if has_tangent else ""
-    derivative_tactic = (
-        f"simp [id_eq{tangent_simp}] <;> "
-        f"field_simp{field_simp_arguments} <;> ring"
+    has_sine_cosine_quotient = (
+        any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "sin"
+            for expression_tree in (integrand_tree, tree)
+            for node in ast.walk(expression_tree.body)
+        )
+        and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cos"
+            for expression_tree in (integrand_tree, tree)
+            for node in ast.walk(expression_tree.body)
+        )
+        and any(
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Div)
+            and _contains_calculus_variable(node.right)
+            for expression_tree in (integrand_tree, tree)
+            for node in ast.walk(expression_tree.body)
+        )
     )
+    if has_tangent or has_sine_cosine_quotient:
+        tangent_simp = ", Real.tan_eq_sin_div_cos" if has_tangent else ""
+        derivative_tactic = (
+            f"simp [id_eq{tangent_simp}] <;> "
+            f"field_simp{field_simp_arguments} <;> "
+            f"nlinarith [Real.sin_sq_add_cos_sq {variable}]"
+        )
+    else:
+        derivative_tactic = (
+            f"simp [id_eq] <;> field_simp{field_simp_arguments} <;> ring"
+        )
     source = f"""import Mathlib.Analysis.Calculus.Deriv.Add
 import Mathlib.Analysis.Calculus.Deriv.Mul
 import Mathlib.Analysis.Calculus.Deriv.Pow
@@ -2223,8 +2252,8 @@ theorem wolfram_language_compute{theorem_binders} :
   convert ({proof}) using 1
   all_goals
     first
-    | {function_equality_tactic}
-    | {derivative_tactic}
+    | ({function_equality_tactic} <;> done)
+    | ({derivative_tactic} <;> done)
 
 #print axioms wolfram_language_compute
 """
