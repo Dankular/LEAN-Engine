@@ -725,6 +725,13 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
         return f"Solve[({request.expression}) == 0, {request.variable}, Reals]"
     if request.operation == "differentiate" and request.expression is not None and request.variable:
         return f"D[{request.expression}, {request.variable}]"
+    if (
+        request.operation == "limit"
+        and request.expression is not None
+        and request.variable is not None
+        and request.point is not None
+    ):
+        return f"Limit[{request.expression}, {{{request.variable}, {request.point}}}]"
     if request.operation == "identity" and request.lhs is not None and request.rhs is not None:
         return f"Simplify[({request.lhs}) - ({request.rhs})]"
     if (
@@ -764,6 +771,8 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
 def _query_claim_type(request: SymbolicRequest, code: str) -> str:
     if request.operation == "solve":
         return "real_solution_set_equivalence"
+    if request.operation == "limit":
+        return "continuous_polynomial_limit"
     if request.operation == "sum":
         return "finite_sum_equality"
     if request.operation == "product":

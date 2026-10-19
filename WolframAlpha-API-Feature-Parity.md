@@ -48,6 +48,11 @@ with reversed ranges using the empty-sum value `0` and empty-product value `1`. 
 the finite `Finset.range` computation, and the query verifier attaches evidence only when
 that exact result matches the SymPy result.
 
+`Limit[expression, {variable, point}]` also receives Lean evidence when the expression is
+a rational-coefficient polynomial and the point is an exact rational number within the
+256-bit numeric limit. Lean proves continuity at the point and checks the exact value;
+other limit forms remain symbolic results without Lean evidence.
+
 The verified calculus subset also supports `D[ArcTan[2x], x]` and the
 `Integrate[1/(1+x^2), x]` and `Integrate[ArcTan[x], x]` cases. Results are returned only
 after Lean checks the derivative; generated conditions such as `x^2 + 1 ≠ 0` are

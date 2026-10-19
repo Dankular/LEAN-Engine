@@ -138,7 +138,9 @@ def run_generated_source(source: str, timeout_seconds: float) -> LeanResult:
     if lake is None or not project_dir.is_dir():
         return LeanResult("unavailable", source, "Lean/Lake project is not configured")
     try:
-        with tempfile.TemporaryDirectory(prefix="leanproof-") as temp_dir:
+        temporary_root = project_dir / ".lake"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="leanproof-", dir=temporary_root) as temp_dir:
             source_file = Path(temp_dir) / "FactCheck.lean"
             source_file.write_text(source, encoding="utf-8")
             result = subprocess.run(

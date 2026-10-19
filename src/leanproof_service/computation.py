@@ -53,6 +53,11 @@ _REAL_LINEAR_SYSTEM_SOLVE = re.compile(
     r"(?is)\s*Solve\s*\[\s*\{(?P<equations>.*?)\}\s*,\s*"
     r"\{(?P<variables>.*?)\}\s*,\s*Reals\s*\]\s*"
 )
+_REAL_POLYNOMIAL_LIMIT = re.compile(
+    r"(?is)\s*Limit\s*\[\s*(?P<expression>.+?)\s*,\s*"
+    r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
+    r"(?P<point>[^,{}]+?)\s*\}\s*\]\s*"
+)
 _FINITE_SUM_PRODUCT = re.compile(
     r"(?is)\s*(?P<operation>Sum|Product)\s*\[\s*(?P<expression>.+?)\s*,\s*"
     r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
@@ -83,6 +88,15 @@ theorem wolfram_language_compute (x : ℝ) :
 #print axioms wolfram_language_compute
 """
         return Computation("2*Cos[x]*Sin[x]", source)
+
+    real_polynomial_limit = _REAL_POLYNOMIAL_LIMIT.fullmatch(code)
+    if real_polynomial_limit is not None:
+        return _prepare_real_polynomial_limit(
+            real_polynomial_limit.group("expression"),
+            real_polynomial_limit.group("variable"),
+            real_polynomial_limit.group("point"),
+            time_limit_seconds,
+        )
 
     finite_sum_product = _FINITE_SUM_PRODUCT.fullmatch(code)
     if finite_sum_product is not None:
@@ -269,6 +283,153 @@ theorem wolfram_language_compute{theorem_binders} :
 
 def _lean_real_integer(value: int) -> str:
     return f"({value} : ℝ)"
+
+
+def _prepare_real_polynomial_limit(
+    expression_source: str,
+    variable: str,
+    point_source: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    exact_source = _normalize_decimal_literals(expression_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+        expression_lean, expression_symbols = _render_polynomial_lean(parsed.expression)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+    if expression_lean is None:
+        return None
+
+    point = _parse_exact_rational(point_source)
+    if (
+        point is None
+        or abs(point.numerator).bit_length() > 256
+        or point.denominator.bit_length() > 256
+    ):
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation="limit",
+        expression=parsed.expression,
+        variable=variable,
+        point=_fraction_text(point),
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no finite limit"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    result = symbolic["result"]
+    result_lean, result_symbols = _render_polynomial_lean(result)
+    if result_lean is None:
+        return None
+
+    used_names = set(expression_symbols) | set(result_symbols)
+    limit_variable = _fresh_identifier("limit_variable", used_names)
+    limit_body = _render_polynomial_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: limit_variable},
+    )
+    value_at_point = _render_polynomial_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: _lean_rational(point)},
+    )
+    if limit_body is None or value_at_point is None:
+        return None
+    continuity_proof = _polynomial_continuity_proof(
+        expression_tree.body,
+        variable,
+        {"nodes": 0},
+        0,
+    )
+    if continuity_proof is None:
+        return None
+
+    theorem_symbols = sorted(
+        (expression_symbols | result_symbols) - {variable, limit_variable}
+    )
+    binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
+    theorem_binders = f" {binders}" if binders else ""
+    point_lean = _lean_rational(point)
+    source = f"""import Mathlib.Basic.Real.Basic
+import Mathlib.Topology.Instances.Real.Lemmas
+import Mathlib.Topology.Continuous
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    Filter.Tendsto (fun {limit_variable} : ℝ => {limit_body})
+      (nhds {point_lean}) (nhds {result_lean}) := by
+  have hcont : ContinuousAt (fun {limit_variable} : ℝ => {limit_body})
+      {point_lean} := {continuity_proof}
+  have hvalue : {value_at_point} = {result_lean} := by ring
+  simpa only [hvalue] using hcont.tendsto
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(result.replace("**", "^"), source)
+
+
+def _polynomial_continuity_proof(
+    node: ast.AST,
+    variable: str,
+    state: dict[str, int],
+    depth: int,
+) -> str | None:
+    state["nodes"] += 1
+    if state["nodes"] > 256 or depth > 32:
+        return None
+    if _constant_fraction(node) is not None:
+        return "continuousAt_const"
+    if isinstance(node, ast.Name):
+        return "continuousAt_id" if node.id == variable else "continuousAt_const"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        inner = _polynomial_continuity_proof(
+            node.operand, variable, state, depth + 1
+        )
+        if inner is None:
+            return None
+        return inner if isinstance(node.op, ast.UAdd) else f"({inner}).neg"
+    if not isinstance(node, ast.BinOp):
+        return None
+
+    left = _polynomial_continuity_proof(node.left, variable, state, depth + 1)
+    if left is None:
+        return None
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+            return None
+        if exponent == 0:
+            return "continuousAt_const"
+        return f"({left}).pow {exponent.numerator}"
+    if isinstance(node.op, ast.Div):
+        denominator = _constant_fraction(node.right)
+        if denominator is None or denominator == 0:
+            return None
+        return f"({left}).div_const {_lean_rational(denominator)}"
+
+    right = _polynomial_continuity_proof(node.right, variable, state, depth + 1)
+    if right is None:
+        return None
+    method = {
+        ast.Add: "add",
+        ast.Sub: "sub",
+        ast.Mult: "mul",
+    }.get(type(node.op))
+    return f"({left}).{method} ({right})" if method is not None else None
 
 
 def _prepare_definite_real_integral(
