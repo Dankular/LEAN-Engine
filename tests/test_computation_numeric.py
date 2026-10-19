@@ -46,6 +46,14 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[Sin[Pi/6]]": ("0.5", 16, "1/20000000000000000"),
             "N[Cos[Pi], 3]": ("-1", 3, "1/200"),
             "N[Sin[Pi/6] + Cos[Pi/3], 3]": ("1", 3, "1/200"),
+            "N[Sin[Pi/3], 3]": ("0.866", 3, "1/2000"),
+            "N[Sin[Pi/5], 3]": ("0.588", 3, "1/2000"),
+            "N[Cos[Pi/8], 3]": ("0.924", 3, "1/2000"),
+            "N[Sin[Pi/16], 10]": ("0.1950903220", 10, "1/20000000000"),
+            "N[Sin[Pi/3] + Cos[Pi/4], 3]": ("1.57", 3, "1/200"),
+            "N[Sin[-Pi/3], 3]": ("-0.866", 3, "1/2000"),
+            "N[Tan[Pi/6], 3]": ("0.577", 3, "1/2000"),
+            "N[Tan[Pi/8], 3]": ("0.414", 3, "1/2000"),
         }
         for code, expected in cases.items():
             with self.subTest(code=code):
@@ -78,7 +86,7 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
                 "value": "0.333",
                 "precision_significant_digits": 3,
                 "absolute_error_bound": "1/2000",
-                "claim": "the exact rational input differs from value by at most this bound",
+                "claim": "the exact mathematical value differs from value by at most this bound",
             },
         )
 
@@ -147,6 +155,37 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
                 self.assertEqual(evidence["axiom_audit"]["status"], "passed")
                 self.assertIn("wolfram_exact_trigonometric_expression", evidence["lean_source"])
 
+    def test_radical_trigonometric_approximations_are_kernel_checked(self) -> None:
+        cases = {
+            "N[Sin[Pi/3], 3]": ("0.866", "1/2000"),
+            "N[Sin[Pi/5], 3]": ("0.588", "1/2000"),
+            "N[Sin[Pi/16], 10]": ("0.1950903220", "1/20000000000"),
+            "N[Sin[Pi/3] + Cos[Pi/4], 3]": ("1.57", "1/200"),
+            "N[Tan[Pi/6], 3]": ("0.577", "1/2000"),
+            "N[Tan[Pi/8], 3]": ("0.414", "1/2000"),
+        }
+        for code, (expected_value, expected_error) in cases.items():
+            with self.subTest(code=code):
+                response = self.client.post(
+                    "/api/cag/v1/WolframLanguageCompute",
+                    json={"code": code, "timeConstraint": 60},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                evidence = response.json()["evidence"]
+                approximation = evidence["numeric_approximation"]
+                self.assertEqual(approximation["value"], expected_value)
+                self.assertEqual(
+                    approximation["absolute_error_bound"],
+                    expected_error,
+                )
+                self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+                self.assertIn(
+                    "wolfram_exact_trigonometric_expression",
+                    evidence["lean_source"],
+                )
+
     def test_negative_pi_multiple_is_checked(self) -> None:
         response = self.client.post(
             "/api/cag/v1/WolframLanguageCompute",
@@ -191,6 +230,21 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         evidence = response.json()["evidence"]
         self.assertEqual(evidence["numeric_approximation"]["precision_significant_digits"], 500)
+        self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+
+    def test_maximum_precision_for_radical_trigonometry_is_provable(self) -> None:
+        response = self.client.post(
+            "/api/cag/v1/WolframLanguageCompute",
+            json={"code": "N[Sin[Pi/3], 500]", "timeConstraint": 60},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        evidence = response.json()["evidence"]
+        approximation = evidence["numeric_approximation"]
+        self.assertEqual(approximation["precision_significant_digits"], 500)
+        self.assertTrue(approximation["value"].startswith("0.866"))
+        self.assertEqual(len(approximation["value"]), 502)
         self.assertEqual(evidence["axiom_audit"]["status"], "passed")
 
     def test_irrational_and_invalid_precision_inputs_are_not_claimed(self) -> None:
