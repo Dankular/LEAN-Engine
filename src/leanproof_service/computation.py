@@ -1474,6 +1474,14 @@ def _prepare_definite_real_integral(
         return None
     if integrand_lean is None:
         return None
+    if any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "log"
+        and len(node.args) == 2
+        for node in ast.walk(expression_tree.body)
+    ):
+        return None
 
     lower = _parse_exact_rational(lower_source)
     upper = _parse_exact_rational(upper_source)
@@ -2115,6 +2123,12 @@ def _prepare_real_antiderivative(
     domain_conditions: list[str] = []
     used_names = set(integrand_symbols) | set(antiderivative_symbols) | {variable}
 
+    log_base_proofs = _log_base_nonzero_proofs(integrand_tree.body, tree.body)
+    if log_base_proofs is None:
+        return None
+    domain_hypotheses.update(log_base_proofs)
+    domain_condition_names.extend(log_base_proofs.values())
+
     positive_arguments = [
         *positive_log_arguments,
         *positive_sqrt_arguments,
@@ -2539,6 +2553,11 @@ def _prepare_real_derivative(
     domain_binders: list[str] = []
     domain_condition_names: list[str] = []
     domain_conditions: list[str] = []
+    log_base_proofs = _log_base_nonzero_proofs(tree.body)
+    if log_base_proofs is None:
+        return None
+    domain_hypotheses.update(log_base_proofs)
+    domain_condition_names.extend(log_base_proofs.values())
     for index, denominator in enumerate(
         [*domain_denominators, *tan_cosine_arguments]
     ):
@@ -3508,6 +3527,15 @@ def _normalize_wolfram_real_functions(source: str) -> str:
                 "arctanh": "atanh",
             }.get(function_name, function_name)
             argument = match.group("argument")
+            if function_name == "log":
+                parts = _split_wolfram_arguments(argument)
+                if parts is not None and len(parts) == 2:
+                    try:
+                        base = parse_math_input(parts[0]).expression
+                        logarithm_argument = parse_math_input(parts[1]).expression
+                    except MathInputError:
+                        return match.group(0)
+                    return f"log({logarithm_argument},{base})"
             try:
                 argument = parse_math_input(argument).expression
             except MathInputError:
@@ -3529,6 +3557,27 @@ def _normalize_wolfram_real_functions(source: str) -> str:
     if "\\" not in normalized:
         normalized = normalized.replace("^", "**")
     return normalized
+
+
+def _split_wolfram_arguments(source: str) -> list[str] | None:
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = {value: key for key, value in pairs.items()}
+    stack: list[str] = []
+    parts: list[str] = []
+    start = 0
+    for index, character in enumerate(source):
+        if character in pairs:
+            stack.append(character)
+        elif character in closing:
+            if not stack or stack.pop() != closing[character]:
+                return None
+        elif character == "," and not stack:
+            parts.append(source[start:index].strip())
+            start = index + 1
+    if stack:
+        return None
+    parts.append(source[start:].strip())
+    return parts if len(parts) > 1 else None
 
 
 def _fresh_identifier(base: str, used_names: set[str]) -> str:
@@ -3564,15 +3613,21 @@ def _positive_log_arguments(root: ast.AST) -> list[ast.AST] | None:
             not isinstance(node, ast.Call)
             or not isinstance(node.func, ast.Name)
             or node.func.id != "log"
-            or len(node.args) != 1
+            or len(node.args) not in {1, 2}
             or node.keywords
         ):
             continue
+        if len(node.args) == 2:
+            base = _constant_fraction(node.args[1])
+            if base is None or base <= 0 or base == 1:
+                return None
         raw_argument = node.args[0]
         argument = _unwrap_real_abs(raw_argument)
         constant = _constant_fraction(argument)
         is_absolute_log = argument is not raw_argument
         if is_absolute_log:
+            if len(node.args) == 2:
+                return None
             if constant == 0:
                 return None
             continue
@@ -3620,7 +3675,7 @@ def _log_arguments(root: ast.AST) -> list[ast.AST]:
             not isinstance(node, ast.Call)
             or not isinstance(node.func, ast.Name)
             or node.func.id != "log"
-            or len(node.args) != 1
+            or len(node.args) not in {1, 2}
             or node.keywords
         ):
             continue
@@ -3630,6 +3685,47 @@ def _log_arguments(root: ast.AST) -> list[ast.AST]:
             seen.add(key)
             arguments.append(argument)
     return arguments
+
+
+def _log_base_call(base: ast.AST) -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id="log", ctx=ast.Load()),
+        args=[base],
+        keywords=[],
+    )
+
+
+def _log_base_nonzero_proofs(*roots: ast.AST) -> dict[str, str] | None:
+    proofs: dict[str, str] = {}
+    for root in roots:
+        for node in ast.walk(root):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Name)
+                or node.func.id != "log"
+                or len(node.args) != 2
+                or node.keywords
+            ):
+                continue
+            base = node.args[1]
+            base_fraction = _constant_fraction(base)
+            if base_fraction is None or base_fraction <= 0 or base_fraction == 1:
+                return None
+            base_lean = _render_real_calculus_node(
+                base,
+                set(),
+                {"nodes": 0},
+                0,
+                allow_variable_denominators=True,
+            )
+            if base_lean is None:
+                return None
+            proofs[ast.dump(_log_base_call(base), include_attributes=False)] = (
+                "(Real.log_ne_zero_of_pos_of_ne_one "
+                f"(by norm_num : 0 < ({base_lean} : ℝ)) "
+                f"(by norm_num : ({base_lean} : ℝ) ≠ 1))"
+            )
+    return proofs
 
 
 def _inverse_trig_arguments(root: ast.AST) -> list[ast.AST] | None:
@@ -4294,9 +4390,32 @@ def _render_real_calculus_node(
         if (
             not isinstance(node.func, ast.Name)
             or node.keywords
-            or len(node.args) != 1
+            or len(node.args) not in ({1, 2} if node.func.id == "log" else {1})
         ):
             return None
+        if node.func.id == "log" and len(node.args) == 2:
+            base = _constant_fraction(node.args[1])
+            if base is None or base <= 0 or base == 1:
+                return None
+            argument = _render_real_calculus_node(
+                node.args[0],
+                names,
+                state,
+                depth + 1,
+                substitutions,
+                allow_variable_denominators,
+            )
+            rendered_base = _render_real_calculus_node(
+                node.args[1],
+                names,
+                state,
+                depth + 1,
+                substitutions,
+                allow_variable_denominators,
+            )
+            if argument is None or rendered_base is None:
+                return None
+            return f"((Real.log {argument}) / (Real.log {rendered_base}))"
         if node.func.id == "coth":
             argument = _render_real_calculus_node(
                 node.args[0],
@@ -4590,10 +4709,42 @@ def _derivative_proof_term(
         if (
             not isinstance(node.func, ast.Name)
             or node.keywords
-            or len(node.args) != 1
+            or len(node.args) not in ({1, 2} if node.func.id == "log" else {1})
         ):
             return None
         if node.func.id == "log":
+            if len(node.args) == 2:
+                base = node.args[1]
+                base_fraction = _constant_fraction(base)
+                if base_fraction is None or base_fraction <= 0 or base_fraction == 1:
+                    return None
+                base_key = ast.dump(_log_base_call(base), include_attributes=False)
+                base_nonzero = (domain_hypotheses or {}).get(base_key)
+                rendered_base = _render_real_calculus_node(
+                    base,
+                    set(),
+                    {"nodes": 0},
+                    0,
+                    allow_variable_denominators=True,
+                )
+                if base_nonzero is None or rendered_base is None:
+                    return None
+                numerator = _derivative_proof_term(
+                    _log_base_call(node.args[0]),
+                    variable,
+                    function_variable,
+                    point,
+                    state,
+                    depth + 1,
+                    domain_hypotheses,
+                    positive_hypotheses,
+                )
+                if numerator is None:
+                    return None
+                denominator = (
+                    f"(hasDerivAt_const {point} (Real.log {rendered_base}))"
+                )
+                return f"({numerator}).div ({denominator}) {base_nonzero}"
             argument = _unwrap_real_abs(node.args[0])
             constant_argument = _constant_fraction(argument)
             if constant_argument is not None:
