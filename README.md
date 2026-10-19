@@ -1,18 +1,18 @@
 # LEAN Engine
 
-LEAN Engine is a local HTTP service for symbolic computation, factual lookups, and machine-checked proofs. It combines SymPy, Z3, and Lean 4 with Mathlib behind a small API.
+LEAN Engine is an HTTP API for symbolic computation, selected factual lookups, and machine-checked mathematical proofs. It uses SymPy, Z3, and Lean 4 with Mathlib.
 
-This is an early, bounded implementation. It does not execute arbitrary Wolfram Language or provide full Wolfram|Alpha coverage. See the [feature parity audit](WolframAlpha-API-Feature-Parity.md) for the detailed status of each API feature.
+This is an early, bounded implementation. It does not run arbitrary Wolfram Language or match Wolfram|Alpha's full coverage. See the [feature parity audit](WolframAlpha-API-Feature-Parity.md) for the detailed status.
 
-## Quick start
+## Run locally
 
-Prerequisites: Windows, Python 3.11 or newer, and [elan](https://github.com/leanprover/elan) for installing and managing Lean.
+Requirements: Windows, Python 3.11+, and [elan](https://github.com/leanprover/elan).
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 
-# First-time setup: fetch Mathlib and its compiled cache
+# First run: download Mathlib and its compiled cache
 Set-Location lean
 lake update
 lake exe cache get
@@ -21,11 +21,11 @@ Set-Location ..
 .\scripts\dev.ps1
 ```
 
-The API starts at `http://127.0.0.1:8000`. The script creates a local token in `.dev-api-token`; provide your own by setting `API_BEARER_TOKEN` before startup. Open `http://127.0.0.1:8000/docs` for interactive API documentation.
+The API listens on `http://127.0.0.1:8000`. The dev script creates a local bearer token in `.dev-api-token`. Open [`/docs`](http://127.0.0.1:8000/docs) for the interactive API reference.
 
-## Make a request
+## Try a computation
 
-This example asks the Wolfram-compatible route to differentiate `Log[x]`:
+This calls the Wolfram-compatible computation route with a supported differentiation request:
 
 ```powershell
 $token = (Get-Content .dev-api-token -Raw).Trim()
@@ -39,47 +39,30 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-The response includes the derivative and Lean proof evidence when the request is within the supported subset. For this example, the proof states the domain condition `x > 0`.
+Supported results include Lean evidence. For this example, the derivative is checked under the real-domain condition `x > 0`.
 
-## API map
+## API areas
 
-| Route | Use |
-| --- | --- |
-| `POST /v1/prove`, `/v1/prove-formula` | Check supported typed claims and arithmetic formulas. |
-| `POST /v1/counterexample` | Search supported claims for a counterexample. |
-| `POST /v1/symbolic` | Run bounded symbolic math operations. |
-| `POST /api/cag/v1/WolframLanguageCompute` | Evaluate the supported Wolfram Language subset. |
-| `POST /v1/natural-language/prove` | Draft a Lean theorem from a natural-language request, then compile and audit it. |
-| `GET /v2/query`, `/v2/validatequery` | Request Full Results-style output or validate an input and inspect interpretations. |
-| `GET /v1/interpret`, `/v2/assumptions` | Inspect candidate meanings and service-owned assumption IDs. |
-| `POST /v1/knowledge/query` | Query configured factual data providers. |
-| `GET /v1/capabilities` | List supported operations and configured backends. |
+- **Proofs and counterexamples:** typed claims and bounded arithmetic formulas, checked with Lean or searched with Z3.
+- **Symbolic computation:** a bounded expression grammar for algebra, calculus, and solving.
+- **Wolfram-compatible route:** a supported subset of `WolframLanguageCompute`, including exact arithmetic, selected calculus, and real polynomial solving.
+- **Natural-language proofs:** a configured model can draft a Lean theorem; Lean checks the theorem, but the service cannot guarantee it captures the user's original wording.
+- **Queries and assumptions:** Full Results-style query responses, interpretation candidates, and explicit service-owned assumption IDs.
+- **Factual lookups:** configured Wikidata, DBnomics, NIST CODATA, GeoNames, and Open-Meteo adapters. Retrieved facts include source data; they are not Lean proofs.
 
-`GET /healthz` reports process health and `GET /readyz` reports dependency readiness. These routes and `/docs` are public; computation routes require the API bearer token.
+Computation routes require the bearer token. `/healthz`, `/readyz`, and `/docs` are public. GeoNames lookups also require `GEONAMES_USERNAME`.
 
-## How results are checked
-
-- SymPy computes supported symbolic results. Where the route provides proof evidence, Lean checks the corresponding formal statement.
-- Z3 searches supported constraint problems and can produce counterexamples.
-- The natural-language route asks a configured model to propose Lean source. Lean checks that source, but does not establish that the generated theorem faithfully represents the original request.
-- Factual providers return sourced data. Retrieved data is not automatically a Lean-proved fact.
-- Ambiguous inputs can expose typed interpretations and versioned assumptions. Callers can select a supported assumption explicitly; the service does not narrow a claim just to make it provable.
-
-## Optional integrations
-
-The natural-language route can use an OpenAI-compatible model server. Set its endpoint and model before starting the API; the development script uses these defaults:
+Natural-language theorem generation requires an OpenAI-compatible model server. The dev script defaults to a local server at port 8081; override these before startup if needed:
 
 ```powershell
 $env:KIMINA_BASE_URL = 'http://127.0.0.1:8081/v1'
 $env:KIMINA_MODEL = 'Kimina-Prover-RL-0.6B.i1-Q6_K.gguf'
-# Set this if the model endpoint requires authentication
+# Optional, if the model server requires authentication
 $env:KIMINA_API_KEY = 'your-key'
 ```
 
-The [Kimina-Prover GGUF model](https://huggingface.co/mradermacher/Kimina-Prover-RL-0.6B-i1-GGUF) is one option for local serving. Factual data adapters include Wikidata, DBnomics, NIST CODATA, GeoNames, and Open-Meteo; GeoNames requires `GEONAMES_USERNAME`.
+## Project documentation
 
-## Project references
-
-- [Detailed API feature parity audit](WolframAlpha-API-Feature-Parity.md)
-- [Saved Wolfram API documentation (Markdown)](WolframAlpha-API-Documentation.md) · [HTML](WolframAlpha-API-Documentation.html)
+- [Wolfram|Alpha feature parity audit](WolframAlpha-API-Feature-Parity.md)
+- [Saved Wolfram API documentation](WolframAlpha-API-Documentation.md) ([HTML](WolframAlpha-API-Documentation.html))
 - [Machine-readable feature list](features.json)
