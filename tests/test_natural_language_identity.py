@@ -137,6 +137,31 @@ class NaturalLanguageIdentityTests(unittest.TestCase):
         self.assertEqual(result["subpods"][0]["plaintext"], "0")
         self.assertEqual(result["claim_status"], "proved")
 
+    def test_query_refutes_exact_trigonometric_identity_with_certified_interval(self) -> None:
+        token = "natural-language-identity-contract-token"
+        with patch.dict(os.environ, {"API_BEARER_TOKEN": token}):
+            with TestClient(app) as client:
+                response = client.get(
+                    "/v2/query",
+                    params={
+                        "input": "Prove that sin(pi/4) equals zero",
+                        "verify": "true",
+                        "output": "json",
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        formal = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(formal["status"], "checked", formal)
+        self.assertEqual(formal["claim_status"], "refuted")
+        evidence = formal["claim_refutation_evidence"]
+        self.assertEqual(evidence["kind"], "lean_checked_nonzero_interval")
+        self.assertGreater(Fraction(evidence["distance_from_zero_lower_bound"]), 0)
+        self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+        self.assertIn("wolfram_exact_trigonometric_expression", evidence["lean_source"])
+
     def test_unsupported_identity_is_not_reported_as_proved(self) -> None:
         token = "natural-language-identity-contract-token"
         with patch.dict(os.environ, {"API_BEARER_TOKEN": token}):

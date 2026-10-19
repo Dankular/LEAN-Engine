@@ -445,9 +445,9 @@ def capabilities() -> dict[str, object]:
                     "identity_proof_evidence": {
                         "claim_statuses": ["proved", "refuted", "not_established"],
                         "refutation": (
-                            "nonzero rational constant difference or a Z3-generated exact "
+                            "nonzero rational constant difference, a Z3-generated exact "
                             "rational counterexample independently replayed against bounded "
-                            "polynomial inputs"
+                            "polynomial inputs, or a Lean-checked error interval excluding zero"
                         ),
                         "lean_verification_status_is_separate": True,
                     },

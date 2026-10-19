@@ -725,6 +725,18 @@ def execute_query(
                         "against both sides of the identity"
                     )
                     formal_verification["counterexample"] = counterexample
+                else:
+                    nonzero_evidence = _certify_nonzero_identity_difference(
+                        symbolic_request,
+                        proof_timeout_seconds,
+                    )
+                    if nonzero_evidence is not None:
+                        formal_verification["claim_status"] = "refuted"
+                        formal_verification["claim_basis"] = (
+                            "A Lean-checked rational error bound places the exact difference "
+                            "strictly away from zero"
+                        )
+                        formal_verification["claim_refutation_evidence"] = nonzero_evidence
         # The Lean proof stage has its own prooftimeout, separate from the query
         # scan/format deadline. Preserve the full formatting budget after it ends.
         deadline += perf_counter() - proof_started
@@ -907,6 +919,15 @@ def execute_query(
             qualification = (
                 "The selected identity is refuted by an exact rational counterexample "
                 "independently replayed by the service."
+            )
+        elif (
+            symbolic_request.operation == "identity"
+            and formal_verification.get("claim_status") == "refuted"
+            and isinstance(formal_verification.get("claim_refutation_evidence"), dict)
+        ):
+            qualification = (
+                "The selected identity is refuted because a Lean-checked rational error "
+                "bound proves its exact difference cannot be zero."
             )
         elif formal_verification["status"] == "checked":
             if symbolic_request.operation == "numeric":
@@ -1382,6 +1403,55 @@ def _find_identity_counterexample(
         "assignments": {str(name): str(value) for name, value in witness.items()},
         "solver": "z3",
         "validation": "independent_exact_rational_replay",
+    }
+
+
+def _certify_nonzero_identity_difference(
+    request: SymbolicRequest,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    """Use a Lean-certified approximation to refute a closed nonzero difference."""
+    if request.operation != "identity" or request.lhs is None or request.rhs is None:
+        return None
+    lhs = re.sub(r"\bpi\b", "Pi", request.lhs, flags=re.IGNORECASE)
+    rhs = re.sub(r"\bpi\b", "Pi", request.rhs, flags=re.IGNORECASE)
+    computation = prepare_computation(
+        f"N[({lhs}) - ({rhs}), 50]",
+        max(0.001, min(float(timeout_seconds), 5.0)),
+    )
+    if (
+        computation is None
+        or computation.numeric_error_bound is None
+        or computation.numeric_precision is None
+    ):
+        return None
+    try:
+        approximation = Fraction(Decimal(computation.display_result))
+        error_bound = Fraction(computation.numeric_error_bound)
+    except (InvalidOperation, OverflowError, ValueError, ZeroDivisionError):
+        return None
+    distance_from_zero = abs(approximation) - error_bound
+    if distance_from_zero <= 0:
+        return None
+
+    lean_result = check_computation(
+        computation,
+        max(0.001, min(float(timeout_seconds), 60.0)),
+    )
+    if lean_result.status != "checked":
+        return None
+    return {
+        "kind": "lean_checked_nonzero_interval",
+        "approximation": computation.display_result,
+        "precision_significant_digits": computation.numeric_precision,
+        "absolute_error_bound": computation.numeric_error_bound,
+        "distance_from_zero_lower_bound": str(distance_from_zero),
+        "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
+        "lean_source": lean_result.source,
+        "axiom_audit": {
+            "status": "passed",
+            "dependencies": list(lean_result.axioms),
+        },
     }
 
 
