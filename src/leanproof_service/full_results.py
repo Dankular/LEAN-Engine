@@ -55,7 +55,7 @@ from .weather_svg import forecast_chart_image, forecast_plaintext
 
 
 _API_VERSION = "2.0"
-_SUPPORTED_FORMATS = {"plaintext", "minput", "moutput", "mathml"}
+_SUPPORTED_FORMATS = {"plaintext", "minput", "moutput", "mathml", "cell"}
 _KNOWN_FORMATS = {
     "image", "imagemap", "plaintext", "minput", "moutput", "cell", "mathml", "sound", "wav"
 }
@@ -2034,6 +2034,8 @@ def _execute_provider_query(
             result_subpod["plaintext"] = plaintext
         if "mathml" in selected_formats:
             result_subpod["mathml"] = _mathml(plaintext)
+        if "cell" in selected_formats:
+            result_subpod["cell"] = _wolfram_cell(plaintext)
         if result_image is not None:
             result_subpod["img"] = result_image
         return {
@@ -2062,7 +2064,8 @@ def _execute_provider_query(
     elapsed = perf_counter() - started
     warnings = _format_warnings(
         formats,
-        {"plaintext", "mathml"} | ({"image"} if "image" in selected_formats else set()),
+        {"plaintext", "mathml", "cell"}
+        | ({"image"} if "image" in selected_formats else set()),
     )
     if format_budget.timed_out_pods:
         warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
@@ -3161,6 +3164,8 @@ def _input_pod(
     subpod_input: dict[str, Any] = {"title": ""}
     if "plaintext" in formats:
         subpod_input["plaintext"] = expression
+    if "cell" in formats:
+        subpod_input["cell"] = _wolfram_cell(expression)
     if "mathml" in formats:
         subpod_input["mathml"] = input_mathml or _mathml(expression)
     if "minput" in formats and input_minput is not None:
@@ -3191,6 +3196,8 @@ def _result_pod(
     subpod_result: dict[str, Any] = {"title": ""}
     if result_text is not None and "plaintext" in formats:
         subpod_result["plaintext"] = result_text
+    if result_text is not None and "cell" in formats:
+        subpod_result["cell"] = _wolfram_cell(result_text)
     if result_text is not None and "mathml" in formats:
         subpod_result["mathml"] = result_mathml or _mathml(result_text)
     if "moutput" in formats and result_moutput is not None:
@@ -3220,6 +3227,8 @@ def _decimal_approximation_pod(
     approximation_subpod: dict[str, Any] = {"title": ""}
     if "plaintext" in formats:
         approximation_subpod["plaintext"] = approximation
+    if "cell" in formats:
+        approximation_subpod["cell"] = _wolfram_cell(approximation)
     if "mathml" in formats:
         approximation_subpod["mathml"] = _mathml(approximation)
     if "image" in formats and approximation_image is not None:
@@ -3658,6 +3667,17 @@ def _split_values(values: list[str]) -> list[str]:
 
 def _seconds(value: float) -> float:
     return round(max(value, 0.0), 6)
+
+
+def _wolfram_cell(text: str) -> str:
+    """Wrap display text in a safe, plain Wolfram Language output cell."""
+    safe_text = _xml_safe_text(text)
+    box_text = json.dumps(safe_text, ensure_ascii=False)
+    return (
+        "Cell[BoxData[FormBox[RowBox[{"
+        f"{box_text}"
+        "}], TraditionalForm]], \"Output\"]"
+    )
 
 
 def _mathml(text: str) -> str:
