@@ -704,6 +704,15 @@ def execute_query(
             proof_timeout_seconds,
             symbolic_result=symbolic.get("result"),
         )
+        if symbolic_request.operation == "identity":
+            formal_verification.setdefault("claim_status", "not_established")
+            formal_verification.setdefault(
+                "claim_basis", "No Lean-checked difference result is available"
+            )
+            formal_verification.setdefault(
+                "claim_scope",
+                "universal equality over real values of free variables in the supported fragment",
+            )
         # The Lean proof stage has its own prooftimeout, separate from the query
         # scan/format deadline. Preserve the full formatting budget after it ends.
         deadline += perf_counter() - proof_started
@@ -885,6 +894,25 @@ def execute_query(
                     "Lean proved that the displayed decimal differs from the exact "
                     f"value by at most {approximation['absolute_error_bound']}."
                 )
+            elif symbolic_request.operation == "identity":
+                claim_status = formal_verification["claim_status"]
+                if claim_status == "proved":
+                    qualification = (
+                        "Lean proved the left-minus-right difference equals zero, establishing "
+                        "the selected identity for all real values of its free variables in "
+                        "the supported formula fragment."
+                    )
+                elif claim_status == "refuted":
+                    qualification = (
+                        "Lean proved the left-minus-right difference is a nonzero constant, "
+                        "which refutes the selected identity for all real values of its "
+                        "free variables."
+                    )
+                else:
+                    qualification = (
+                        "Lean checked the selected difference result, but did not prove "
+                        "or refute the identity. See formal_verification.claim_status."
+                    )
             else:
                 qualification = (
                     "Lean checked the computation theorem for the selected interpretation. "
@@ -1039,6 +1067,19 @@ def _verify_query_computation(
         "lean_source": lean_result.source,
         "result_match": not computation.proof_result_authoritative,
     }
+    if request.operation == "identity":
+        verification["claim_status"] = _identity_claim_status(
+            computation.display_result,
+            lean_result.status == "checked",
+        )
+        verification["claim_basis"] = (
+            f"Lean proved left-minus-right equals {computation.display_result}"
+            if lean_result.status == "checked"
+            else "No Lean-checked difference result is available"
+        )
+        verification["claim_scope"] = (
+            "universal equality over real values of free variables in the supported fragment"
+        )
     if request.operation == "numeric":
         certified_value = computation.display_result
         try:
@@ -1114,7 +1155,9 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
     ):
         return f"Limit[{request.expression}, {{{request.variable}, {request.point}}}]"
     if request.operation == "identity" and request.lhs is not None and request.rhs is not None:
-        return f"Simplify[({request.lhs}) - ({request.rhs})]"
+        lhs = re.sub(r"\bpi\b", "Pi", request.lhs, flags=re.IGNORECASE)
+        rhs = re.sub(r"\bpi\b", "Pi", request.rhs, flags=re.IGNORECASE)
+        return f"Simplify[({lhs}) - ({rhs})]"
     if (
         request.operation == "integrate"
         and request.expression is not None
@@ -1243,8 +1286,22 @@ def _query_claim_type(request: SymbolicRequest, code: str) -> str:
     if code.startswith("Integrate["):
         return "definite_integral_equality"
     if request.operation == "identity":
-        return "polynomial_difference_equals_result"
+        return "universal_identity"
     return "polynomial_equality"
+
+
+def _identity_claim_status(difference: str, checked: bool) -> str:
+    """Separate checking the difference computation from proving the identity."""
+    if not checked:
+        return "not_established"
+    normalized = difference.strip()
+    if normalized in {"0", "+0", "-0"}:
+        return "proved"
+    try:
+        exact_difference = Fraction(normalized)
+    except (ValueError, ZeroDivisionError, OverflowError):
+        return "not_established"
+    return "refuted" if exact_difference else "proved"
 
 
 def _canonical_formula(source: str) -> str | None:
@@ -3389,6 +3446,10 @@ def _attach_pod_provenance(
         pod.setdefault("source", pod_source)
         pod.setdefault("evidence_kind", pod_kind)
         pod.setdefault("verified", pod_verified)
+        if pod.get("id") == "Result" and isinstance(formal, dict):
+            claim_status = formal.get("claim_status")
+            if isinstance(claim_status, str):
+                pod.setdefault("claim_status", claim_status)
 
 
 def _base_queryresult(
