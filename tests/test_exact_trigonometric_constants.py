@@ -118,12 +118,31 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
     def test_unlisted_angles_and_tangent_poles_remain_unsupported(self) -> None:
         self.assertIsNone(prepare_computation("Sin[Pi/7]", 10))
         self.assertIsNone(prepare_computation("Sin[3Pi/16]", 10))
-        self.assertIsNone(prepare_computation("Tan[3Pi/8]", 10))
         self.assertIsNone(prepare_computation("Sin[Pi/8192]", 10))
         self.assertIsNone(prepare_computation("Cos[Pi/8192]", 10))
         self.assertIsNone(prepare_computation("Sin[Pi/3072]", 10))
         self.assertIsNone(prepare_computation("Tan[Pi/2]", 10))
         self.assertIsNone(prepare_computation("Sin[pi/6]", 10))
+
+    def test_tangent_uses_checked_sine_cosine_quotients(self) -> None:
+        cases = {
+            "Tan[Pi/8]": "(sqrt(2 - sqrt(2))/2)/(sqrt(2 + sqrt(2))/2)",
+            "Tan[Pi/5]": "(sqrt(10 - 2*sqrt(5))/4)/((1 + sqrt(5))/4)",
+            "Tan[Pi/12]": (
+                "(sqrt((1 - sqrt(3)/2)/2))/(sqrt((1 + sqrt(3)/2)/2))"
+            ),
+            "Tan[3Pi/8]": (
+                "1/((sqrt(2 - sqrt(2))/2)/(sqrt(2 + sqrt(2))/2))"
+            ),
+        }
+        for code, expected in cases.items():
+            with self.subTest(code=code):
+                computation = prepare_computation(code, 10)
+                self.assertIsNotNone(computation)
+                assert computation is not None
+                self.assertEqual(computation.display_result, expected)
+                result = check_computation(computation, 30)
+                self.assertEqual(result.status, "checked", result.diagnostics)
 
 
 if __name__ == "__main__":

@@ -497,6 +497,12 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
         )
         if value is not None:
             return value
+        if requested_function == "tan":
+            tangent_value = _exact_tangent_from_sine_cosine(requested_denominator)
+            if tangent_value is not None:
+                value, source = tangent_value
+                dynamic_supporting_lemmas[value[2]] = source
+                return value
         dyadic_value = _exact_dyadic_pi_trig_value(
             requested_function,
             requested_denominator,
@@ -575,6 +581,41 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
                 else "Real.cos_pi_div_two_sub"
             )
             base_lemmas = [cofunction_lemma, value[2]]
+        elif function == "tan":
+            complement = Fraction(1, 2) - base_angle
+            complement_reciprocal = 1 / complement if complement > 0 else None
+            if (
+                complement_reciprocal is None
+                or complement_reciprocal.denominator != 1
+            ):
+                return None
+            base_denominator = complement_reciprocal.numerator
+            value = exact_trig_value("tan", base_denominator)
+            if value is None:
+                return None
+            complementary_lemma = f"wolfram_tan_pi_div_two_sub_{base_denominator}"
+            base_tangent_support = dynamic_supporting_lemmas.get(
+                value[2],
+                _EXACT_PI_TRIG_SUPPORTING_LEMMAS.get(value[2], ""),
+            )
+            complementary_source = "\n\n".join(
+                part for part in (
+                    base_tangent_support,
+                    f"""theorem {complementary_lemma} :
+    Real.tan (Real.pi / 2 - Real.pi / {base_denominator}) =
+      ({value[1]})⁻¹ := by
+  rw [Real.tan_pi_div_two_sub, {value[2]}]
+""",
+                ) if part
+            )
+            dynamic_supporting_lemmas[complementary_lemma] = complementary_source
+            value = (
+                f"1/({value[0]})",
+                f"({value[1]})⁻¹",
+                complementary_lemma,
+            )
+            base_expression = f"(Real.pi / 2 - Real.pi / {base_denominator})"
+            base_lemmas = [complementary_lemma]
         else:
             return None
 
@@ -629,6 +670,79 @@ theorem wolfram_language_compute :
 #print axioms wolfram_language_compute
 """
     return Computation(display_result, source, proof_result_authoritative=True)
+
+
+def _exact_tangent_from_sine_cosine(
+    denominator: int,
+) -> tuple[tuple[str, str, str], str] | None:
+    # For pi/d with d > 2, cos(pi/d) is nonzero. The exact Sin and Cos
+    # backends supply proof terms for both components of the quotient.
+    if denominator <= 2:
+        return None
+    sine = _prepare_exact_pi_trigonometric_constant(f"Sin[Pi/{denominator}]")
+    cosine = _prepare_exact_pi_trigonometric_constant(f"Cos[Pi/{denominator}]")
+    if sine is None or cosine is None or cosine.display_result == "0":
+        return None
+
+    sine_result = _exact_computation_result_lean(sine)
+    cosine_result = _exact_computation_result_lean(cosine)
+    if sine_result is None or cosine_result is None:
+        return None
+
+    sine_prefix = f"exact_tan_sine_{denominator}"
+    cosine_prefix = f"exact_tan_cosine_{denominator}"
+    sine_source, sine_names = _rename_exact_trig_declarations(
+        sine.lean_source,
+        sine_prefix,
+    )
+    cosine_source, cosine_names = _rename_exact_trig_declarations(
+        cosine.lean_source,
+        cosine_prefix,
+    )
+    if not sine_names or not cosine_names:
+        return None
+
+    sine_theorem = f"{sine_prefix}_wolfram_language_compute"
+    cosine_theorem = f"{cosine_prefix}_wolfram_language_compute"
+    tangent_theorem = f"wolfram_tan_pi_div_{denominator}"
+    theorem_source = "\n".join([
+        sine_source,
+        "",
+        cosine_source,
+        "",
+        f"theorem {tangent_theorem} :",
+        f"    Real.tan (Real.pi / {denominator}) = ({sine_result}) / ({cosine_result}) := by",
+        f"  have hangle : ((1 / {denominator} : \u211d) * Real.pi) = Real.pi / {denominator} := by ring",
+        f"  have hsin : Real.sin (Real.pi / {denominator}) = {sine_result} := by",
+        "    rw [\u2190hangle]",
+        f"    exact {sine_theorem}",
+        f"  have hcos : Real.cos (Real.pi / {denominator}) = {cosine_result} := by",
+        "    rw [\u2190hangle]",
+        f"    exact {cosine_theorem}",
+        "  rw [Real.tan_eq_sin_div_cos, hsin, hcos]",
+    ])
+    return (
+        (
+            f"({sine.display_result})/({cosine.display_result})",
+            f"({sine_result}) / ({cosine_result})",
+            tangent_theorem,
+        ),
+        theorem_source,
+    )
+
+
+def _exact_computation_result_lean(computation: Computation) -> str | None:
+    match = re.search(
+        r"(?s)theorem\s+wolfram_language_compute\s*:\s*(.*?)\s*:=\s*by\b",
+        computation.lean_source,
+    )
+    if match is None:
+        return None
+    statement = match.group(1)
+    equality_index = statement.rfind(" = ")
+    if equality_index < 0:
+        return None
+    return statement[equality_index + 3:].strip()
 
 
 def _prepare_exact_pi_trigonometric_expression(
@@ -787,17 +901,9 @@ def _render_exact_pi_trig_expression_node(
     if computation is None:
         return None
 
-    theorem_match = re.search(
-        r"(?s)theorem\s+wolfram_language_compute\s*:\s*(.*?)\s*:=\s*by\b",
-        computation.lean_source,
-    )
-    if theorem_match is None:
+    result_lean = _exact_computation_result_lean(computation)
+    if result_lean is None:
         return None
-    statement = theorem_match.group(1)
-    equality_index = statement.rfind(" = ")
-    if equality_index < 0:
-        return None
-    result_lean = statement[equality_index + 3:].strip()
 
     index = len(declarations)
     if index >= 16:

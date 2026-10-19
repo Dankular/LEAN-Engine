@@ -49,6 +49,24 @@ class FullResultsTrigonometricVerificationTests(unittest.TestCase):
             "sqrt((1 - sqrt(3)/2)/2)",
         )
 
+    def test_query_verifies_tangent_from_exact_sine_and_cosine(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={"input": "tan(pi/8)", "verify": "true", "output": "json"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        result_pod = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
+        self.assertEqual(
+            result_pod["subpods"][0]["plaintext"],
+            "(sqrt(2 - sqrt(2))/2)/(sqrt(2 + sqrt(2))/2)",
+        )
+
     def test_query_proves_arithmetic_over_multiple_exact_trig_values(self) -> None:
         response = self.client.get(
             "/v2/query",
