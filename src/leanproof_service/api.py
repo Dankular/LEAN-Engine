@@ -464,7 +464,7 @@ def capabilities() -> dict[str, object]:
                     "constants": ["Pi", "E", "exact integers, decimals, and rational constants up to 256 bits"],
                     "maximum_nodes": 256,
                     "maximum_depth": 32,
-                    "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative"],
+                    "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative", "Integrate[Csch[x], {x, 1, 2}] definite integral"],
                 },
                 "special_cases": [
                     "Sin[Pi]", "TrigExpand@Sin[2x]"

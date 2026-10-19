@@ -1474,6 +1474,9 @@ def _prepare_definite_real_integral(
         return None
     if integrand_lean is None:
         return None
+    csch_arguments = _csch_arguments(expression_tree.body)
+    if csch_arguments is None or csch_arguments:
+        return None
     explicit_base_log_arguments = {
         ast.dump(node.args[0], include_attributes=False)
         for node in ast.walk(expression_tree.body)
