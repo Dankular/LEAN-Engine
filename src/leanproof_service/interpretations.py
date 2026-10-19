@@ -84,6 +84,21 @@ class InterpretationTimeout(InterpretationError):
         self.parse_timing_seconds = parse_timing_seconds
 
 
+def _split_assumption_selector(selection: str) -> tuple[str, int | None]:
+    """Split a service assumption ID from its optional one-based occurrence."""
+    if "@" not in selection:
+        return selection, None
+    assumption_id, possible_index = selection.rsplit("@", 1)
+    if not possible_index.isdecimal():
+        return selection, None
+    if len(possible_index) > 9:
+        raise AssumptionSelectionError("assumption occurrence index is out of range")
+    occurrence_index = int(possible_index)
+    if occurrence_index < 1:
+        raise AssumptionSelectionError("assumption occurrence indexes start at 1")
+    return assumption_id, occurrence_index
+
+
 def assumption_registry() -> dict[str, Any]:
     """Read the checked-in, versioned service-owned assumption catalog."""
     data = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -492,64 +507,88 @@ def _interpret_function_log(
 ) -> dict[str, Any]:
     registry = assumption_registry()
     candidates = [item for item in registry["assumptions"] if item["type"] == "Function"]
-    by_id = {item["id"]: item for item in candidates}
-    candidate_ids = set(by_id)
-    backend_candidates = [
-        item for item in registry["assumptions"] if item["type"] == "LogBase"
-    ]
-    if len(candidates) != 2 or len(backend_candidates) != 2:
-        raise RuntimeError("Function and LogBase registries must each contain two values")
+    all_by_id = {item["id"]: item for item in registry["assumptions"]}
+    if len(candidates) != 2:
+        raise RuntimeError("Function registry must contain two values")
     if len(selections) != len(set(selections)):
         raise AssumptionSelectionError("assumption selections cannot contain duplicates")
 
-    all_ids = {item["id"] for item in registry["assumptions"]}
-    backend_ids = {item["id"] for item in backend_candidates}
-    for selection in selections:
-        if selection not in all_ids:
-            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
-        if selection in backend_ids:
-            raise AssumptionSelectionError(
-                f"assumption {selection} is incompatible with unparenthesized log input"
-            )
-
-    function_selections = [selection for selection in selections if selection in candidate_ids]
-    if len(function_selections) > 1:
-        raise AssumptionSelectionError("select at most one Function assumption value")
-    if function_selections:
-        chosen = by_id[function_selections[0]]
-        selection_source = "caller_override"
-    else:
-        defaults = [item for item in candidates if item.get("service_default")]
-        if len(defaults) != 1:
-            raise RuntimeError("Function registry must have exactly one service default")
-        chosen = defaults[0]
-        selection_source = "service_default"
-
-    backend = next(
-        (item for item in backend_candidates if item["argument_base"] == chosen["argument_base"]),
-        None,
-    )
-    if backend is None:
-        raise RuntimeError("Function choice has no matching symbolic LogBase route")
     matches = list(_LOG_FUNCTION_IN_EXPRESSION.finditer(source_query))
     if not matches:
         raise RuntimeError("Function log handler was called without a matching input")
+
+    global_choice: dict[str, Any] | None = None
+    per_occurrence_choices: dict[int, dict[str, Any]] = {}
+    remaining_selections: list[str] = []
+    for selection in selections:
+        assumption_id, occurrence_index = _split_assumption_selector(selection)
+        item = all_by_id.get(assumption_id)
+        if item is None:
+            raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
+        if item["type"] != "Function":
+            remaining_selections.append(selection)
+            continue
+        if occurrence_index is None:
+            if per_occurrence_choices:
+                raise AssumptionSelectionError(
+                    "use either a query-wide or per-occurrence selection for Function"
+                )
+            if global_choice is not None:
+                raise AssumptionSelectionError("select at most one Function assumption value")
+            global_choice = item
+        else:
+            if occurrence_index > len(matches):
+                raise AssumptionSelectionError(
+                    f"assumption occurrence Function:{occurrence_index} is not present in this input"
+                )
+            if global_choice is not None:
+                raise AssumptionSelectionError(
+                    "use either a query-wide or per-occurrence selection for Function"
+                )
+            if occurrence_index in per_occurrence_choices:
+                raise AssumptionSelectionError(
+                    f"select at most one value for Function occurrence {occurrence_index}"
+                )
+            per_occurrence_choices[occurrence_index] = item
+
+    defaults = [item for item in candidates if item.get("service_default")]
+    if len(defaults) != 1:
+        raise RuntimeError("Function registry must have exactly one service default")
+    default_choice = defaults[0]
+    if global_choice is not None:
+        selection_source = "caller_override"
+    elif per_occurrence_choices:
+        selection_source = "per_occurrence_override"
+    else:
+        selection_source = "service_default"
+
+    occurrence_choices = [
+        global_choice or per_occurrence_choices.get(index) or default_choice
+        for index, _match in enumerate(matches, 1)
+    ]
+    occurrence_sources = [
+        "caller_override"
+        if global_choice is not None
+        else "per_occurrence_override"
+        if index in per_occurrence_choices
+        else "service_default"
+        for index, _match in enumerate(matches, 1)
+    ]
+
     normalized_expression = source_query
-    for match in reversed(matches):
+    for match, chosen in reversed(list(zip(matches, occurrence_choices, strict=True))):
         number = match.group("number")
-        replacement = f"log({number})"
+        base = chosen["argument_base"]
+        replacement = f"log({number},10)" if base == "10" else f"log({number},E)"
         normalized_expression = (
             normalized_expression[:match.start()]
             + replacement
             + normalized_expression[match.end():]
         )
 
-    remaining_selections = [
-        selection for selection in selections if selection not in candidate_ids
-    ]
     resolved = query_with_interpretations(
         normalized_expression,
-        [*remaining_selections, backend["id"]],
+        remaining_selections,
         compute=compute,
         numeric_precision=numeric_precision,
         time_limit_seconds=time_limit_seconds,
@@ -559,19 +598,29 @@ def _interpret_function_log(
     )
 
     inner_assumptions = resolved.get("assumptions", [])
-    backend_assumption = next(
-        (item for item in inner_assumptions if item.get("type") == "LogBase"),
-        None,
-    )
-    if backend_assumption is None:
-        raise RuntimeError("symbolic LogBase route did not return its selected assumption")
-    occurrences = backend_assumption.get("occurrences") or [
-        {"function": "log", "argument": match.group("number")} for match in matches
+    occurrences = [
+        {
+            "id": f"Function:{index}",
+            "function": "log",
+            "argument": match.group("number"),
+            "selected": chosen["id"],
+            "selection_source": occurrence_sources[index - 1],
+        }
+        for index, (match, chosen) in enumerate(
+            zip(matches, occurrence_choices, strict=True), 1
+        )
     ]
+    selected_ids = {item["selected"] for item in occurrences}
+    function_values = candidates
+    if len(selected_ids) == 1:
+        active_choice = all_by_id[next(iter(selected_ids))]
+        function_values = [
+            active_choice,
+            *(item for item in candidates if item["id"] != active_choice["id"]),
+        ]
     function_payload = {
         "type": "Function",
         "word": "log",
-        "selected": chosen["id"],
         "selection_source": selection_source,
         "registry_version": registry["registry_version"],
         "occurrences": occurrences,
@@ -581,28 +630,30 @@ def _interpret_function_log(
                 "desc": item["description"],
                 "entry_version": item["entry_version"],
             }
-            for item in [chosen, *(item for item in candidates if item["id"] != chosen["id"])]
+            for item in function_values
         ],
     }
+    if len(selected_ids) == 1:
+        function_payload["selected"] = next(iter(selected_ids))
     resolved["input"] = source_query
     resolved["parse_timing"] = parse_timing + float(resolved["parse_timing"])
-    resolved["assumptions"] = [
-        function_payload if item is backend_assumption else item
-        for item in inner_assumptions
-    ]
+    resolved["assumptions"] = [*inner_assumptions, function_payload]
     original_interpretation = resolved["interpretation"]
     original_ast = original_interpretation.get("typed_ast")
+    function_ast: dict[str, Any] = {
+        "node": "function_assumption",
+        "function": "log",
+        "occurrences": occurrences,
+        "resolved_expression": normalized_expression,
+        "expression": original_ast,
+    }
+    if len(selected_ids) == 1:
+        selected_choice = occurrence_choices[0]
+        function_ast["meaning"] = selected_choice["meaning"]
+        function_ast["base"] = selected_choice["argument_base"]
     resolved["interpretation"] = {
         **original_interpretation,
-        "typed_ast": {
-            "node": "function_assumption",
-            "function": "log",
-            "meaning": chosen["meaning"],
-            "base": chosen["argument_base"],
-            "occurrences": occurrences,
-            "resolved_expression": normalized_expression,
-            "expression": original_ast,
-        },
+        "typed_ast": function_ast,
     }
     nested_classification = resolved.get("classification")
     resolved["classification"] = {
@@ -1568,24 +1619,7 @@ def _compound_interpretation(
     if selections and not active_types:
         raise AssumptionSelectionError("assumption selection is not applicable to this input")
     for selection in selections:
-        assumption_id = selection
-        occurrence_index: int | None = None
-        if "@" in selection:
-            possible_id, possible_index = selection.rsplit("@", 1)
-            if possible_index.isdecimal():
-                # A query is capped at 4,000 characters, so a longer decimal
-                # index cannot refer to an occurrence in that query. Reject it
-                # before int() so arbitrarily long request values stay a 422.
-                if len(possible_index) > 9:
-                    raise AssumptionSelectionError(
-                        "assumption occurrence index is out of range"
-                    )
-                assumption_id = possible_id
-                occurrence_index = int(possible_index)
-                if occurrence_index < 1:
-                    raise AssumptionSelectionError(
-                        "assumption occurrence indexes start at 1"
-                    )
+        assumption_id, occurrence_index = _split_assumption_selector(selection)
         item = by_id.get(assumption_id)
         if item is None:
             raise AssumptionSelectionError(f"unknown service assumption ID: {selection}")
