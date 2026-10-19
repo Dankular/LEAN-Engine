@@ -31,6 +31,7 @@ class NaturalLanguageOperation:
     operation: str
     expression: str
     rule_id: str
+    rhs: str | None = None
     variable: str | None = None
     variable_source: str | None = None
     lower: str | None = None
@@ -67,6 +68,22 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
             expression=_math_phrase(match.group(2)),
             rule_id=f"{operation}_expression",
         )
+
+    identity = re.fullmatch(
+        r"(?:please\s+)?(?:prove|show|verify|check)\s+(?:that\s+)?(.+)",
+        query,
+        re.IGNORECASE,
+    )
+    if identity:
+        equation = _math_phrase(identity.group(1))
+        lhs, rhs = _split_equation(equation)
+        if rhs is not None:
+            return NaturalLanguageOperation(
+                operation="identity",
+                expression=lhs,
+                rhs=rhs,
+                rule_id="prove_identity",
+            )
 
     derivative = re.fullmatch(
         r"(?:(?:what\s+is|find|calculate|compute)\s+)?(?:the\s+)?"
@@ -367,6 +384,8 @@ def _math_phrase(source: str) -> str:
     for word, number in _NUMBER_WORDS.items():
         expression = re.sub(rf"\b{word}\b", number, expression, flags=re.IGNORECASE)
     replacements = (
+        (r"\bis\s+equal\s+to\b", "="),
+        (r"\bequal\s+to\b", "="),
         (r"\bdivided\s+by\b", "/"),
         (r"\bmultiplied\s+by\b", "*"),
         (r"\btimes\b", "*"),

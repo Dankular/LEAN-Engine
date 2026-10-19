@@ -314,7 +314,7 @@ def capabilities() -> dict[str, object]:
                 "natural_language_math": {
                     "status": "bounded_initial_slice",
                     "operations": [
-                        "evaluate", "simplify", "factor", "expand", "differentiate",
+                        "evaluate", "identity proof", "simplify", "factor", "expand", "differentiate",
                         "integrate", "solve", "limit", "series", "sum", "product", "plot",
                     ],
                     "parser": "deterministic allowlisted templates; no model ranking",
@@ -434,7 +434,7 @@ def capabilities() -> dict[str, object]:
                 "natural_language_queries": {
                     "status": "bounded_initial_slice",
                     "operations": [
-                        "evaluate", "simplify", "factor", "expand", "differentiate",
+                        "evaluate", "identity proof", "simplify", "factor", "expand", "differentiate",
                         "integrate", "solve", "limit", "series", "sum", "product", "plot",
                     ],
                     "parser": "deterministic phrase templates; no free-form model generation",

@@ -2829,6 +2829,14 @@ def _prepare_query(
 def _request_from_natural_language_plan(
     plan: NaturalLanguageOperation,
 ) -> SymbolicRequest:
+    if plan.operation == "identity":
+        if plan.rhs is None:
+            raise InterpretationError("prove requires an equality with two expressions")
+        request = _operation_request("identity", [plan.expression, plan.rhs], None)
+        if request is None:
+            raise InterpretationError("natural-language identity did not produce a supported query")
+        return request
+
     arguments = [plan.expression]
     if plan.operation in {"differentiate", "solve", "integrate", "limit", "series", "sum", "product", "plot"}:
         if plan.variable is None:
