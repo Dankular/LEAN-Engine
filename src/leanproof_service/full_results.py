@@ -699,7 +699,8 @@ def _verify_query_computation(
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
         "assumptions": interpreted.get("assumptions", []),
         "scope": (
-            "checks the exact selected formula and result under the listed domain conditions; "
+            "checks the exact selected formula and result under the listed real-parameter "
+            "and domain conditions; "
             "it does not verify the English language-to-formula translation"
         ),
         "lean_source_sha256": hashlib.sha256(lean_result.source.encode("utf-8")).hexdigest(),
@@ -708,6 +709,8 @@ def _verify_query_computation(
     }
     if computation.domain_conditions:
         verification["domain_conditions"] = list(computation.domain_conditions)
+    if computation.real_parameters:
+        verification["real_parameters"] = list(computation.real_parameters)
     if lean_result.status == "checked":
         verification["axiom_audit"] = {
             "status": "passed",
@@ -1873,6 +1876,7 @@ def _operation_request(
             expression=arguments[0],
             variable=variable,
             point=arguments[2],
+            assumptions=_real_limit_point_assumptions(arguments[2], variable),
             time_limit_seconds=5,
         )
     if operation == "series":
@@ -1937,6 +1941,29 @@ def _operation_request(
         upper=arguments[3] if len(arguments) == 4 else None,
         time_limit_seconds=5,
     )
+
+
+def _real_limit_point_assumptions(point: str, variable: str) -> dict[str, list[str]]:
+    try:
+        tree = ast.parse(point, mode="eval")
+    except (SyntaxError, ValueError, RecursionError):
+        return {}
+    function_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    constants = {"pi", "E", "I", "oo"}
+    names = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and node.id not in function_names
+        and node.id not in constants
+        and node.id != variable
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", node.id)
+    }
+    return {name: ["real"] for name in sorted(names)}
 
 
 def _bounded_integer_literal(source: str) -> int | None:

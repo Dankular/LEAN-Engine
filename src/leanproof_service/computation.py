@@ -30,6 +30,7 @@ class Computation:
     timed_out: bool = False
     backend_error: str | None = None
     domain_conditions: tuple[str, ...] = ()
+    real_parameters: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -306,19 +307,53 @@ def _prepare_real_rational_limit(
         return None
 
     point = _parse_exact_rational(point_source)
-    if (
-        point is None
-        or abs(point.numerator).bit_length() > 256
-        or point.denominator.bit_length() > 256
-    ):
-        return None
+    point_tree: ast.Expression | None = None
+    point_symbols: set[str] = set()
+    if point is not None:
+        if (
+            abs(point.numerator).bit_length() > 256
+            or point.denominator.bit_length() > 256
+        ):
+            return None
+        point_lean = _lean_rational(point)
+        point_expression = _fraction_text(point)
+        point_display = point_expression
+    else:
+        exact_point_source = _normalize_decimal_literals(point_source)
+        if exact_point_source is None:
+            return None
+        try:
+            parsed_point = parse_math_input(exact_point_source)
+            point_tree = ast.parse(parsed_point.expression, mode="eval")
+            point_lean, point_symbols = _render_rational_limit_lean(
+                parsed_point.expression
+            )
+        except (MathInputError, ValueError, SyntaxError, RecursionError):
+            return None
+        if (
+            point_lean is None
+            or not point_symbols
+            or variable in point_symbols
+            or _variable_denominators(point_tree.body)
+            or not _rational_polynomial_within_limits(
+                point_tree.body, point_symbols
+            )
+        ):
+            return None
+        point_expression = parsed_point.expression
+        point_display = point_expression.replace("**", "^")
+        if _rational_denominator_vanishes_at_symbolic_point(
+            expression_tree.body, variable, point_tree.body
+        ):
+            return None
 
     symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
     symbolic = run_symbolic(SymbolicRequest(
         operation="limit",
         expression=parsed.expression,
         variable=variable,
-        point=_fraction_text(point),
+        point=point_expression,
+        assumptions={name: ["real"] for name in point_symbols},
         time_limit_seconds=max(0.001, min(symbolic_deadline - monotonic(), 60.0)),
     ))
     if symbolic.get("timed_out"):
@@ -338,7 +373,7 @@ def _prepare_real_rational_limit(
     except (SyntaxError, RecursionError, ValueError):
         return None
 
-    used_names = set(expression_symbols) | set(result_symbols)
+    used_names = set(expression_symbols) | set(result_symbols) | set(point_symbols) | {variable}
     limit_variable = _fresh_identifier("limit_variable", used_names)
     limit_body = _render_rational_limit_node(
         expression_tree.body,
@@ -352,7 +387,7 @@ def _prepare_real_rational_limit(
         set(),
         {"nodes": 0},
         0,
-        substitutions={variable: _lean_rational(point)},
+        substitutions={variable: point_lean},
     )
     if limit_body is None or value_at_point is None:
         return None
@@ -368,10 +403,14 @@ def _prepare_real_rational_limit(
         expression_tree.body,
         variable,
         point,
+        point_lean,
+        point_display,
         continuity_state,
         0,
     )
     if continuity_proof is None:
+        if point is None:
+            return None
         remaining_symbolic_time = symbolic_deadline - monotonic()
         if remaining_symbolic_time <= 0.001:
             return Computation("", "", timed_out=True)
@@ -385,7 +424,8 @@ def _prepare_real_rational_limit(
         )
 
     theorem_symbols = sorted(
-        (expression_symbols | result_symbols) - {variable, limit_variable}
+        (expression_symbols | result_symbols | point_symbols)
+        - {variable, limit_variable}
     )
     domain_binders = continuity_state["domain_binders"]
     if not isinstance(domain_binders, list):
@@ -394,7 +434,6 @@ def _prepare_real_rational_limit(
         [*(f"({name} : ℝ)" for name in theorem_symbols), *domain_binders]
     )
     theorem_binders = f" {binders}" if binders else ""
-    point_lean = _lean_rational(point)
     denominator_assumptions = continuity_state["denominator_assumptions"]
     if not isinstance(denominator_assumptions, list):
         return None
@@ -410,7 +449,7 @@ def _prepare_real_rational_limit(
     for result_denominator in _variable_denominators(result_tree.body):
         denominator_value = _exact_rational_node_value(
             result_denominator, variable, point
-        )
+        ) if point is not None else None
         if denominator_value is not None:
             if denominator_value == 0:
                 return None
@@ -491,13 +530,16 @@ theorem wolfram_language_compute{theorem_binders} :
         result.replace("**", "^"),
         source,
         domain_conditions=tuple(domain_conditions),
+        real_parameters=tuple(theorem_symbols),
     )
 
 
 def _rational_continuity_proof(
     node: ast.AST,
     variable: str,
-    point: Fraction,
+    point: Fraction | None,
+    point_lean: str,
+    point_display: str,
     state: dict[str, object],
     depth: int,
 ) -> str | None:
@@ -510,7 +552,7 @@ def _rational_continuity_proof(
         return "continuousAt_id" if node.id == variable else "continuousAt_const"
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         inner = _rational_continuity_proof(
-            node.operand, variable, point, state, depth + 1
+            node.operand, variable, point, point_lean, point_display, state, depth + 1
         )
         if inner is None:
             return None
@@ -519,7 +561,7 @@ def _rational_continuity_proof(
         return None
 
     left = _rational_continuity_proof(
-        node.left, variable, point, state, depth + 1
+        node.left, variable, point, point_lean, point_display, state, depth + 1
     )
     if left is None:
         return None
@@ -536,11 +578,15 @@ def _rational_continuity_proof(
             if denominator == 0:
                 return None
             return f"({left}).div_const {_lean_rational(denominator)}"
-        denominator_value = _exact_rational_node_value(node.right, variable, point)
+        denominator_value = (
+            _exact_rational_node_value(node.right, variable, point)
+            if point is not None
+            else None
+        )
         if denominator_value == 0:
             return None
         right = _rational_continuity_proof(
-            node.right, variable, point, state, depth + 1
+            node.right, variable, point, point_lean, point_display, state, depth + 1
         )
         if right is None:
             return None
@@ -550,7 +596,7 @@ def _rational_continuity_proof(
             names,
             {"nodes": 0},
             0,
-            substitutions={variable: _lean_rational(point)},
+            substitutions={variable: point_lean},
         )
         if denominator_at_point is None:
             return None
@@ -577,7 +623,7 @@ def _rational_continuity_proof(
                 for child in ast.walk(node.right)
             ):
                 condition = (
-                    f"{denominator_source} ≠ 0 at {variable} = {_fraction_text(point)}"
+                    f"{denominator_source} ≠ 0 at {variable} = {point_display}"
                 )
             else:
                 condition = f"{denominator_source} ≠ 0"
@@ -587,7 +633,7 @@ def _rational_continuity_proof(
         return f"({left}).div ({right}) {hypothesis_name}"
 
     right = _rational_continuity_proof(
-        node.right, variable, point, state, depth + 1
+        node.right, variable, point, point_lean, point_display, state, depth + 1
     )
     if right is None:
         return None
@@ -597,6 +643,55 @@ def _rational_continuity_proof(
         ast.Mult: "mul",
     }.get(type(node.op))
     return f"({left}).{method} ({right})" if method is not None else None
+
+
+def _rational_polynomial_within_limits(
+    node: ast.AST,
+    symbol_names: set[str],
+) -> bool:
+    import sympy as _sympy
+
+    expression = _real_sympy_expression(node)
+    if expression is None:
+        return False
+    symbols = [_sympy.Symbol(name) for name in sorted(symbol_names)]
+    try:
+        polynomial = _sympy.Poly(expression, *symbols, domain=_sympy.QQ)
+    except (TypeError, ValueError, _sympy.PolynomialError):
+        return False
+    if polynomial.total_degree() > 64:
+        return False
+    return all(
+        abs(int(coefficient.p)).bit_length() <= 256
+        and int(coefficient.q).bit_length() <= 256
+        for coefficient in polynomial.coeffs()
+    )
+
+
+def _rational_denominator_vanishes_at_symbolic_point(
+    expression: ast.AST,
+    variable: str,
+    point: ast.AST,
+) -> bool:
+    import sympy as _sympy
+
+    point_expression = _real_sympy_expression(point)
+    if point_expression is None:
+        return True
+    variable_symbol = _sympy.Symbol(variable)
+    for denominator in _variable_denominators(expression):
+        denominator_expression = _real_sympy_expression(denominator)
+        if denominator_expression is None:
+            return True
+        try:
+            at_point = _sympy.simplify(
+                denominator_expression.subs(variable_symbol, point_expression)
+            )
+        except (TypeError, ValueError, RecursionError):
+            return True
+        if at_point == 0 or at_point.is_zero is True:
+            return True
+    return False
 
 
 def _prepare_removable_rational_limit(
@@ -679,6 +774,8 @@ def _prepare_removable_rational_limit(
         simplified_tree.body,
         variable,
         point,
+        _lean_rational(point),
+        _fraction_text(point),
         continuity_state,
         0,
     )
@@ -772,7 +869,11 @@ theorem wolfram_language_compute{theorem_binders} :
 
 #print axioms wolfram_language_compute
 """
-    return Computation(limit_result.replace("**", "^"), source)
+    return Computation(
+        limit_result.replace("**", "^"),
+        source,
+        real_parameters=tuple(theorem_symbols),
+    )
 
 
 def _vanishing_affine_power(
