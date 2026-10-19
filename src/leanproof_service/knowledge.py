@@ -24,7 +24,7 @@ class KnowledgeRequest(StrictModel):
     ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
-    property_id: Literal["P36", "P37", "P38", "P1082"] | None = None
+    property_id: Literal["P36", "P37", "P38", "P1082", "P2131", "P4010"] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
     series_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -301,6 +301,8 @@ def _wikidata_property(
         "P37": "official language",
         "P38": "currency",
         "P1082": "population",
+        "P2131": "nominal GDP",
+        "P4010": "GDP at purchasing power parity",
     }
     if property_id not in property_names:
         raise KnowledgeProviderError("Wikidata property is not allowlisted", 400)
@@ -363,6 +365,8 @@ def _wikidata_property(
         "P37": "languages",
         "P38": "currencies",
         "P1082": "population",
+        "P2131": "nominal_gdp",
+        "P4010": "gdp_ppp",
     }[property_id]
     for search_rank, candidate in enumerate(candidates, start=1):
         entity_id = candidate["id"]
@@ -374,6 +378,13 @@ def _wikidata_property(
             claims = claims.get(property_id, [])
         if property_id == "P1082":
             values = _wikidata_population_values(claims)
+        elif property_id in {"P2131", "P4010"}:
+            values = _wikidata_quantity_values(claims, property_id)
+            target_ids.update(
+                str(value["unit_id"])
+                for value in values
+                if isinstance(value.get("unit_id"), str)
+            )
         else:
             values = _wikidata_entity_values(claims, property_id)
             target_ids.update(
@@ -414,6 +425,22 @@ def _wikidata_property(
             relationships = match.get(value_key, [])
             if not isinstance(relationships, list):
                 continue
+            if property_id in {"P2131", "P4010"}:
+                for quantity in relationships:
+                    if not isinstance(quantity, dict):
+                        continue
+                    unit_id = quantity.get("unit_id")
+                    unit_entity = target_entities.get(unit_id)
+                    unit_label = (
+                        _wikidata_language_value(unit_entity.get("labels"), request.language)
+                        if isinstance(unit_entity, dict)
+                        else None
+                    )
+                    if unit_label:
+                        quantity["unit_label"] = unit_label
+                    if isinstance(unit_id, str):
+                        quantity["unit_url"] = f"https://www.wikidata.org/wiki/{unit_id}"
+                continue
             for relationship in relationships:
                 if not isinstance(relationship, dict):
                     continue
@@ -433,9 +460,15 @@ def _wikidata_property(
         "are returned with ties preserved."
         if property_id == "P1082"
         else (
-            "Wikidata entity search order; all returned candidates and non-deprecated "
-            f"{property_name} statements are preserved, including rank, references, and "
-            "time qualifiers where available."
+            "Wikidata entity search order; preferred GDP statements are used when present, "
+            "otherwise the latest dated statements are returned with ties preserved; amount, "
+            "unit, rank, references, and time qualifiers are preserved."
+            if property_id in {"P2131", "P4010"}
+            else (
+                "Wikidata entity search order; all returned candidates and non-deprecated "
+                f"{property_name} statements are preserved, including rank, references, "
+                "and time qualifiers where available."
+            )
         )
     )
     return {
@@ -515,6 +548,84 @@ def _wikidata_population_values(claims: object) -> list[dict[str, object]]:
                 bound_value = quantity.get(bound)
                 if isinstance(bound_value, str) and len(bound_value) <= 128:
                     observation[bound] = bound_value.removeprefix("+")
+        values.append(observation)
+
+    preferred = [item for item in values if item.get("rank") == "preferred"]
+    eligible = preferred or values
+    dated = [item for item in eligible if isinstance(item.get("point_in_time"), str)]
+    if dated:
+        latest = max(str(item["point_in_time"]) for item in dated)
+        eligible = [item for item in dated if item["point_in_time"] == latest]
+    return eligible[:5]
+
+
+def _wikidata_quantity_values(
+    claims: object, property_id: str
+) -> list[dict[str, object]]:
+    statements = claims
+    if isinstance(statements, dict):
+        statements = statements.get(property_id, statements.get("claims", []))
+    if not isinstance(statements, list):
+        return []
+
+    values: list[dict[str, object]] = []
+    for statement in statements:
+        if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+            continue
+        main_snak = statement.get("mainsnak")
+        if not isinstance(main_snak, dict) or main_snak.get("snaktype") != "value":
+            continue
+        datavalue = main_snak.get("datavalue")
+        quantity = datavalue.get("value") if isinstance(datavalue, dict) else None
+        if not isinstance(quantity, dict):
+            continue
+        amount = quantity.get("amount")
+        if (
+            not isinstance(amount, str)
+            or len(amount) > 128
+            or not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", amount)
+        ):
+            continue
+        observation: dict[str, object] = {
+            "amount": amount.removeprefix("+"),
+            "rank": statement.get("rank", "normal"),
+        }
+        raw_unit = quantity.get("unit")
+        if isinstance(raw_unit, str) and raw_unit != "1":
+            unit_match = re.search(r"/entity/(Q[1-9][0-9]*)$", raw_unit)
+            if unit_match:
+                observation["unit_id"] = unit_match.group(1)
+            else:
+                observation["unit"] = raw_unit
+        statement_id = statement.get("id")
+        if isinstance(statement_id, str):
+            observation["statement_id"] = statement_id
+        references = statement.get("references")
+        if isinstance(references, list):
+            observation["reference_count"] = len(references)
+        for bound in ("lowerBound", "upperBound"):
+            bound_value = quantity.get(bound)
+            if (
+                isinstance(bound_value, str)
+                and len(bound_value) <= 128
+                and re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", bound_value)
+            ):
+                observation[bound] = bound_value.removeprefix("+")
+        qualifiers = statement.get("qualifiers")
+        point_in_time = None
+        time_snaks = qualifiers.get("P585") if isinstance(qualifiers, dict) else None
+        if isinstance(time_snaks, list):
+            for time_snak in time_snaks:
+                if not isinstance(time_snak, dict):
+                    continue
+                time_data = time_snak.get("datavalue")
+                time_value = time_data.get("value") if isinstance(time_data, dict) else None
+                time_text = time_value.get("time") if isinstance(time_value, dict) else None
+                if isinstance(time_text, str):
+                    point_in_time = time_text
+                    break
+        if point_in_time is not None:
+            observation["point_in_time"] = point_in_time
         values.append(observation)
 
     preferred = [item for item in values if item.get("rank") == "preferred"]

@@ -29,6 +29,7 @@ from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
     InterpretationTimeout,
+    assumption_registry,
     numeric_date_options,
     query_with_interpretations,
 )
@@ -81,6 +82,12 @@ class ProviderContextNeeded(ValueError):
     pass
 
 
+class ProviderAssumptionNeeded(ProviderContextNeeded):
+    def __init__(self, message: str, assumption: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.assumption = assumption
+
+
 def normalize_output(value: str) -> str:
     output = value.strip().lower()
     if output not in {"xml", "json"}:
@@ -125,9 +132,21 @@ def async_pod_descriptor(
     location: str | None = None,
     latlong: str | None = None,
     units: str | None = None,
+    assumptions: list[str] | None = None,
 ) -> tuple[str, str, str]:
     try:
-        request = _provider_request(input_text, location, latlong, units)
+        gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
+        if gdp_resolution is not None and any(value is not None for value in (location, latlong, units)):
+            raise FullResultsRequestError(
+                "location, latlong, and units are currently supported for weather queries"
+            )
+        request = (
+            gdp_resolution[0]
+            if gdp_resolution is not None
+            else _provider_request(input_text, location, latlong, units)
+        )
+    except ProviderAssumptionNeeded:
+        raise
     except ProviderContextNeeded:
         return "Result", "Result", "Mathematical"
     if request is None:
@@ -157,6 +176,10 @@ def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str
         return "Official languages", "OfficialLanguages", "Data"
     if property_id == "P38":
         return "Currency", "Currency", "Data"
+    if property_id == "P2131":
+        return "Nominal GDP", "NominalGDP", "Data"
+    if property_id == "P4010":
+        return "GDP at purchasing power parity", "GDP_PPP", "Data"
     return "Entity matches", "EntitySearch", "Data"
 
 
@@ -176,6 +199,8 @@ def _wikidata_provider_presentation(
         "P36": ("Capital", "Capital", "Geography"),
         "P37": ("Official languages", "OfficialLanguages", "Languages"),
         "P38": ("Currency", "Currency", "Economics"),
+        "P2131": ("Nominal GDP", "NominalGDP", "Economics"),
+        "P4010": ("GDP at purchasing power parity", "GDP_PPP", "Economics"),
     }.get(_wikidata_property_id(request), ("Entity matches", "EntitySearch", "Entity"))
 
 
@@ -294,7 +319,21 @@ def execute_query(
     numeric_precision = _DECIMAL_APPROXIMATION_PRECISIONS[decimal_state_level]
     provider_parse_started = perf_counter()
     try:
-        provider_request = _provider_request(input_text, location, latlong, units)
+        gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
+        if gdp_resolution is not None and any(value is not None for value in (location, latlong, units)):
+            raise FullResultsRequestError(
+                "location, latlong, and units are currently supported for weather queries"
+            )
+        if gdp_resolution is None:
+            provider_request = _provider_request(input_text, location, latlong, units)
+            provider_assumptions: list[dict[str, Any]] = []
+        else:
+            provider_request, gdp_assumption = gdp_resolution
+            provider_assumptions = [gdp_assumption]
+    except ProviderAssumptionNeeded as exc:
+        return _provider_assumption_clarification(
+            input_text, exc, formats, perf_counter() - started, text_width
+        )
     except ProviderContextNeeded as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     provider_parse_timing = perf_counter() - provider_parse_started
@@ -303,7 +342,7 @@ def execute_query(
             raise FullResultsRequestError(
                 "podstate is currently supported for mathematical decimal approximations"
             )
-        if assumptions:
+        if assumptions and not provider_assumptions:
             raise AssumptionSelectionError(
                 "mathematical assumption selections do not apply to this data query"
             )
@@ -322,6 +361,7 @@ def execute_query(
             pod_timeout_seconds=pod_timeout_seconds,
             text_width=text_width,
             plot_width=plot_width,
+            assumptions=provider_assumptions,
         )
         if verify:
             payload["queryresult"].setdefault("evidence", {})["formal_verification"] = {
@@ -895,9 +935,19 @@ def validate_query(
     started = perf_counter()
     planning_input = input_text.casefold() if ignorecase else input_text
     try:
-        provider_request = _provider_request(input_text, location, latlong, units)
+        gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
+        if gdp_resolution is not None and any(value is not None for value in (location, latlong, units)):
+            raise FullResultsRequestError(
+                "location, latlong, and units are currently supported for weather queries"
+            )
+        if gdp_resolution is None:
+            provider_request = _provider_request(input_text, location, latlong, units)
+            provider_assumptions: list[dict[str, Any]] = []
+        else:
+            provider_request, gdp_assumption = gdp_resolution
+            provider_assumptions = [gdp_assumption]
         if provider_request is not None:
-            if assumptions:
+            if assumptions and not provider_assumptions:
                 raise AssumptionSelectionError(
                     "mathematical assumption selections do not apply to this data query"
                 )
@@ -912,7 +962,7 @@ def validate_query(
                     "version": _API_VERSION,
                     "service": "LEAN Engine",
                     "input": input_text,
-                    "assumptions": [],
+                    "assumptions": provider_assumptions,
                     "interpretation": {
                         "kind": "typed_data_request",
                         "provider": provider_name,
@@ -927,6 +977,27 @@ def validate_query(
             validate_only=True,
             parse_timeout_seconds=parse_timeout_seconds,
         )
+    except ProviderAssumptionNeeded as exc:
+        elapsed = perf_counter() - started
+        return {
+            "validatequeryresult": {
+                "success": False,
+                "error": False,
+                "timing": _seconds(elapsed),
+                "parsetiming": _seconds(elapsed),
+                "version": _API_VERSION,
+                "service": "LEAN Engine",
+                "input": input_text,
+                "assumptions": [exc.assumption],
+                "interpretation": {
+                    "kind": "ambiguous_data_request",
+                    "provider": "wikidata",
+                    "operation": "gdp",
+                    "selection_required": True,
+                },
+                "tips": [{"text": str(exc)}],
+            }
+        }
     except ProviderContextNeeded as exc:
         elapsed = perf_counter() - started
         return {
@@ -1200,6 +1271,107 @@ def _knowledge_request(**values: Any) -> KnowledgeRequest:
         raise FullResultsRequestError(f"invalid data query: {messages}") from exc
 
 
+def _gdp_query_parts(input_text: str) -> tuple[str, str] | None:
+    query = re.sub(
+        r"^\s*(?:(?:what\s+is|what's|give\s+me|tell\s+me|estimate|find|show)\s+)?(?:the\s+)?",
+        "",
+        input_text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    query = re.sub(r"[?.!]+\s*$", "", query).strip()
+    if re.search(r"\b(?:gdp|gross\s+domestic\s+product)\b.*\bper\s+capita\b", query, re.IGNORECASE):
+        raise ProviderContextNeeded("GDP per capita is not in the current Wikidata data slice")
+    patterns = (
+        ("ppp", r"(?:gdp|gross\s+domestic\s+product)\s*(?:\(\s*ppp\s*\)|at\s+purchasing\s+power\s+parity)\s+(?:of|in)\s+(.+?)\s*"),
+        ("ppp", r"ppp\s+(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s*"),
+        ("nominal", r"nominal\s+(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s*"),
+        ("nominal", r"(?:gdp|gross\s+domestic\s+product)\s*\(\s*nominal\s*\)\s+(?:of|in)\s+(.+?)\s*"),
+        ("generic", r"(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s*"),
+    )
+    for kind, pattern in patterns:
+        match = re.fullmatch(pattern, query, re.IGNORECASE)
+        if match:
+            return kind, match.group(1).strip()
+    if re.fullmatch(r"(?:gdp|gross\s+domestic\s+product)", query, re.IGNORECASE):
+        raise ProviderContextNeeded("GDP lookup needs an entity name")
+    return None
+
+
+def _resolve_gdp_request(
+    input_text: str, selections: list[str]
+) -> tuple[KnowledgeRequest, dict[str, Any]] | None:
+    parts = _gdp_query_parts(input_text)
+    if parts is None:
+        return None
+    kind, entity_query = parts
+    if not entity_query or entity_query.casefold() in {"of", "in"}:
+        raise ProviderContextNeeded("GDP lookup needs an entity name")
+
+    registry = assumption_registry()
+    candidates = [
+        item for item in registry["assumptions"] if item.get("type") == "GDPType"
+    ]
+    candidates_by_id = {item["id"]: item for item in candidates}
+    if len(candidates_by_id) != 2:
+        raise RuntimeError("GDPType assumption registry must contain nominal and PPP choices")
+    if len(selections) > 1:
+        raise AssumptionSelectionError("select one GDPType assumption")
+    selected = None
+    if selections:
+        selected = candidates_by_id.get(selections[0])
+        if selected is None:
+            raise AssumptionSelectionError(
+                "GDP queries accept one of: " + ", ".join(sorted(candidates_by_id))
+            )
+    explicit_id = {
+        "nominal": "gdp:type:nominal",
+        "ppp": "gdp:type:ppp",
+    }.get(kind)
+    if selected is not None and explicit_id is not None and selected["id"] != explicit_id:
+        raise AssumptionSelectionError(
+            "the GDPType assumption conflicts with the measure named in the input"
+        )
+
+    chosen = selected
+    if chosen is None and explicit_id is not None:
+        chosen = candidates_by_id[explicit_id]
+    assumption = {
+        "type": "GDPType",
+        "selected": chosen["id"] if chosen is not None else None,
+        "selection_source": (
+            "caller_override"
+            if selected is not None
+            else "explicit_input"
+            if explicit_id is not None
+            else "needs_clarification"
+        ),
+        "registry_version": registry["registry_version"],
+        "values": [
+            {
+                "input": candidate["id"],
+                "desc": candidate["description"],
+                "entry_version": candidate["entry_version"],
+            }
+            for candidate in candidates
+        ],
+    }
+    if chosen is None:
+        raise ProviderAssumptionNeeded(
+            "GDP can mean nominal GDP or GDP at purchasing power parity; select one "
+            "with assumption=gdp:type:nominal or assumption=gdp:type:ppp",
+            assumption,
+        )
+    request = _knowledge_request(
+        provider="wikidata",
+        operation="property",
+        property_id=chosen["wikidata_property_id"],
+        query=entity_query,
+        max_results=3,
+    )
+    return request, assumption
+
+
 def _execute_provider_query(
     input_text: str,
     request: KnowledgeRequest,
@@ -1216,6 +1388,7 @@ def _execute_provider_query(
     pod_timeout_seconds: float,
     text_width: int,
     plot_width: int,
+    assumptions: list[dict[str, Any]],
 ) -> dict[str, Any]:
     provider_deadline = min(deadline, perf_counter() + pod_timeout_seconds)
     try:
@@ -1256,7 +1429,7 @@ def _execute_provider_query(
             parse_timing=parse_timing,
             datatypes="Data",
             warnings=timeout_warnings,
-            assumptions=[],
+            assumptions=assumptions,
             timedout="Data",
             timedoutpods=provider_titles[request.provider],
             evidence={
@@ -1347,6 +1520,8 @@ def _execute_provider_query(
         "P36": "capital",
         "P37": "official-language",
         "P38": "currency",
+        "P2131": "nominal GDP",
+        "P4010": "GDP at purchasing-power parity",
     }.get(wikidata_property_id)
     payload = _query_envelope(
         success=True,
@@ -1359,7 +1534,7 @@ def _execute_provider_query(
             formats,
             {"plaintext", "mathml"} | ({"image"} if input_image or result_image else set()),
         ),
-        assumptions=[],
+        assumptions=assumptions,
         interpretation={
             "kind": "typed_data_request",
             "provider": knowledge["provider"],
@@ -1454,6 +1629,49 @@ def _provider_plaintext(provider: str, data: Any) -> str:
                         statements.append(population)
                 detail = "; ".join(statements) or "no usable population statement found"
                 rows.append(f"{prefix}: {detail}")
+        return "\n".join(rows) if rows else "No Wikidata entity matches were found."
+    wikidata_gdp = {
+        "P2131": ("nominal_gdp", "Nominal GDP"),
+        "P4010": ("gdp_ppp", "GDP at purchasing power parity"),
+    }
+    if (
+        provider == "wikidata"
+        and isinstance(data, dict)
+        and data.get("property_id") in wikidata_gdp
+    ):
+        value_key, measure_name = wikidata_gdp[str(data["property_id"])]
+        matches = data.get("matches")
+        rows = []
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                label = str(match.get("label") or match.get("id") or "Entity")
+                identifier = str(match.get("id") or "")
+                prefix = f"{label} [{identifier}]" if identifier else label
+                values = match.get(value_key)
+                statements = []
+                if isinstance(values, list):
+                    for value in values:
+                        if not isinstance(value, dict):
+                            continue
+                        amount = _display_wikidata_amount(value.get("amount"))
+                        lower = _display_wikidata_amount(value.get("lowerBound"))
+                        upper = _display_wikidata_amount(value.get("upperBound"))
+                        unit = value.get("unit_label") or value.get("unit") or value.get("unit_id")
+                        if lower is not None and upper is not None:
+                            quantity = f"between {lower} and {upper}"
+                        else:
+                            quantity = amount or "amount not reported"
+                        if unit:
+                            quantity += f" {unit}"
+                        point_in_time = value.get("point_in_time")
+                        if isinstance(point_in_time, str):
+                            date = point_in_time.removeprefix("+").split("T", 1)[0]
+                            quantity += f" (as of {date})"
+                        statements.append(quantity)
+                detail = "; ".join(statements) or f"no usable {measure_name} statement found"
+                rows.append(f"{measure_name}: {prefix}: {detail}")
         return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     wikidata_relationship = {
         "P36": ("capitals", "capital"),
@@ -2093,6 +2311,45 @@ def _unrecognized_query(input_text: str, message: str, elapsed: float) -> dict[s
         assumptions=[],
         tips=[{"text": message}],
         qualification="The input was not parsed; no result was computed.",
+    )
+    result["queryresult"]["input"] = input_text
+    return result
+
+
+def _provider_assumption_clarification(
+    input_text: str,
+    error: ProviderAssumptionNeeded,
+    formats: list[str],
+    elapsed: float,
+    text_width: int,
+) -> dict[str, Any]:
+    del text_width  # No result image is produced while the interpretation is unresolved.
+    result = _query_envelope(
+        success=False,
+        error=False,
+        pods=[],
+        elapsed=elapsed,
+        parse_timing=elapsed,
+        datatypes="Data",
+        warnings=_format_warnings(formats),
+        assumptions=[error.assumption],
+        interpretation={
+            "kind": "ambiguous_data_request",
+            "provider": "wikidata",
+            "operation": "gdp",
+            "selection_required": True,
+        },
+        classification={
+            "name": "deterministic_provider_router",
+            "method": "GDP measure candidates from the typed assumption registry",
+            "ranks_candidates_only": True,
+            "selection_authority": False,
+        },
+        tips=[{"text": str(error)}],
+        qualification=(
+            "The request is ambiguous between nominal GDP and GDP at purchasing power "
+            "parity. No provider lookup was run until a measure was selected."
+        ),
     )
     result["queryresult"]["input"] = input_text
     return result

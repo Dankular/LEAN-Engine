@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.0.0",
+  "registry_version": "2.1.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -196,6 +196,22 @@
       "type": "TimeAMOrPM",
       "description": "Interpret an ambiguous clock time as AM.",
       "meaning": "am",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "gdp:type:nominal",
+      "type": "GDPType",
+      "description": "Use nominal gross domestic product in the reported currency.",
+      "wikidata_property_id": "P2131",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "gdp:type:ppp",
+      "type": "GDPType",
+      "description": "Use gross domestic product at purchasing power parity.",
+      "wikidata_property_id": "P4010",
       "entry_version": 1,
       "service_default": false
     }
