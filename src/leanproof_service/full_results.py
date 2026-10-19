@@ -206,6 +206,10 @@ def async_pod_descriptor(
 
 def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str]:
     property_id = _wikidata_property_id(request)
+    if property_id == "P17":
+        return "Country", "Country", "Data"
+    if property_id == "P30":
+        return "Continent", "Continent", "Data"
     if property_id == "P1082":
         return "Population", "Population", "Data"
     if property_id == "P36":
@@ -237,6 +241,8 @@ def _wikidata_provider_presentation(
     request: KnowledgeRequest,
 ) -> tuple[str, str, str]:
     return {
+        "P17": ("Country", "Country", "Geography"),
+        "P30": ("Continent", "Continent", "Geography"),
         "P1082": ("Population", "Population", "Population"),
         "P36": ("Capital", "Capital", "Geography"),
         "P37": ("Official languages", "OfficialLanguages", "Languages"),
@@ -1347,6 +1353,46 @@ def _provider_request(
             query=query, max_results=3,
         )
 
+    country_of = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|which\s+is|name)\s+)?(?:the\s+)?"
+        r"country\s+(?:of|for)\s+(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    country_in = re.fullmatch(
+        r"\s*(?:(?:what|which)\s+)?country\s+is\s+(.+?)\s+in\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if country_of or country_in:
+        query = (country_of or country_in).group(1).strip()
+        if not query:
+            raise ProviderContextNeeded("country lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P17",
+            query=query, max_results=3,
+        )
+
+    continent_of = re.fullmatch(
+        r"\s*(?:(?:what\s+is|what's|which\s+is|name)\s+)?(?:the\s+)?"
+        r"continent\s+(?:of|for)\s+(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    continent_in = re.fullmatch(
+        r"\s*(?:(?:what|which)\s+)?continent\s+is\s+(.+?)\s+in\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if continent_of or continent_in:
+        query = (continent_of or continent_in).group(1).strip()
+        if not query:
+            raise ProviderContextNeeded("continent lookup needs an entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P30",
+            query=query, max_results=3,
+        )
+
     population = re.fullmatch(
         r"\s*(?:(?:what\s+is|what's|give\s+me)\s+)?(?:the\s+)?"
         r"population\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
@@ -1851,6 +1897,8 @@ def _execute_provider_query(
         warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
     wikidata_property_id = _wikidata_property_id(request)
     wikidata_property_name = {
+        "P17": "country",
+        "P30": "continent",
         "P1082": "population",
         "P36": "capital",
         "P37": "official-language",
@@ -1859,6 +1907,10 @@ def _execute_provider_query(
         "P4010": "GDP at purchasing-power parity",
         "P2132": "nominal GDP per capita",
         "P2299": "GDP per capita at purchasing-power parity",
+    }.get(wikidata_property_id)
+    wikidata_property_note = {
+        "P17": "Country P17 is intended for geographic places, not people.",
+        "P30": "Wikidata may list multiple continents when a subject spans continents.",
     }.get(wikidata_property_id)
     payload = _query_envelope(
         success=not (format_budget.timed_out_pods and not filtered),
@@ -1893,6 +1945,7 @@ def _execute_provider_query(
         qualification=(
             "Wikidata's ranked entity matches are returned as candidates. "
             f"{wikidata_property_name.capitalize()} statements are retrieved data, not a formal proof."
+            + (f" {wikidata_property_note}" if wikidata_property_note else "")
             if wikidata_property_name is not None
             else (
                 "DBnomics search results are dataset candidates. Select a provider and dataset explicitly, then request a specific series; no dataset is selected automatically. Retrieved data is not a formal proof."
@@ -2019,6 +2072,8 @@ def _provider_plaintext(provider: str, data: Any) -> str:
                 rows.append(f"{measure_name}: {prefix}: {detail}")
         return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     wikidata_relationship = {
+        "P17": ("countries", "country"),
+        "P30": ("continents", "continent"),
         "P36": ("capitals", "capital"),
         "P37": ("languages", "official language"),
         "P38": ("currencies", "currency"),

@@ -25,7 +25,7 @@ class KnowledgeRequest(StrictModel):
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
     property_id: Literal[
-        "P36", "P37", "P38", "P1082", "P2131", "P4010", "P2132", "P2299"
+        "P17", "P30", "P36", "P37", "P38", "P1082", "P2131", "P4010", "P2132", "P2299"
     ] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
@@ -301,6 +301,8 @@ def _wikidata_property(
         "property": request.property_id,
     }.get(request.operation)
     property_names = {
+        "P17": "country",
+        "P30": "continent",
         "P36": "capital",
         "P37": "official language",
         "P38": "currency",
@@ -367,6 +369,8 @@ def _wikidata_property(
     matches: list[dict[str, object]] = []
     target_ids: set[str] = set()
     value_key = {
+        "P17": "countries",
+        "P30": "continents",
         "P36": "capitals",
         "P37": "languages",
         "P38": "currencies",
