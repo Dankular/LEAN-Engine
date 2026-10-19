@@ -67,6 +67,12 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
             "Integrate[Sin[x+Pi/16], {x, 0, Pi/16}]": "-sqrt(2 + sqrt(2))/2 + sqrt(2 + sqrt(2 + sqrt(2)))/2",
             "Integrate[Cos[x+Pi/16], {x, 0, Pi/16}]": "sqrt(2 - sqrt(2))/2 - sqrt(2 - sqrt(2 + sqrt(2)))/2",
             "Integrate[Sin[x], {x, -Pi/16, Pi/16}]": "0",
+            "Integrate[Cos[x], {x, 0, Pi/32}]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Integrate[Sin[x], {x, 0, Pi/32}]": "1 - sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Integrate[Cos[x], {x, Pi/32, Pi/16}]": "sqrt(2 - sqrt(2 + sqrt(2)))/2 - sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Integrate[Sin[x+Pi/32], {x, 0, Pi/32}]": "-sqrt(2 + sqrt(2 + sqrt(2)))/2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Integrate[Cos[x+Pi/32], {x, 0, Pi/32}]": "sqrt(2 - sqrt(2 + sqrt(2)))/2 - sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
+            "Integrate[Sin[x], {x, -Pi/32, Pi/32}]": "0",
         }
         for code, expected_result in cases.items():
             with self.subTest(code=code):
@@ -89,18 +95,20 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
     def test_non_supported_pi_bounds_and_endpoint_phases_remain_unsupported(self) -> None:
         self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/3}]", 10))
         self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/4}]", 10))
-        self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/32}]", 10))
-        self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/16}]", 10))
+        self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/64}]", 10))
+        self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/32}]", 10))
 
 
 class ExactRadicalBasisTests(unittest.TestCase):
     def test_parser_normalizes_nested_radical_products_and_powers(self) -> None:
         cases = {
-            "sqrt(2)*sqrt(2+sqrt(2))": (0, 0, 1, 1, 0, 0),
-            "sqrt(2+sqrt(2))*sqrt(2-sqrt(2))": (0, 1, 0, 0, 0, 0),
-            "sqrt(2+sqrt(2))**2": (2, 1, 0, 0, 0, 0),
-            "sqrt(2+sqrt(2+sqrt(2)))**2": (2, 0, 1, 0, 0, 0),
-            "sqrt(2+sqrt(2+sqrt(2)))*sqrt(2-sqrt(2+sqrt(2)))": (0, 0, 0, 1, 0, 0),
+            "sqrt(2)*sqrt(2+sqrt(2))": (0, 0, 1, 1, 0, 0, 0, 0),
+            "sqrt(2+sqrt(2))*sqrt(2-sqrt(2))": (0, 1, 0, 0, 0, 0, 0, 0),
+            "sqrt(2+sqrt(2))**2": (2, 1, 0, 0, 0, 0, 0, 0),
+            "sqrt(2+sqrt(2+sqrt(2)))**2": (2, 0, 1, 0, 0, 0, 0, 0),
+            "sqrt(2+sqrt(2+sqrt(2)))*sqrt(2-sqrt(2+sqrt(2)))": (0, 0, 0, 1, 0, 0, 0, 0),
+            "sqrt(2+sqrt(2+sqrt(2+sqrt(2))))**2": (2, 0, 0, 0, 1, 0, 0, 0),
+            "sqrt(2+sqrt(2+sqrt(2+sqrt(2))))*sqrt(2-sqrt(2+sqrt(2+sqrt(2))))": (0, 0, 0, 1, 0, 0, 0, 0),
         }
         for expression, expected in cases.items():
             with self.subTest(expression=expression):
