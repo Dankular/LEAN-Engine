@@ -50,6 +50,11 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
             "Integrate[Cos[2x+Pi], {x, 0, Pi/2}]": "0",
             "Integrate[Sin[x-Pi/2], {x, -Pi/2, Pi/2}]": "-2",
             "Integrate[Sin[t+Pi/2], {t, 0, Pi/2}]": "1",
+            "Integrate[Cos[x], {x, 0, Pi/4}]": "sqrt(2)/2",
+            "Integrate[Sin[x], {x, 0, Pi/4}]": "1 - sqrt(2)/2",
+            "Integrate[Sin[x], {x, -Pi/4, 0}]": "-1 + sqrt(2)/2",
+            "Integrate[Sin[x+Pi/4], {x, 0, Pi/4}]": "sqrt(2)/2",
+            "Integrate[Cos[x+Pi/4], {x, 0, Pi/4}]": "1 - sqrt(2)/2",
         }
         for code, expected_result in cases.items():
             with self.subTest(code=code):
@@ -68,6 +73,10 @@ class PiBoundedTrigonometricIntegralTests(unittest.TestCase):
 
     def test_nonzero_phase_is_not_claimed_by_the_exact_endpoint_path(self) -> None:
         self.assertIsNone(prepare_computation("Integrate[Sin[x+1], {x, 0, Pi}]", 10))
+
+    def test_non_quarter_pi_bounds_and_endpoint_phases_remain_unsupported(self) -> None:
+        self.assertIsNone(prepare_computation("Integrate[Cos[x], {x, 0, Pi/3}]", 10))
+        self.assertIsNone(prepare_computation("Integrate[Sin[3x], {x, 0, Pi/4}]", 10))
 
 
 class InverseTrigonometricAntiderivativeTests(unittest.TestCase):

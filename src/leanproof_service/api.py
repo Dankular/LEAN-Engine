@@ -1013,9 +1013,9 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic, real-calculus, Lean-checked bounded TrigExpand, finite polynomial Sum/Product, "
-        "rational-function limit, and special-case subset is computed and "
-        "compiled into Lean proofs."
+        "Supported operations include bounded arithmetic and real calculus, Lean-checked TrigExpand, "
+        "finite polynomial Sum/Product, rational-function limits, and selected exact Pi-bound "
+        "trigonometric integrals. Each supported result is checked through a generated Lean proof."
     ),
     openapi_extra={
         "requestBody": {

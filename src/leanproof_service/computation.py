@@ -1734,12 +1734,16 @@ def _prepare_pi_bounded_sin_cos_integral(
     normalized_upper = re.sub(r"\bPi\b", "pi", upper_source)
     lower_multiple = _parse_rational_pi_multiple(normalized_lower)
     upper_multiple = _parse_rational_pi_multiple(normalized_upper)
-    allowed_multiples = {Fraction(-1), Fraction(-1, 2), Fraction(0), Fraction(1, 2), Fraction(1)}
+    allowed_multiples = {
+        Fraction(-1), Fraction(-1, 2), Fraction(-1, 4), Fraction(0),
+        Fraction(1, 4), Fraction(1, 2), Fraction(1),
+    }
     if lower_multiple not in allowed_multiples or upper_multiple not in allowed_multiples:
         return None
     endpoint_multiples = {
         Fraction(-2), Fraction(-1), Fraction(-1, 2), Fraction(0),
-        Fraction(1, 2), Fraction(1), Fraction(2),
+        Fraction(1, 4), Fraction(1, 2), Fraction(1), Fraction(2),
+        Fraction(-1, 4),
     }
     lower_phase = slope * lower_multiple + phase_offset
     upper_phase = slope * upper_multiple + phase_offset
@@ -1761,11 +1765,14 @@ def _prepare_pi_bounded_sin_cos_integral(
             "Symbolic worker returned no exact trigonometric integral"
         )
         return Computation("", "", backend_error=str(diagnostic)[:1000])
-    result = _parse_exact_rational(symbolic["result"])
-    if (
-        result is None
-        or abs(result.numerator).bit_length() > 256
-        or result.denominator.bit_length() > 256
+    result_surd = _parse_quadratic_surd(symbolic["result"])
+    if result_surd is None:
+        return None
+    rational_result, radical_result = result_surd
+    if any(
+        abs(value.numerator).bit_length() > 256
+        or value.denominator.bit_length() > 256
+        for value in result_surd
     ):
         return None
 
@@ -1775,8 +1782,9 @@ def _prepare_pi_bounded_sin_cos_integral(
     lean_upper_phase = _lean_pi_multiple(upper_phase)
     lean_slope = _lean_rational(slope)
     lean_phase_offset = _lean_rational(phase_offset)
-    lean_result = _lean_rational(result)
+    lean_result = _lean_quadratic_surd(rational_result, radical_result)
     if integrand.func.id == "sin":
+        endpoint_function = "cos"
         primitive = "fun t : ℝ => -Real.cos (a * t + b * Real.pi) / a"
         primitive_derivative = (
             f"have harg : {argument_lean} = a * {variable} + b * Real.pi := by\n"
@@ -1792,9 +1800,13 @@ def _prepare_pi_bounded_sin_cos_integral(
             f"      convert hcos.neg.div_const a using 1\n"
             f"      field_simp [ha]\n"
             f"      <;> ring\n"
-            f"    simpa [harg] using hprimitive"
+            f"    have hfunction : Real.sin {argument_lean} = "
+            f"Real.sin (a * {variable} + b * Real.pi) := congrArg Real.sin harg\n"
+            f"    rw [hfunction]\n"
+            f"    exact hprimitive"
         )
     else:
+        endpoint_function = "sin"
         primitive = "fun t : ℝ => Real.sin (a * t + b * Real.pi) / a"
         primitive_derivative = (
             f"have harg : {argument_lean} = a * {variable} + b * Real.pi := by\n"
@@ -1810,7 +1822,21 @@ def _prepare_pi_bounded_sin_cos_integral(
             f"      convert hsin.div_const a using 1\n"
             f"      field_simp [ha]\n"
             f"      <;> ring\n"
-            f"    simpa [harg] using hprimitive"
+            f"    have hfunction : Real.cos {argument_lean} = "
+            f"Real.cos (a * {variable} + b * Real.pi) := congrArg Real.cos harg\n"
+            f"    rw [hfunction]\n"
+            f"    exact hprimitive"
+        )
+    if Fraction(1, 4) in {abs(lower_phase), abs(upper_phase)}:
+        endpoint_lemmas = _pi_trig_simplification_lemmas(
+            endpoint_function, (lower_phase, upper_phase)
+        )
+        endpoint_evaluation = f"simp only [a, {', '.join(endpoint_lemmas)}] <;> ring"
+    else:
+        endpoint_evaluation = (
+            "norm_num [a, b, Real.sin_pi_div_two, Real.sin_pi, Real.sin_neg, "
+            "Real.sin_two_pi, Real.cos_pi_div_two, Real.cos_neg, "
+            "Real.cos_pi, Real.cos_two_pi]"
         )
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
@@ -1844,9 +1870,7 @@ theorem wolfram_language_compute :
   rw [intervalIntegral.integral_eq_sub_of_hasDerivAt hderiv hint]
   simp only [F]
   rw [h_upper_phase, h_lower_phase]
-  norm_num [a, b, Real.sin_pi_div_two,
-    Real.sin_pi, Real.sin_neg, Real.sin_two_pi, Real.cos_pi_div_two,
-    Real.cos_neg, Real.cos_pi, Real.cos_two_pi]
+  {endpoint_evaluation}
 
 #print axioms wolfram_language_compute
 """
@@ -1913,7 +1937,37 @@ def _lean_pi_multiple(coefficient: Fraction) -> str:
         return "(Real.pi / 2)"
     if coefficient == Fraction(-1, 2):
         return "(-(Real.pi / 2))"
+    if coefficient == Fraction(1, 4):
+        return "(Real.pi / 4)"
+    if coefficient == Fraction(-1, 4):
+        return "(-(Real.pi / 4))"
     raise ValueError("unsupported rational multiple of pi")
+
+
+def _pi_trig_simplification_lemmas(
+    function: str,
+    coefficients: tuple[Fraction, Fraction],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    value_lemmas = {
+        Fraction(0): f"Real.{function}_zero",
+        Fraction(1, 4): f"Real.{function}_pi_div_four",
+        Fraction(1, 2): f"Real.{function}_pi_div_two",
+        Fraction(1): f"Real.{function}_pi",
+        Fraction(2): f"Real.{function}_two_pi",
+    }
+    for coefficient in coefficients:
+        magnitude = abs(coefficient)
+        lemma = value_lemmas.get(magnitude)
+        if lemma is None:
+            raise ValueError("unsupported rational multiple of pi")
+        if lemma not in names:
+            names.append(lemma)
+        if coefficient < 0:
+            sign_lemma = f"Real.{function}_neg"
+            if sign_lemma not in names:
+                names.append(sign_lemma)
+    return tuple(names)
 
 
 def _prepare_definite_real_integral(
@@ -6658,6 +6712,69 @@ def _parse_exact_rational(source: str) -> Fraction | None:
     return _constant_fraction(tree.body)
 
 
+def _parse_quadratic_surd(source: str) -> tuple[Fraction, Fraction] | None:
+    """Parse an exact value in Q(sqrt(2)), returned as rational and radical parts."""
+    exact_source = _normalize_decimal_literals(source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    def form(node: ast.AST) -> tuple[Fraction, Fraction] | None:
+        rational = _constant_fraction(node)
+        if rational is not None:
+            return rational, Fraction(0)
+        if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "sqrt"
+                and len(node.args) == 1
+                and not node.keywords
+                and _constant_fraction(node.args[0]) == 2
+            ):
+                return Fraction(0), Fraction(1)
+            return None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = form(node.operand)
+            if value is None or isinstance(node.op, ast.UAdd):
+                return value
+            return -value[0], -value[1]
+        if not isinstance(node, ast.BinOp):
+            return None
+        left = form(node.left)
+        right = form(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            return left[0] + right[0], left[1] + right[1]
+        if isinstance(node.op, ast.Sub):
+            return left[0] - right[0], left[1] - right[1]
+        if isinstance(node.op, ast.Mult):
+            return (
+                left[0] * right[0] + 2 * left[1] * right[1],
+                left[0] * right[1] + left[1] * right[0],
+            )
+        if isinstance(node.op, ast.Div) and right[1] == 0 and right[0] != 0:
+            return left[0] / right[0], left[1] / right[0]
+        if isinstance(node.op, ast.Pow):
+            exponent = _constant_fraction(node.right)
+            if exponent is None or exponent.denominator != 1 or not 0 <= exponent <= 16:
+                return None
+            result = (Fraction(1), Fraction(0))
+            for _ in range(exponent.numerator):
+                result = (
+                    result[0] * left[0] + 2 * result[1] * left[1],
+                    result[0] * left[1] + result[1] * left[0],
+                )
+            return result
+        return None
+
+    return form(tree.body)
+
+
 def _fraction_text(value: Fraction) -> str:
     if value.denominator == 1:
         return str(value.numerator)
@@ -6723,3 +6840,13 @@ def _lean_rational(value: Fraction) -> str:
     if value.denominator == 1:
         return f"({value.numerator} : ℝ)"
     return f"(({value.numerator} : ℝ) / {value.denominator})"
+
+
+def _lean_quadratic_surd(rational: Fraction, radical: Fraction) -> str:
+    if radical == 0:
+        return _lean_rational(rational)
+    radical_term = f"({_lean_rational(abs(radical))} * Real.sqrt 2)"
+    if rational == 0:
+        return f"(-{radical_term})" if radical < 0 else radical_term
+    operation = "-" if radical < 0 else "+"
+    return f"({_lean_rational(rational)} {operation} {radical_term})"
