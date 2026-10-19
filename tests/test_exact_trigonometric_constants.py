@@ -18,6 +18,9 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Sin[Pi/6]": "1/2",
             "Sin[Pi/5]": "sqrt(10 - 2*sqrt(5))/4",
             "Sin[Pi/10]": "(sqrt(5) - 1)/4",
+            "Sin[Pi/12]": "sqrt((1 - sqrt(3)/2)/2)",
+            "Sin[Pi/20]": "sqrt((1 - sqrt(10 + 2*sqrt(5))/4)/2)",
+            "Sin[Pi/24]": "sqrt((1 - sqrt((1 + sqrt(3)/2)/2))/2)",
             "Sin[Pi/8]": "sqrt(2 - sqrt(2))/2",
             "Sin[Pi/16]": "sqrt(2 - sqrt(2 + sqrt(2)))/2",
             "Sin[Pi/32]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2))))/2",
@@ -35,6 +38,7 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[2Pi/5]": "(sqrt(5) - 1)/4",
             "Sin[3Pi/10]": "(1 + sqrt(5))/4",
             "Cos[3Pi/10]": "sqrt(10 - 2*sqrt(5))/4",
+            "Sin[47Pi/96]": "sqrt((1 + sqrt((1 + sqrt((1 + sqrt((1 + sqrt(3)/2)/2))/2))/2))/2)",
             "Sin[31Pi/64]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2)))))/2",
             "Cos[63Pi/128]": "sqrt(2 - sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))))/2",
             "Cos[Pi]": "-1",
@@ -44,6 +48,9 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[Pi/6]": "sqrt(3)/2",
             "Cos[Pi/5]": "(1 + sqrt(5))/4",
             "Cos[Pi/10]": "sqrt(10 + 2*sqrt(5))/4",
+            "Cos[Pi/12]": "sqrt((1 + sqrt(3)/2)/2)",
+            "Cos[Pi/20]": "sqrt((1 + sqrt(10 + 2*sqrt(5))/4)/2)",
+            "Cos[Pi/40]": "sqrt((1 + sqrt((1 + sqrt(10 + 2*sqrt(5))/4)/2))/2)",
             "Cos[Pi/8]": "sqrt(2 + sqrt(2))/2",
             "Cos[Pi/16]": "sqrt(2 + sqrt(2 + sqrt(2)))/2",
             "Cos[Pi/32]": "sqrt(2 + sqrt(2 + sqrt(2 + sqrt(2))))/2",
@@ -90,6 +97,10 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Cos[Pi/128]",
             "Sin[31Pi/64]",
             "Cos[63Pi/128]",
+            "Sin[Pi/12]",
+            "Cos[Pi/20]",
+            "Sin[Pi/24]",
+            "Sin[47Pi/96]",
             "Sin[-Pi]",
             "Cos[Pi/8]",
             "Cos[-Pi/3]",
@@ -110,6 +121,7 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
         self.assertIsNone(prepare_computation("Tan[3Pi/8]", 10))
         self.assertIsNone(prepare_computation("Sin[Pi/8192]", 10))
         self.assertIsNone(prepare_computation("Cos[Pi/8192]", 10))
+        self.assertIsNone(prepare_computation("Sin[Pi/3072]", 10))
         self.assertIsNone(prepare_computation("Tan[Pi/2]", 10))
         self.assertIsNone(prepare_computation("Sin[pi/6]", 10))
 

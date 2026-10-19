@@ -68,6 +68,7 @@ _FINITE_SUM_PRODUCT = re.compile(
 )
 _TRIG_EXPAND_MAX_MULTIPLE = 12
 _MAX_DYADIC_PI_DENOMINATOR_EXPONENT = 12
+_MAX_RECURSIVE_HALF_ANGLE_STEPS = 8
 _EXACT_PI_TRIG_VALUES: dict[
     str, dict[int, tuple[str, str, str]]
 ] = {
@@ -249,6 +250,101 @@ def _exact_dyadic_pi_trig_value(
     return (display_result, lean_result, lemma_name), theorem_source
 
 
+def _exact_iterated_half_pi_trig_value(
+    function: str,
+    denominator: int,
+) -> tuple[tuple[str, str, str], str] | None:
+    if function not in {"sin", "cos"}:
+        return None
+
+    base_denominator = None
+    denominator_ratio = 0
+    for candidate in (6, 10):
+        candidate_ratio, remainder = divmod(denominator, candidate)
+        if (
+            candidate_ratio > 1
+            and remainder == 0
+            and candidate_ratio & (candidate_ratio - 1) == 0
+        ):
+            base_denominator = candidate
+            denominator_ratio = candidate_ratio
+            break
+    if base_denominator is None:
+        return None
+    half_angle_steps = denominator_ratio.bit_length() - 1
+    if not 1 <= half_angle_steps <= _MAX_RECURSIVE_HALF_ANGLE_STEPS:
+        return None
+
+    base_value = _EXACT_PI_TRIG_VALUES["cos"][base_denominator]
+    display_cosine = base_value[0]
+    lean_cosine = base_value[1]
+    base_lemma = base_value[2]
+    statements = [
+        f"  have hcos0 : Real.cos (Real.pi / {base_denominator}) = "
+        f"{lean_cosine} := {base_lemma}"
+    ]
+    previous_denominator = base_denominator
+    cosine_steps = half_angle_steps if function == "cos" else half_angle_steps - 1
+    for step in range(1, cosine_steps + 1):
+        current_denominator = base_denominator * (2**step)
+        next_cosine_lean = f"Real.sqrt ((1 + {lean_cosine}) / 2)"
+        next_cosine_display = f"sqrt((1 + {display_cosine})/2)"
+        statements.extend(
+            [
+                f"  have hcos{step} : Real.cos (Real.pi / {current_denominator}) = "
+                f"{next_cosine_lean} := by",
+                "    rw [show Real.pi / "
+                f"{current_denominator} = (Real.pi / {previous_denominator}) / 2 by",
+                "      norm_num",
+                "      all_goals ring]",
+                "    rw [Real.cos_half (by nlinarith [Real.pi_pos]) "
+                "(by nlinarith [Real.pi_pos]), hcos"
+                f"{step - 1}]",
+            ]
+        )
+        previous_denominator = current_denominator
+        lean_cosine = next_cosine_lean
+        display_cosine = next_cosine_display
+
+    if function == "cos":
+        display_result = display_cosine
+        lean_result = lean_cosine
+        final_proof = f"  exact hcos{half_angle_steps}"
+    else:
+        display_result = f"sqrt((1 - {display_cosine})/2)"
+        lean_result = f"Real.sqrt ((1 - {lean_cosine}) / 2)"
+        statements.extend(
+            [
+                f"  have hsin{half_angle_steps} : Real.sin (Real.pi / {denominator}) = "
+                f"{lean_result} := by",
+                "    rw [show Real.pi / "
+                f"{denominator} = (Real.pi / {previous_denominator}) / 2 by",
+                "      norm_num",
+                "      all_goals ring]",
+                "    rw [Real.sin_half_eq_sqrt (by positivity) "
+                "(by nlinarith [Real.pi_pos]), hcos"
+                f"{half_angle_steps - 1}]",
+            ]
+        )
+        final_proof = f"  exact hsin{half_angle_steps}"
+
+    lemma_name = f"wolfram_{function}_pi_div_{denominator}"
+    theorem_source = "\n".join(
+        [
+            "theorem "
+            f"{lemma_name} : Real.{function} (Real.pi / {denominator}) = "
+            f"{lean_result} := by",
+            *statements,
+            final_proof,
+        ]
+    )
+    base_support = _EXACT_PI_TRIG_SUPPORTING_LEMMAS.get(base_lemma, "")
+    return (
+        (display_result, lean_result, lemma_name),
+        f"{base_support}\n{theorem_source}",
+    )
+
+
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
     # Wolfram Language uses case-sensitive `Pi`; the shared parser reserves lowercase `pi`.
     if re.search(r"\bpi\b|π", code):
@@ -393,9 +489,17 @@ def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
             requested_function,
             requested_denominator,
         )
-        if dyadic_value is None:
+        if dyadic_value is not None:
+            value, source = dyadic_value
+            dynamic_supporting_lemmas[value[2]] = source
+            return value
+        halved_value = _exact_iterated_half_pi_trig_value(
+            requested_function,
+            requested_denominator,
+        )
+        if halved_value is None:
             return None
-        value, source = dyadic_value
+        value, source = halved_value
         dynamic_supporting_lemmas[value[2]] = source
         return value
 

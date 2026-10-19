@@ -44,15 +44,17 @@ configured key directly or as a bearer token.
 The CAG route also evaluates exact Sin, Cos, and selected Tan values for bounded
 rational multiples of Pi. It reduces the coefficient by integer periods and reflection,
 then accepts a base angle of zero or Pi/d. Sin and Cos also accept half-pi complements
-Pi/2 - Pi/d for d = 5, 8, 10, 16, 32, and powers of two through 4096. Sin and Cos
-support d = 2, 3, 4, 5, 6, 8, 10, 16, 32, and powers of two from 64 through 4096; Tan
-supports d = 3, 4, and 6, with poles rejected. The rational numerator and denominator
-are limited to 256 bits. Lean checks period, reflection, and cofunction identities plus
-the Mathlib base values; fifth and tenth angle values derive from Mathlib's cosine at
-Pi/5 theorem, while dyadic values use Mathlib's recursive half-angle theorem. For
-example, Sin[2 Pi/3] reduces to Sin[Pi - Pi/3], Sin[3 Pi/8] reduces to Cos[Pi/8],
-Sin[2 Pi/5] reduces to Cos[Pi/10], and Sin[31 Pi/64] reduces to Cos[Pi/64]. Other
-reduced angles and arbitrary numeric angles remain unsupported.
+Pi/2 - Pi/d for d = 5, 8, 10, 16, 32, powers of two through 4096, and up to eight
+successive halvings from Pi/6 or Pi/10. Sin and Cos support d = 2, 3, 4, 5, 6, 8, 10,
+16, 32, powers of two from 64 through 4096, and denominators 6*2^k or 10*2^k for
+1 <= k <= 8; Tan supports d = 3, 4, and 6, with poles rejected. The rational numerator
+and denominator are limited to 256 bits. Lean checks period, reflection, and cofunction
+identities plus the Mathlib base values; fifth and tenth angle values derive from
+Mathlib's cosine-at-Pi/5 theorem, while the dyadic and iterated half-angle values use
+Mathlib's half-angle theorems. For example, Sin[2 Pi/3] reduces to Sin[Pi - Pi/3],
+Sin[3 Pi/8] reduces to Cos[Pi/8], Sin[2 Pi/5] reduces to Cos[Pi/10], Sin[Pi/12] is
+derived from Pi/6, and Sin[31 Pi/64] reduces to Cos[Pi/64]. Other reduced angles and
+arbitrary numeric angles remain unsupported.
 
 The CAG endpoint and `/v2/query?verify=true` also support finite `Sum` and `Product`
 over inclusive integer bounds when the integrand and result fit the rational-polynomial
@@ -207,7 +209,7 @@ The documented parameter groups are:
 |---|---|---|---|
 | Request and identity | `input`, `appid`, URL encoding; GET `/v2/query` | `input` and URL encoding; service bearer auth is used instead of an `appid` query credential; no Wolfram credential is accepted | P0 |
 | Input syntax | Free-form text; math input may use presentation LaTeX or MathML | Safe native expressions plus bounded presentation-LaTeX and presentation-MathML subsets, explicit SymPy operations, and a bounded polynomial comparison grammar on `/v1/prove-formula`; bounded natural-language templates cover common supported math operations, with integer-literal bounds for sums/products and explicit parentheses for ambiguous function scope; broad language scanning and general TeX/MathML remain unsupported | P0/P3 |
-| Result envelope | `output=xml/json`; query-level status and metadata such as `success`, `error`, `numpods`, `datatypes`, timing, timeouts, version, and recalculation information | XML and JSON `queryresult` envelopes with core metadata, aggregate timing, and stable query IDs. Stage-specific timing metadata is absent. Scan-timeout results can include the bounded, process-local recalculation extension described below | P0 |
+| Result envelope | `output=xml/json`; query-level status and metadata such as `success`, `error`, `numpods`, `datatypes`, timing, timeouts, version, and recalculation information | XML and JSON `queryresult` envelopes include documented aggregate `timing`, `parsetiming`, and `parsetimedout` fields with stable query IDs. The reference does not define separate scan- or format-duration fields. Scan-timeout results can include the bounded, process-local recalculation extension described below | P0 |
 | Pod model | Ordered pods with `id`, `title`, `scanner`, `position`, `primary`, per-pod error, subpods, and supplemental elements | Input, Result, and selected Data pods use the documented core fields; source records and retrieved data are exposed as additive elements; broad supplemental families remain absent | P0 |
 | Pod selection | `includepodid`, `excludepodid`, `podtitle` (including `*`), `podindex`, `scanner`; repeated values supported | Implemented over locally generated math and provider pods; repeated and comma-separated values accepted | P1 |
 | Output representation | Per-pod `format`: `image`, `imagemap`, `plaintext`, `minput`, `moutput`, `cell`, `mathml`, `sound`, `wav`; multiple format values; default `plaintext,image` | The default is aligned. Mathematical subpods return inline SVG images for Input, Result, and DecimalApproximation in JSON or `<img>` elements in XML. Seven-day Open-Meteo forecasts include a daily temperature and precipitation chart; other provider data subpods receive text SVGs. Formula images structurally render a bounded presentation-MathML subset and fall back to escaped text for unsupported structures; plots show sampled graph paths and honor `plotwidth` (default 200; local range 100–1,600). Plot `moutput` returns its reproducing `Plot[...]` expression. Other provider-specific charts/maps, image maps, cell, sound, and WAV remain unavailable | P2 |
@@ -234,7 +236,7 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 1. **Done:** move interpretation details to `/v1/interpret` and reserve `/v2/query` for the Full Results-style envelope.
 2. **Done for local access:** retain this service's bearer credential; do not accept or require a Wolfram AppID or send user queries to Wolfram.
-3. **Initial slice:** validate `input`, `output`, and supported `format` names with stable query-level errors. Parse, scan, cumulative format, per-pod format, and total time controls are accepted; active rendering is not preempted and stage timing fields remain absent.
+3. **Initial slice:** validate `input`, `output`, and supported `format` names with stable query-level errors. Parse, scan, cumulative format, per-pod format, and total time controls are accepted; documented `timing`, `parsetiming`, and `parsetimedout` fields are returned. Active rendering is not preempted.
 4. **Initial slice:** version the query envelope and pod/subpod model; preserve typed assumptions and symbolic evidence as additive fields.
 5. **Initial slice:** XML and JSON are rendered from the same response model. Unknown future result elements are not yet consumed from external providers because no WA provider is integrated.
 
@@ -253,7 +255,7 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 1. Extend the bounded presentation-LaTeX and MathML parsers and broaden structural formula rendering. Open-Meteo seven-day forecasts now have a local chart; other provider charts/maps, image maps, cell-like render payloads, and audio remain future work where a local backend can produce them safely.
 2. Add location and preferred units as request context. Make IP-derived location opt-in and avoid retaining the caller's IP.
 3. **Initial slice:** return and accept `DecimalApproximation__More digits` / `Fewer digits` state inputs, including repeated values and `n@` shorthand. Extend states to other mathematical and data pods, subpod states, and stateful paging.
-4. **Initial slice:** `parsetimeout`, `scantimeout`, per-pod `podtimeout`, cumulative `formattimeout`, `totaltimeout`, asynchronous primary-pod and complete-query polling, and a bounded recalculation URL are implemented. Both async URLs share one computation; the query URL returns all final pods together. Formatting budgets omit pods whose bounded render operation completes over budget; they do not interrupt a render in progress. Recalculation reruns the single result request with a larger budget and does not preserve partial solver state. Still needed: interruptible formatting, detailed format-stage timings, progressive per-pod delivery, and partial scanner results.
+4. **Initial slice:** `parsetimeout`, `scantimeout`, per-pod `podtimeout`, cumulative `formattimeout`, `totaltimeout`, asynchronous primary-pod and complete-query polling, and a bounded recalculation URL are implemented. Both async URLs share one computation; the query URL returns all final pods together. Formatting budgets omit pods whose bounded render operation completes over budget; they do not interrupt a render in progress. Recalculation reruns the single result request with a larger budget and does not preserve partial solver state. Still needed: interruptible formatting, progressive per-pod delivery, and partial scanner results. Internal per-stage instrumentation may be useful operationally, but separate scan/format durations are not defined by the referenced response contract.
 5. **Done (initial slice):** add `width` for text-oriented SVGs and `maxwidth` for structural mathematical SVGs, each with a bounded 100–1,600 pixel range and a 500 pixel default; `mag` scales structural math content from 0.5 to 2.0 with a 1.0 default. Plots and graphics remain controlled by `plotwidth`; sizing controls for additional renderer families remain.
 
 ### P3 — broaden independently sourced coverage
