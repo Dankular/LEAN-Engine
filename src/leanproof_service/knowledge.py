@@ -26,7 +26,7 @@ class KnowledgeRequest(StrictModel):
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
     property_id: Literal[
-        "P17", "P30", "P36", "P37", "P38", "P1082", "P2044", "P2046",
+        "P17", "P30", "P36", "P37", "P38", "P625", "P1082", "P2044", "P2046",
         "P2131", "P4010", "P2132", "P2299"
     ] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
@@ -318,6 +318,7 @@ def _wikidata_property(
         "P36": "capital",
         "P37": "official language",
         "P38": "currency",
+        "P625": "coordinate location",
         "P1082": "population",
         "P2044": "elevation above sea level",
         "P2046": "area",
@@ -388,6 +389,7 @@ def _wikidata_property(
         "P36": "capitals",
         "P37": "languages",
         "P38": "currencies",
+        "P625": "coordinates",
         "P1082": "population",
         "P2044": "elevation",
         "P2046": "area",
@@ -404,7 +406,9 @@ def _wikidata_property(
         claims = entity.get("claims", {})
         if isinstance(claims, dict):
             claims = claims.get(property_id, [])
-        if property_id == "P1082":
+        if property_id == "P625":
+            values = _wikidata_coordinate_values(claims)
+        elif property_id == "P1082":
             values = _wikidata_population_values(claims)
         elif property_id in _WIKIDATA_QUANTITY_PROPERTIES:
             values = _wikidata_quantity_values(claims, property_id)
@@ -483,19 +487,25 @@ def _wikidata_property(
                 )
 
     selection_rule = (
-        "Wikidata entity search order; all returned candidates are preserved. Preferred "
-        "population statements are used when present; otherwise the latest dated statements "
-        "are returned with ties preserved."
-        if property_id == "P1082"
+        "Wikidata entity search order; all returned candidates and non-deprecated coordinate "
+        "statements are preserved with latitude, longitude, precision, globe, rank, references, "
+        "and bounded qualifiers."
+        if property_id == "P625"
         else (
-            "Wikidata entity search order; preferred quantity statements are used when present, "
-            "otherwise the latest dated statements are returned with ties preserved; amount, "
-            "unit, bounds, rank, reference counts, and bounded qualifier details are preserved."
-            if property_id in _WIKIDATA_QUANTITY_PROPERTIES
+            "Wikidata entity search order; all returned candidates are preserved. Preferred "
+            "population statements are used when present; otherwise the latest dated statements "
+            "are returned with ties preserved."
+            if property_id == "P1082"
             else (
-                "Wikidata entity search order; all returned candidates and non-deprecated "
-                f"{property_name} statements are preserved, including rank, references, "
-                "and time qualifiers where available."
+                "Wikidata entity search order; preferred quantity statements are used when present, "
+                "otherwise the latest dated statements are returned with ties preserved; amount, "
+                "unit, bounds, rank, reference counts, and bounded qualifier details are preserved."
+                if property_id in _WIKIDATA_QUANTITY_PROPERTIES
+                else (
+                    "Wikidata entity search order; all returned candidates and non-deprecated "
+                    f"{property_name} statements are preserved, including rank, references, "
+                    "and time qualifiers where available."
+                )
             )
         )
     )
@@ -666,6 +676,71 @@ def _wikidata_quantity_values(
         latest = max(str(item["point_in_time"]) for item in dated)
         eligible = [item for item in dated if item["point_in_time"] == latest]
     return eligible[:5]
+
+
+def _wikidata_coordinate_values(claims: object) -> list[dict[str, object]]:
+    statements = claims
+    if isinstance(statements, dict):
+        statements = statements.get("P625", statements.get("claims", []))
+    if not isinstance(statements, list):
+        return []
+
+    values: list[dict[str, object]] = []
+    for statement in statements:
+        if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+            continue
+        main_snak = statement.get("mainsnak")
+        if not isinstance(main_snak, dict) or main_snak.get("snaktype") != "value":
+            continue
+        datavalue = main_snak.get("datavalue")
+        coordinate = datavalue.get("value") if isinstance(datavalue, dict) else None
+        if not isinstance(coordinate, dict):
+            continue
+        latitude = coordinate.get("latitude")
+        longitude = coordinate.get("longitude")
+        if (
+            isinstance(latitude, bool)
+            or not isinstance(latitude, (int, float))
+            or not -90 <= latitude <= 90
+            or not math.isfinite(latitude)
+            or isinstance(longitude, bool)
+            or not isinstance(longitude, (int, float))
+            or not -180 <= longitude <= 180
+            or not math.isfinite(longitude)
+        ):
+            continue
+        observation: dict[str, object] = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "rank": statement.get("rank", "normal"),
+        }
+        precision = coordinate.get("precision")
+        if (
+            isinstance(precision, (int, float))
+            and not isinstance(precision, bool)
+            and math.isfinite(precision)
+            and precision > 0
+        ):
+            observation["precision"] = precision
+        globe = coordinate.get("globe")
+        if isinstance(globe, str) and len(globe) <= 512:
+            observation["globe"] = globe
+            globe_match = re.search(r"/entity/(Q[1-9][0-9]*)$", globe)
+            if globe_match:
+                observation["globe_id"] = globe_match.group(1)
+        statement_id = statement.get("id")
+        if isinstance(statement_id, str):
+            observation["statement_id"] = statement_id
+        references = statement.get("references")
+        if isinstance(references, list):
+            observation["reference_count"] = len(references)
+        qualifiers = _wikidata_qualifier_values(statement)
+        if qualifiers:
+            observation["qualifiers"] = qualifiers
+        values.append(observation)
+
+    preferred = [item for item in values if item.get("rank") == "preferred"]
+    return (preferred or values)[:5]
 
 
 def _wikidata_qualifier_values(statement: dict[str, object]) -> list[dict[str, object]]:

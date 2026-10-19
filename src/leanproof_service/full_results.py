@@ -241,6 +241,8 @@ def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str
         return "Elevation", "Elevation", "Data"
     if property_id == "P2046":
         return "Area", "Area", "Data"
+    if property_id == "P625":
+        return "Coordinates", "Coordinates", "Data"
     if property_id == "P2131":
         return "Nominal GDP", "NominalGDP", "Data"
     if property_id == "P4010":
@@ -272,6 +274,7 @@ def _wikidata_provider_presentation(
         "P38": ("Currency", "Currency", "Economics"),
         "P2044": ("Elevation", "Elevation", "Geography"),
         "P2046": ("Area", "Area", "Geography"),
+        "P625": ("Coordinates", "Coordinates", "Geography"),
         "P2131": ("Nominal GDP", "NominalGDP", "Economics"),
         "P4010": ("GDP at purchasing power parity", "GDP_PPP", "Economics"),
         "P2132": ("Nominal GDP per capita", "GDPPerCapita", "Economics"),
@@ -1583,6 +1586,22 @@ def _provider_request(
             query=query, max_results=3,
         )
 
+    coordinates = re.fullmatch(
+        r"\s*(?:(?:what\s+are|what\s+is|give\s+me|tell\s+me)\s+)?(?:the\s+)?"
+        r"(?:GPS\s+|geographic(?:al)?\s+)?(?:coordinates|coordinate\s+location)\s+"
+        r"(?:of|for|in)\s+(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.IGNORECASE,
+    )
+    if coordinates:
+        query = coordinates.group(1).strip()
+        if not query:
+            raise ProviderContextNeeded("coordinate lookup needs a place or entity name")
+        return _knowledge_request(
+            provider="wikidata", operation="property", property_id="P625",
+            query=query, max_results=3,
+        )
+
     official_languages = re.fullmatch(
         r"\s*(?:(?:what\s+is|what\s+are|what's|name)\s+)?(?:the\s+)?"
         r"official\s+languages?\s+(?:(?:of|in)\s+)?(.+?)\s*[?.!]*\s*",
@@ -2115,6 +2134,7 @@ def _execute_provider_query(
         "P38": "currency",
         "P2044": "elevation above sea level",
         "P2046": "area",
+        "P625": "coordinates",
         "P2131": "nominal GDP",
         "P4010": "GDP at purchasing-power parity",
         "P2132": "nominal GDP per capita",
@@ -2124,6 +2144,7 @@ def _execute_provider_query(
         "P17": "Country P17 is intended for geographic places, not people.",
         "P30": "Wikidata may list multiple continents when a subject spans continents.",
         "P2044": "Elevation measurements can vary by source and unit; inspect the reported unit and statement qualifiers.",
+        "P625": "Coordinate statements include the reported globe and precision; check both when interpreting the values.",
     }.get(wikidata_property_id)
     payload = _query_envelope(
         success=not (format_budget.timed_out_pods and not filtered),
@@ -2207,6 +2228,44 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             description = entity.get("description")
             rows.append(f"{label} [{identifier}]: {description}" if description else f"{label} [{identifier}]")
         return "\n".join(rows) if rows else "No matching entities were found."
+    if (
+        provider == "wikidata"
+        and isinstance(data, dict)
+        and data.get("property_id") == "P625"
+    ):
+        matches = data.get("matches")
+        rows = []
+        if isinstance(matches, list):
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                label = str(match.get("label") or match.get("id") or "Entity")
+                identifier = str(match.get("id") or "")
+                prefix = f"{label} [{identifier}]" if identifier else label
+                statements = []
+                coordinates = match.get("coordinates")
+                if isinstance(coordinates, list):
+                    for value in coordinates:
+                        if not isinstance(value, dict):
+                            continue
+                        latitude = value.get("latitude")
+                        longitude = value.get("longitude")
+                        if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+                            continue
+                        position = f"{latitude}, {longitude}"
+                        precision = value.get("precision")
+                        if isinstance(precision, (int, float)):
+                            position += f" (precision {precision}°)"
+                        globe_id = value.get("globe_id")
+                        globe = value.get("globe")
+                        if isinstance(globe_id, str):
+                            position += f"; globe {globe_id}"
+                        elif isinstance(globe, str):
+                            position += f"; globe {globe}"
+                        statements.append(position)
+                detail = "; ".join(statements) or "no coordinate statement found"
+                rows.append(f"Coordinates: {prefix}: {detail}")
+        return "\n".join(rows) if rows else "No Wikidata entity matches were found."
     wikidata_quantities = {
         "P2044": ("elevation", "Elevation above sea level"),
         "P2046": ("area", "Area"),
