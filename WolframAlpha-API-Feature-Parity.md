@@ -96,15 +96,18 @@ and interval-integral result. Variable bases and nonlinear definite arguments
 remain outside this slice.
 
 `Solve[lhs == rhs, variable, Reals]` supports univariate rational-coefficient
-polynomials of degree at most four when they factor completely over the rationals,
-plus exact real quadratic-radical roots and quadratics with no real roots. Nonzero
+polynomials through degree eight when they factor completely over the rationals.
+For degrees five through eight, each coefficient numerator and denominator is limited
+to 128 bits; degrees at most four retain the 256-bit coefficient bound. Exact real
+quadratic-radical roots and quadratics with no real roots are also supported. Nonzero
 constant equations are also supported. `Solve[{eq1, ..., eqm}, {x1, ..., xn}, Reals]`
 supports rational linear systems with one to four equations and two to four variables.
 It returns unique solutions, parametric rules for consistent underdetermined systems,
 or an empty set when the system is inconsistent. Nonlinear systems or systems with
 more than four equations or variables remain unsupported, as do complex-domain solving,
-degree greater than four, and degree-three or degree-four polynomials without a complete
-rational factorization. Lean checks each returned solution set against the submitted
+degree greater than eight, degree-three through degree-eight polynomials without a
+complete rational factorization, and degree-five through degree-eight inputs that exceed
+the coefficient bound. Lean checks each returned solution set against the submitted
 equation or system.
 
 `D[ArcSin[argument], x]` and `D[ArcCos[argument], x]` now require the explicit real

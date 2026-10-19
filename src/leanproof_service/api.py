@@ -507,12 +507,13 @@ def capabilities() -> dict[str, object]:
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",
                     "system_syntax": "Solve[{eq1,...,eqm}, {x1,...,xn}, Reals] with 1 <= m <= 4 and 2 <= n <= 4",
-                    "domain": "univariate rational-coefficient polynomials of degree at most four with complete rational factorization, plus exact real quadratic-radical roots and quadratics with no real roots, nonzero constant equations, and rational linear systems with 1 to 4 equations and 2 to 4 variables, returning unique, parametric, or empty solution sets",
+                    "domain": "univariate rational-coefficient polynomials through degree eight when they factor completely over the rationals (coefficients are limited to 128 bits above degree four), plus exact real quadratic-radical roots and quadratics with no real roots, nonzero constant equations, and rational linear systems with 1 to 4 equations and 2 to 4 variables, returning unique, parametric, or empty solution sets",
                     "proof": "Lean proves the returned solution set is equivalent to the submitted equation or system over the reals and audits axioms",
                     "unsupported": [
                         "complex-domain solving",
                         "nonlinear systems or systems with more than four equations or variables",
-                        "degree above four",
+                        "degree above eight",
+                        "degree-five through degree-eight polynomials without complete rational factorization or with coefficient components above 128 bits",
                         "degree-three or degree-four polynomials without complete rational factorization",
                     ],
                 },
@@ -1301,8 +1302,9 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
         "Supported operations include bounded arithmetic and real calculus, Lean-checked TrigExpand, "
-        "finite polynomial Sum/Product, rational-function limits, and selected exact Pi-bound "
-        "trigonometric integrals. Each supported result is checked through a generated Lean proof."
+        "finite polynomial Sum/Product, rational-function limits, selected exact Pi-bound "
+        "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
+        "checked through a generated Lean proof."
     ),
     openapi_extra={
         "requestBody": {

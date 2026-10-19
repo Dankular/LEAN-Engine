@@ -4455,7 +4455,7 @@ def _prepare_real_polynomial_solve(
         return None
     lhs_degree = _bounded_polynomial_degree(lhs_tree.body, variable)
     rhs_degree = _bounded_polynomial_degree(rhs_tree.body, variable)
-    if lhs_degree is None or rhs_degree is None or max(lhs_degree, rhs_degree) > 4:
+    if lhs_degree is None or rhs_degree is None or max(lhs_degree, rhs_degree) > 8:
         return None
 
     lhs_lean, lhs_symbols = _render_polynomial_lean(exact_lhs)
@@ -4476,12 +4476,13 @@ def _prepare_real_polynomial_solve(
         polynomial = _sympy.Poly(lhs_expression - rhs_expression, symbol, domain=_sympy.QQ)
     except (TypeError, ValueError, _sympy.PolynomialError):
         return None
-    if polynomial.is_zero or polynomial.degree() > 4:
+    if polynomial.is_zero or polynomial.degree() > 8:
         return None
+    coefficient_bit_limit = 128 if polynomial.degree() > 4 else 256
     for coefficient in polynomial.all_coeffs():
         if (
-            abs(int(coefficient.p)).bit_length() > 256
-            or int(coefficient.q).bit_length() > 256
+            abs(int(coefficient.p)).bit_length() > coefficient_bit_limit
+            or int(coefficient.q).bit_length() > coefficient_bit_limit
         ):
             return None
 
@@ -4566,6 +4567,9 @@ def _prepare_real_polynomial_solve(
             else:
                 quadratic_coefficients = (leading, linear, constant)
         else:
+            # Above quadratics, only return a solution set when SymPy found every
+            # real root as an exact rational. Lean checks the resulting set
+            # against the original polynomial before it is returned.
             return None
 
     polynomial_lean = f"({lhs_lean}) - ({rhs_lean})"
