@@ -377,7 +377,13 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
         )
         if rational_sqrt is not None:
             return rational_sqrt
-        return _prepare_affine_pi_numeric_approximation(arguments[0], precision)
+        affine_pi = _prepare_affine_pi_numeric_approximation(arguments[0], precision)
+        if affine_pi is not None:
+            return affine_pi
+        return _prepare_exact_trig_rational_numeric_approximation(
+            arguments[0],
+            precision,
+        )
 
     exact_trig_constant = _prepare_exact_pi_trigonometric_constant(code)
     if exact_trig_constant is not None:
@@ -724,6 +730,80 @@ theorem wolfram_language_compute :
     )
 
 
+def _prepare_exact_trig_rational_numeric_approximation(
+    expression_source: str,
+    precision: int,
+) -> Computation | None:
+    exact_computation = _prepare_exact_pi_trigonometric_expression(expression_source)
+    if exact_computation is None:
+        return None
+    exact_value = _parse_exact_rational(exact_computation.display_result)
+    equation = _exact_computation_equation_lean(exact_computation)
+    if exact_value is None or equation is None:
+        return None
+    exact_lhs, _exact_rhs = equation
+
+    numeric_bound = _prepare_rational_numeric_approximation(
+        _fraction_text(exact_value),
+        precision,
+    )
+    if numeric_bound is None:
+        return None
+
+    exact_source_lines = exact_computation.lean_source.splitlines()
+    numeric_source_lines = numeric_bound.lean_source.splitlines()
+    imports = list(dict.fromkeys(
+        line for line in exact_source_lines + numeric_source_lines
+        if line.startswith("import ")
+    ))
+    exact_body = [
+        line for line in exact_source_lines
+        if not line.startswith("import ")
+        and line != "#print axioms wolfram_language_compute"
+    ]
+    exact_body = [
+        re.sub(
+            r"^theorem wolfram_language_compute\s*:",
+            "theorem wolfram_exact_trigonometric_expression:",
+            line,
+            count=1,
+        )
+        for line in exact_body
+    ]
+    numeric_body = [
+        line for line in numeric_source_lines
+        if not line.startswith("import ")
+        and line != "#print axioms wolfram_language_compute"
+    ]
+    numeric_body = [
+        re.sub(
+            r"^theorem wolfram_language_compute :",
+            "theorem wolfram_numeric_error_bound :",
+            line,
+            count=1,
+        )
+        for line in numeric_body
+    ]
+    theorem = f"""theorem wolfram_language_compute :
+  |{exact_lhs} - {_lean_rational(Fraction(Decimal(numeric_bound.display_result)))}| ≤ {_lean_rational(Fraction(numeric_bound.numeric_error_bound))} := by
+  have h_exact : {exact_lhs} = {_lean_rational(exact_value)} :=
+    wolfram_exact_trigonometric_expression
+  rw [h_exact]
+  exact wolfram_numeric_error_bound
+
+#print axioms wolfram_language_compute
+"""
+    source = "\n".join(
+        [*imports, "", *exact_body, "", *numeric_body, "", theorem]
+    )
+    return Computation(
+        numeric_bound.display_result,
+        source,
+        numeric_precision=precision,
+        numeric_error_bound=numeric_bound.numeric_error_bound,
+    )
+
+
 def _rounding_error_bound(value: Fraction, precision: int) -> Fraction:
     if value == 0:
         return Fraction(0)
@@ -1007,6 +1087,13 @@ def _exact_tangent_from_sine_cosine(
 
 
 def _exact_computation_result_lean(computation: Computation) -> str | None:
+    equation = _exact_computation_equation_lean(computation)
+    return equation[1] if equation is not None else None
+
+
+def _exact_computation_equation_lean(
+    computation: Computation,
+) -> tuple[str, str] | None:
     match = re.search(
         r"(?s)theorem\s+wolfram_language_compute\s*:\s*(.*?)\s*:=\s*by\b",
         computation.lean_source,
@@ -1017,7 +1104,10 @@ def _exact_computation_result_lean(computation: Computation) -> str | None:
     equality_index = statement.rfind(" = ")
     if equality_index < 0:
         return None
-    return statement[equality_index + 3:].strip()
+    return (
+        statement[:equality_index].strip(),
+        statement[equality_index + 3:].strip(),
+    )
 
 
 def _prepare_exact_pi_trigonometric_expression(

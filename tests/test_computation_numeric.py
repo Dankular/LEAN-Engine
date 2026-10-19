@@ -43,6 +43,9 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[Sqrt[2], 3]": ("1.41", 3, "1/200"),
             "N[-Sqrt[2], 3]": ("-1.41", 3, "1/200"),
             "N[Sqrt[1/100], 3]": ("0.1", 3, "1/2000"),
+            "N[Sin[Pi/6]]": ("0.5", 16, "1/20000000000000000"),
+            "N[Cos[Pi], 3]": ("-1", 3, "1/200"),
+            "N[Sin[Pi/6] + Cos[Pi/3], 3]": ("1", 3, "1/200"),
         }
         for code, expected in cases.items():
             with self.subTest(code=code):
@@ -119,6 +122,30 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         self.assertEqual(evidence["axiom_audit"]["status"], "passed")
         self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
         self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
+
+    def test_exact_trigonometric_numeric_result_composes_lean_proofs(self) -> None:
+        cases = {
+            "N[Sin[Pi/6], 20]": ("0.5", 20),
+            "N[Sin[Pi/6] + Cos[Pi/3], 3]": ("1", 3),
+        }
+        for code, (expected_value, expected_precision) in cases.items():
+            with self.subTest(code=code):
+                response = self.client.post(
+                    "/api/cag/v1/WolframLanguageCompute",
+                    json={"code": code, "timeConstraint": 60},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                evidence = response.json()["evidence"]
+                approximation = evidence["numeric_approximation"]
+                self.assertEqual(approximation["value"], expected_value)
+                self.assertEqual(
+                    approximation["precision_significant_digits"],
+                    expected_precision,
+                )
+                self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+                self.assertIn("wolfram_exact_trigonometric_expression", evidence["lean_source"])
 
     def test_negative_pi_multiple_is_checked(self) -> None:
         response = self.client.post(
