@@ -273,6 +273,53 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
         )
         self.assertEqual(assumption["selected"], "coordinate:spherical-3d")
 
+    def test_curl_is_lean_checked_in_all_three_coordinate_charts(self) -> None:
+        cases = [
+            {
+                "input": "curl(0,0,y)",
+                "expected": "(1, 0, 0)",
+                "domain": [],
+            },
+            {
+                "input": "curl(0,0,theta)",
+                "assumption": "coordinate:cylindrical-3d",
+                "expected": "(1/rho, 0, 0)",
+                "domain": ["rho > 0"],
+            },
+            {
+                "input": "curl(0,0,phi)",
+                "assumption": "coordinate:spherical-3d",
+                "expected": "(phi*cos(theta)/(r*sin(theta)), -phi/r, 0)",
+                "domain": ["r > 0", "sin(theta) != 0"],
+            },
+        ]
+        for case in cases:
+            params = {
+                "input": case["input"],
+                "verify": "true",
+                "output": "json",
+            }
+            if "assumption" in case:
+                params["assumption"] = case["assumption"]
+            with self.subTest(input=case["input"]):
+                response = self.client.get(
+                    "/v2/query", params=params, headers=self.headers
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                queryresult = response.json()["queryresult"]
+                result = next(
+                    pod for pod in queryresult["pods"] if pod["id"] == "Result"
+                )
+                self.assertEqual(result["subpods"][0]["plaintext"], case["expected"])
+                self.assertEqual(queryresult["evidence"]["domain_conditions"], case["domain"])
+                verification = queryresult["evidence"]["formal_verification"]
+                self.assertEqual(verification["status"], "checked", verification)
+                self.assertEqual(verification["claim_type"], "coordinate_curl")
+                self.assertTrue(verification["verified"])
+                self.assertEqual(verification["result_match"], True)
+                self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
 
 if __name__ == "__main__":
     unittest.main()

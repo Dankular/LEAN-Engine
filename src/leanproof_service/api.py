@@ -167,7 +167,7 @@ def capabilities() -> dict[str, object]:
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
             "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
-            "coordinate_gradient",
+            "coordinate_gradient", "coordinate_curl",
         ],
         "symbolic_coordinate_divergence": {
             "status": "implemented_initial_slice",
@@ -179,6 +179,12 @@ def capabilities() -> dict[str, object]:
             "status": "implemented_initial_slice",
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
             "scalar_field": "rational-coefficient polynomial, total degree at most 16",
+            "proof_status": "verify=true adds Lean-checked component derivatives and chart factors with an axiom audit; English interpretation is not proved",
+        },
+        "symbolic_coordinate_curl": {
+            "status": "implemented_initial_slice",
+            "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
+            "components": "three rational-coefficient polynomial components, total degree at most 16, in the orthonormal coordinate basis",
             "proof_status": "verify=true adds Lean-checked component derivatives and chart factors with an axiom audit; English interpretation is not proved",
         },
         "numeric_evaluation": {

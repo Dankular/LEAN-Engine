@@ -25,6 +25,7 @@ from .computation import (
     _real_sympy_expression,
     _split_top_level_commas,
     check_computation,
+    prepare_coordinate_curl,
     prepare_coordinate_divergence,
     prepare_coordinate_gradient,
     prepare_computation,
@@ -1019,11 +1020,14 @@ def _verify_query_computation(
     coordinate_operation = typed_ast.get("operation")
     is_coordinate_divergence = is_coordinate_calculus and coordinate_operation == "divergence"
     is_coordinate_gradient = is_coordinate_calculus and coordinate_operation == "gradient"
+    is_coordinate_curl = is_coordinate_calculus and coordinate_operation == "curl"
     code = (
         "CoordinateDivergence"
         if is_coordinate_divergence
         else "CoordinateGradient"
         if is_coordinate_gradient
+        else "CoordinateCurl"
+        if is_coordinate_curl
         else _query_computation_code(request)
     )
     if code is None:
@@ -1044,6 +1048,13 @@ def _verify_query_computation(
     elif is_coordinate_gradient:
         computation = prepare_coordinate_gradient(
             str(typed_ast.get("expression", "")),
+            str(typed_ast.get("coordinate_system", "")),
+            typed_ast.get("derivative_terms", []),
+            typed_ast.get("resolved_components", []),
+        )
+    elif is_coordinate_curl:
+        computation = prepare_coordinate_curl(
+            typed_ast.get("components", []),
             str(typed_ast.get("coordinate_system", "")),
             typed_ast.get("derivative_terms", []),
             typed_ast.get("resolved_components", []),
@@ -1093,7 +1104,7 @@ def _verify_query_computation(
             "reason": "The numeric backend did not produce a certified approximation bound.",
         }
 
-    if request.operation == "numeric" or is_coordinate_gradient:
+    if request.operation == "numeric" or is_coordinate_gradient or is_coordinate_curl:
         query_normalized = candidate_normalized = None
     elif request.operation == "solve" and request.variable is not None:
         query_normalized = _symbolic_solve_signature(
@@ -1142,6 +1153,8 @@ def _verify_query_computation(
             if is_coordinate_divergence
             else "coordinate_gradient"
             if is_coordinate_gradient
+            else "coordinate_curl"
+            if is_coordinate_curl
             else _query_claim_type(request, code)
         ),
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
@@ -1163,10 +1176,16 @@ def _verify_query_computation(
                     "chart factors in the chosen Cartesian3D, Cylindrical3D, or Spherical3D "
                     "chart, under the listed chart-domain conditions"
                     if is_coordinate_gradient
-                    else
-                "checks the exact selected formula and result under the listed real-parameter "
-                "and domain conditions; "
-                "it does not verify the English language-to-formula translation"
+                    else (
+                        "Lean proves the selected polynomial curl components in the chosen "
+                        "Cartesian3D, Cylindrical3D, or Spherical3D orthonormal chart, under "
+                        "the listed chart-domain conditions"
+                        if is_coordinate_curl
+                        else
+                        "checks the exact selected formula and result under the listed real-parameter "
+                        "and domain conditions; "
+                        "it does not verify the English language-to-formula translation"
+                    )
                 )
             )
         ),
@@ -2978,18 +2997,25 @@ def _prepare_query(
             deadline=deadline,
         )
         typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
-        if (
-            typed_ast.get("node") == "vector_calculus_operation"
-            and typed_ast.get("operation") == "gradient"
-        ):
-            symbolic_request = SymbolicRequest(
-                operation="coordinate_gradient",
-                expression=str(typed_ast.get("expression", "")),
-                coordinate_system=str(typed_ast.get("coordinate_system", "")),
-                time_limit_seconds=time_limit_seconds,
-                numeric_precision=numeric_precision,
-            )
-            return interpreted, symbolic_request
+        if typed_ast.get("node") == "vector_calculus_operation":
+            if typed_ast.get("operation") == "gradient":
+                symbolic_request = SymbolicRequest(
+                    operation="coordinate_gradient",
+                    expression=str(typed_ast.get("expression", "")),
+                    coordinate_system=str(typed_ast.get("coordinate_system", "")),
+                    time_limit_seconds=time_limit_seconds,
+                    numeric_precision=numeric_precision,
+                )
+                return interpreted, symbolic_request
+            if typed_ast.get("operation") == "curl":
+                symbolic_request = SymbolicRequest(
+                    operation="coordinate_curl",
+                    components=typed_ast.get("components", []),
+                    coordinate_system=str(typed_ast.get("coordinate_system", "")),
+                    time_limit_seconds=time_limit_seconds,
+                    numeric_precision=numeric_precision,
+                )
+                return interpreted, symbolic_request
         expression = str(interpreted["interpretation"]["expression"])
         symbolic_request = SymbolicRequest(
             operation="simplify",

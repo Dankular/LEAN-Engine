@@ -6954,6 +6954,213 @@ import Mathlib.Tactic.Ring"""
     )
 
 
+def prepare_coordinate_curl(
+    components: list[str],
+    coordinate_system: str,
+    derivative_terms: list[str],
+    expected_components: list[str],
+) -> Computation | None:
+    """Prepare a Lean theorem for a polynomial curl in one selected 3D chart."""
+    if (
+        len(components) != 3
+        or len(derivative_terms) != 6
+        or len(expected_components) != 3
+        or coordinate_system not in {"Cartesian3D", "Cylindrical3D", "Spherical3D"}
+    ):
+        return None
+
+    if coordinate_system == "Cartesian3D":
+        derivative_sources = [
+            (components[2], "y", derivative_terms[0]),
+            (components[1], "z", derivative_terms[1]),
+            (components[0], "z", derivative_terms[2]),
+            (components[2], "x", derivative_terms[3]),
+            (components[1], "x", derivative_terms[4]),
+            (components[0], "y", derivative_terms[5]),
+        ]
+        coordinate_variables = {"x", "y", "z"}
+        domain_conditions: tuple[str, ...] = ()
+    elif coordinate_system == "Cylindrical3D":
+        derivative_sources = [
+            (components[2], "theta", derivative_terms[0]),
+            (f"rho*({components[1]})", "z", derivative_terms[1]),
+            (components[0], "z", derivative_terms[2]),
+            (components[2], "rho", derivative_terms[3]),
+            (f"rho*({components[1]})", "rho", derivative_terms[4]),
+            (components[0], "theta", derivative_terms[5]),
+        ]
+        coordinate_variables = {"rho", "theta", "z"}
+        domain_conditions = ("rho > 0",)
+    else:
+        derivative_sources = [
+            (f"sin(theta)*({components[2]})", "theta", derivative_terms[0]),
+            (components[1], "phi", derivative_terms[1]),
+            (components[0], "phi", derivative_terms[2]),
+            (f"r*({components[2]})", "r", derivative_terms[3]),
+            (f"r*({components[1]})", "r", derivative_terms[4]),
+            (components[0], "theta", derivative_terms[5]),
+        ]
+        coordinate_variables = {"r", "theta", "phi"}
+        domain_conditions = ("r > 0", "sin(theta) != 0")
+
+    used_names = set(coordinate_variables)
+    rendered_derivatives: list[str] = []
+    derivative_proofs: list[str] = []
+    for index, (expression_source, variable, derivative_source) in enumerate(derivative_sources):
+        exact_expression = _normalize_decimal_literals(expression_source)
+        exact_derivative = _normalize_decimal_literals(derivative_source)
+        if exact_expression is None or exact_derivative is None:
+            return None
+        try:
+            parsed_expression = parse_math_input(exact_expression)
+            parsed_derivative = parse_math_input(exact_derivative)
+            expression_tree = ast.parse(parsed_expression.expression, mode="eval")
+        except (MathInputError, SyntaxError, ValueError, RecursionError):
+            return None
+        if any(
+            isinstance(node, ast.Call)
+            and not (
+                coordinate_system == "Spherical3D"
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "sin"
+                and len(node.args) == 1
+                and not node.keywords
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "theta"
+            )
+            for node in ast.walk(expression_tree)
+        ):
+            return None
+
+        expression_names: set[str] = set()
+        function_variable = f"coordinate_curl_var_{index}"
+        rendered_function = _render_real_calculus_node(
+            expression_tree.body,
+            expression_names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: function_variable},
+            allow_variable_denominators=True,
+        )
+        derivative_lean, derivative_names = _render_real_calculus_lean(
+            parsed_derivative.expression,
+            allow_variable_denominators=True,
+        )
+        if (
+            rendered_function is None
+            or derivative_lean is None
+            or function_variable in expression_names
+        ):
+            return None
+        proof = _derivative_proof_term(
+            expression_tree.body,
+            variable,
+            function_variable,
+            variable,
+            {"nodes": 0},
+            0,
+        )
+        if proof is None:
+            return None
+        derivative_function = f"(fun {function_variable} : ℝ => {rendered_function})"
+        rendered_derivatives.append(f"(deriv {derivative_function} {variable})")
+        derivative_proofs.append(
+            f"  have h_coordinate_curl_{index} : HasDerivAt {derivative_function} "
+            f"{derivative_lean} {variable} := by\n"
+            f"    convert ({proof}) using 1\n"
+            "    all_goals\n"
+            "      first\n"
+            f"      | ext {function_variable}; simp [id_eq] <;> ring\n"
+            "      | simp [id_eq] <;> ring"
+        )
+        used_names.update(expression_names)
+        used_names.update(derivative_names)
+
+    rendered_components: list[str] = []
+    for component in expected_components:
+        exact_component = _normalize_decimal_literals(component)
+        if exact_component is None:
+            return None
+        component_lean, component_names = _render_real_calculus_lean(
+            exact_component,
+            allow_variable_denominators=True,
+        )
+        if component_lean is None:
+            return None
+        rendered_components.append(component_lean)
+        used_names.update(component_names)
+
+    used_names.update(coordinate_variables)
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) for name in used_names):
+        return None
+    binders = " ".join(f"({name} : ℝ)" for name in sorted(used_names))
+
+    if coordinate_system == "Cartesian3D":
+        curl_terms = [
+            f"({rendered_derivatives[0]}) - ({rendered_derivatives[1]})",
+            f"({rendered_derivatives[2]}) - ({rendered_derivatives[3]})",
+            f"({rendered_derivatives[4]}) - ({rendered_derivatives[5]})",
+        ]
+        final_tactic = "all_goals ring"
+    elif coordinate_system == "Cylindrical3D":
+        binders = f"{binders} (h_rho : 0 < rho)"
+        curl_terms = [
+            f"(({rendered_derivatives[0]}) - ({rendered_derivatives[1]})) / rho",
+            f"({rendered_derivatives[2]}) - ({rendered_derivatives[3]})",
+            f"(({rendered_derivatives[4]}) - ({rendered_derivatives[5]})) / rho",
+        ]
+        final_tactic = "all_goals (field_simp [ne_of_gt h_rho] <;> ring)"
+    else:
+        binders = (
+            f"{binders} (h_spherical_radius : 0 < r) "
+            "(h_spherical_sine : Real.sin theta ≠ 0)"
+        )
+        curl_terms = [
+            f"(({rendered_derivatives[0]}) - ({rendered_derivatives[1]})) / "
+            "(r * Real.sin theta)",
+            f"(({rendered_derivatives[2]}) - Real.sin theta * "
+            f"({rendered_derivatives[3]})) / (r * Real.sin theta)",
+            f"(({rendered_derivatives[4]}) - ({rendered_derivatives[5]})) / r",
+        ]
+        final_tactic = (
+            "apply Prod.ext\n"
+            "  · apply Prod.ext\n"
+            "    · field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring\n"
+            "    · field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring\n"
+            "  · field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring"
+        )
+
+    actual_tuple = f"(({curl_terms[0]}, {curl_terms[1]}), {curl_terms[2]})"
+    expected_tuple = (
+        f"(({rendered_components[0]}, {rendered_components[1]}), "
+        f"{rendered_components[2]})"
+    )
+    imports = """import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring"""
+    source = (
+        f"{imports}\n\n"
+        f"theorem coordinate_curl {binders} :\n"
+        f"  {actual_tuple} = {expected_tuple} := by\n"
+        + "\n".join(derivative_proofs)
+        + "\n  simp only ["
+        + ", ".join(f"h_coordinate_curl_{index}.deriv" for index in range(6))
+        + f"]\n  {final_tactic}\n\n#print axioms coordinate_curl\n"
+    )
+    display_result = f"({', '.join(component.replace('**', '^') for component in expected_components)})"
+    return Computation(
+        display_result,
+        source,
+        domain_conditions=domain_conditions,
+        real_parameters=tuple(sorted(used_names - coordinate_variables)),
+        proof_result_authoritative=True,
+    )
+
+
 def _prepare_polynomial_computation(
     code: str,
     time_limit_seconds: float,
