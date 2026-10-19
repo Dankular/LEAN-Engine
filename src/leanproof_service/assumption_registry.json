@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.5.0",
+  "registry_version": "2.6.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -254,6 +254,16 @@
       "wikidata_property_id": "P2299",
       "entry_version": 1,
       "service_default": false
+    }
+  ],
+  "dynamic_assumptions": [
+    {
+      "type": "WikidataEntity",
+      "id_pattern": "entity:wikidata:Q{numeric_id}",
+      "description": "Select one entity from the current Wikidata property-query candidates. The service preserves every ranked candidate until a caller selects one.",
+      "entry_version": 1,
+      "selection_policy": "caller_override_only",
+      "scope": "Wikidata property lookups"
     }
   ]
 }

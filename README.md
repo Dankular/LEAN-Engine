@@ -90,6 +90,14 @@ GET /v2/query?input=10%20m%2A5%20m&assumption=unit%3Am-minutes%402&output=json
 ```
 
 The service checks unit dimensions after applying the choices; incompatible units in an addition are rejected.
+
+Wikidata property lookups expose dynamic `WikidataEntity` assumptions. The response lists the current ranked candidates as stable `entity:wikidata:Q…` IDs. Select one with a repeated `assumption` parameter, for example:
+
+```text
+GET /v2/query?input=population%20of%20Springfield&assumption=entity%3Awikidata%3AQ90&output=json
+```
+
+The selected QID must be in the current candidate set. Without a selection, the response keeps all matches and leaves `WikidataEntity.selected` unset. `/v2/validatequery` checks the selector format and defers candidate membership validation until query execution. The dynamic assumption scheme and entry version are available from `/v2/assumptions`.
 When a selected interpretation fails that check, `/v2/query` and `/v2/validatequery` retain the selected assumption IDs and typed interpretation with the rejection reason.
 
 The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.

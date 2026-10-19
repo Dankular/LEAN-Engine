@@ -240,6 +240,8 @@ The CoordinateSystem slice accepts rational-coefficient polynomial fields throug
 
 Keep our IDs stable and service-owned. Store a registry version and typed meaning, expose the active choice and all alternatives, and validate overrides before routing. The classifier must never change a claim's scope or choose an assumption based on which one makes a proof succeed. See [Wolfram's assumption structure and application rules](https://products.wolframalpha.com/api/documentation?scrollTo=using-assumptions) for the wire behavior we are modeling; the project's IDs must remain distinct from Wolfram's opaque `input` tokens.
 
+The version 2.6.0 registry adds the dynamic `WikidataEntity` scheme. Property queries return the current ranked entities as `entity:wikidata:Q…` options. A caller can select one by repeating `assumption`; the service accepts it only if that QID is in the current candidate set, then returns that entity's property statements. Without an override, every ranked match remains in the response. `/v2/validatequery` validates the ID shape and defers candidate membership to `/v2/query` execution.
+
 ## Recommended implementation order
 
 ### P0 — establish a compatible request and response contract

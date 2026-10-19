@@ -288,7 +288,7 @@ def capabilities() -> dict[str, object]:
             "classifier_selects_assumptions": False,
         },
         "factual_sources": {
-            "wikidata": {"coverage": "entity search and entity records; allowlisted country (P17), continent (P30), capital (P36), official language (P37), currency (P38), coordinate location (P625), population (P1082), elevation above sea level (P2044), area (P2046), nominal GDP (P2131), GDP at purchasing power parity (P4010), nominal GDP per capita (P2132), and PPP GDP per capita (P2299) retrieval with ranked candidates; ambiguous GDP and GDP per capita queries require explicit typed assumptions", "status": "implemented_initial_slice"},
+            "wikidata": {"coverage": "entity search and entity records; allowlisted country (P17), continent (P30), capital (P36), official language (P37), currency (P38), coordinate location (P625), population (P1082), elevation above sea level (P2044), area (P2046), nominal GDP (P2131), GDP at purchasing power parity (P4010), nominal GDP per capita (P2132), and PPP GDP per capita (P2299) retrieval with ranked candidates; caller may select a current property-query candidate with the versioned entity:wikidata:Q… assumption; unselected candidate matches remain visible; ambiguous GDP and GDP per capita queries require explicit typed assumptions", "status": "implemented_initial_slice"},
             "dbnomics": {
                 "coverage": "ranked full-text dataset discovery, bounded full-text series discovery within a selected provider/dataset, and exact individual time-series retrieval; search results require caller selection",
                 "series_search": {

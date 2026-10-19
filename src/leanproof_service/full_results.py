@@ -412,7 +412,10 @@ def execute_query(
     numeric_precision = _DECIMAL_APPROXIMATION_PRECISIONS[decimal_state_level]
     provider_parse_started = perf_counter()
     try:
-        gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
+        non_entity_selections, entity_selection = _split_entity_assumption_selections(
+            assumptions or []
+        )
+        gdp_resolution = _resolve_gdp_request(input_text, non_entity_selections)
         if gdp_resolution is not None and any(value is not None for value in (location, latlong, units)):
             raise FullResultsRequestError(
                 "location, latlong, and units are currently supported for weather queries"
@@ -425,6 +428,12 @@ def execute_query(
         else:
             provider_request, gdp_assumption = gdp_resolution
             provider_assumptions = [gdp_assumption]
+        if entity_selection is not None and not _supports_wikidata_entity_selection(
+            provider_request
+        ):
+            raise AssumptionSelectionError(
+                "entity:wikidata selections apply only to Wikidata property lookups"
+            )
     except ProviderAssumptionNeeded as exc:
         return _provider_assumption_clarification(
             input_text, exc, formats, perf_counter() - started, text_width
@@ -445,7 +454,7 @@ def execute_query(
             raise FullResultsRequestError(
                 "podstate is currently supported for mathematical decimal approximations"
             )
-        if assumptions and not provider_assumptions:
+        if non_entity_selections and not provider_assumptions:
             raise AssumptionSelectionError(
                 "mathematical assumption selections do not apply to this data query"
             )
@@ -467,6 +476,7 @@ def execute_query(
             text_width=text_width,
             plot_width=plot_width,
             assumptions=provider_assumptions,
+            entity_selection=entity_selection,
         )
         if verify:
             payload["queryresult"].setdefault("evidence", {})["formal_verification"] = {
@@ -1649,7 +1659,10 @@ def validate_query(
     started = perf_counter()
     planning_input = input_text.casefold() if ignorecase else input_text
     try:
-        gdp_resolution = _resolve_gdp_request(input_text, assumptions or [])
+        non_entity_selections, entity_selection = _split_entity_assumption_selections(
+            assumptions or []
+        )
+        gdp_resolution = _resolve_gdp_request(input_text, non_entity_selections)
         if gdp_resolution is not None and any(value is not None for value in (location, latlong, units)):
             raise FullResultsRequestError(
                 "location, latlong, and units are currently supported for weather queries"
@@ -1662,6 +1675,12 @@ def validate_query(
         else:
             provider_request, gdp_assumption = gdp_resolution
             provider_assumptions = [gdp_assumption]
+        if entity_selection is not None and not _supports_wikidata_entity_selection(
+            provider_request
+        ):
+            raise AssumptionSelectionError(
+                "entity:wikidata selections apply only to Wikidata property lookups"
+            )
         if series_offset and not (
             provider_request is not None
             and provider_request.provider == "dbnomics"
@@ -1671,9 +1690,17 @@ def validate_query(
                 "seriesoffset is only supported for DBnomics series search"
             )
         if provider_request is not None:
-            if assumptions and not provider_assumptions:
+            if non_entity_selections and not provider_assumptions:
                 raise AssumptionSelectionError(
                     "mathematical assumption selections do not apply to this data query"
+                )
+            if entity_selection is not None:
+                provider_assumptions.append(
+                    _wikidata_entity_assumption(
+                        [],
+                        selected_id=entity_selection.rsplit(":", 1)[-1],
+                        candidates_available=False,
+                    )
                 )
             provider_name = provider_request.provider
             elapsed = perf_counter() - started
@@ -2283,6 +2310,76 @@ def _resolve_gdp_request(
     return request, assumption
 
 
+def _split_entity_assumption_selections(
+    selections: list[str],
+) -> tuple[list[str], str | None]:
+    """Separate a Wikidata entity selector from static assumption IDs."""
+    remaining: list[str] = []
+    entity_selection: str | None = None
+    for selection in selections:
+        if not selection.startswith("entity:"):
+            remaining.append(selection)
+            continue
+        if re.fullmatch(r"entity:wikidata:Q[1-9][0-9]*", selection) is None:
+            raise AssumptionSelectionError(
+                "entity selection must use the form entity:wikidata:Q123"
+            )
+        if entity_selection is not None:
+            raise AssumptionSelectionError("select only one Wikidata entity")
+        entity_selection = selection
+    return remaining, entity_selection
+
+
+def _supports_wikidata_entity_selection(request: KnowledgeRequest | None) -> bool:
+    return request is not None and _wikidata_property_id(request) is not None
+
+
+def _wikidata_entity_assumption(
+    matches: list[dict[str, Any]],
+    *,
+    selected_id: str | None = None,
+    candidates_available: bool = True,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    dynamic_spec = next(
+        item for item in registry.get("dynamic_assumptions", [])
+        if item.get("type") == "WikidataEntity"
+    )
+    entry_version = dynamic_spec["entry_version"]
+    values: list[dict[str, Any]] = []
+    for match in matches:
+        entity_id = match.get("id")
+        if not isinstance(entity_id, str) or re.fullmatch(r"Q[1-9][0-9]*", entity_id) is None:
+            continue
+        label = match.get("label") if isinstance(match.get("label"), str) else entity_id
+        description = match.get("description")
+        desc = f"{label} [{entity_id}]"
+        if isinstance(description, str) and description.strip():
+            desc += f": {description.strip()}"
+        values.append({
+            "input": f"entity:wikidata:{entity_id}",
+            "desc": desc,
+            "entity_id": entity_id,
+            "entry_version": entry_version,
+        })
+    assumption: dict[str, Any] = {
+        "type": "WikidataEntity",
+        "selected": f"entity:wikidata:{selected_id}" if selected_id else None,
+        "selection_source": (
+            "caller_override" if selected_id else
+            "needs_clarification" if values else
+            "candidate_generation_pending" if not candidates_available else
+            "no_candidates"
+        ),
+        "registry_version": registry["registry_version"],
+        "entry_version": entry_version,
+        "values": values,
+    }
+    if not candidates_available:
+        assumption["candidate_validation"] = "deferred_to_query_execution"
+    return assumption
+
+
 def _execute_provider_query(
     input_text: str,
     request: KnowledgeRequest,
@@ -2302,6 +2399,7 @@ def _execute_provider_query(
     text_width: int,
     plot_width: int,
     assumptions: list[dict[str, Any]],
+    entity_selection: str | None,
 ) -> dict[str, Any]:
     provider_started = perf_counter()
     provider_deadline = min(
@@ -2405,6 +2503,44 @@ def _execute_provider_query(
         raise FullResultsBackendError(
             str(exc), status_code=exc.status_code, error_code="PROVIDER_FAILURE"
         ) from exc
+
+    wikidata_entity_assumption: dict[str, Any] | None = None
+    if _supports_wikidata_entity_selection(request):
+        data = knowledge.get("data")
+        matches = data.get("matches", []) if isinstance(data, dict) else []
+        if not isinstance(matches, list):
+            matches = []
+        candidate_ids = {
+            match.get("id")
+            for match in matches
+            if isinstance(match, dict) and isinstance(match.get("id"), str)
+        }
+        selected_qid = entity_selection.rsplit(":", 1)[-1] if entity_selection else None
+        if selected_qid is not None and selected_qid not in candidate_ids:
+            choices = ", ".join(
+                f"entity:wikidata:{entity_id}" for entity_id in sorted(candidate_ids)
+            )
+            detail = f" Current candidates: {choices}." if choices else " No candidates were found."
+            raise AssumptionSelectionError(
+                "entity:wikidata selection must identify a candidate returned for this query."
+                + detail
+            )
+        wikidata_entity_assumption = _wikidata_entity_assumption(
+            matches,
+            selected_id=selected_qid,
+            candidates_available=True,
+        )
+        if selected_qid is not None and isinstance(data, dict):
+            data["matches"] = [
+                match for match in matches
+                if isinstance(match, dict) and match.get("id") == selected_qid
+            ]
+            data["selection_rule"] = (
+                f"Caller selected {entity_selection} from the current Wikidata candidates; "
+                "only that entity's statements are returned."
+            )
+        if wikidata_entity_assumption["values"]:
+            assumptions.append(wikidata_entity_assumption)
 
     provider_presentation = {
         "open_meteo": (
