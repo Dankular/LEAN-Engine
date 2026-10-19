@@ -161,7 +161,11 @@ def async_pod_descriptor(
         ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "Data"),
         "wikidata": _wikidata_async_descriptor(request),
-        "dbnomics": ("Economic time series", "EconomicSeries", "Data"),
+        "dbnomics": (
+            ("Economic datasets", "EconomicDatasetSearch", "Data")
+            if request.operation == "search"
+            else ("Economic time series", "EconomicSeries", "Data")
+        ),
         "geonames": ("Place matches", "PlaceSearch", "Data"),
     }[request.provider]
 
@@ -1223,6 +1227,24 @@ def _provider_request(
             raise FullResultsRequestError("place search needs a non-empty query")
         return _knowledge_request(provider="geonames", operation="search", query=query)
 
+    series_search = re.fullmatch(
+        r"\s*(?:series|dbnomics)\s+search\s*:\s*(.+?)\s*[?.!]*\s*",
+        input_text,
+        re.I,
+    )
+    if series_search:
+        query = series_search.group(1).strip()
+        if not query:
+            raise FullResultsRequestError("DBnomics dataset search needs a non-empty query")
+        return _knowledge_request(
+            provider="dbnomics",
+            operation="search",
+            query=query,
+            max_results=5,
+        )
+    if re.match(r"\s*(?:series|dbnomics)\s+search\s*:", input_text, re.I):
+        raise ProviderContextNeeded("DBnomics dataset search needs a search phrase")
+
     series = re.fullmatch(
         r"\s*(?:series|dbnomics)\s*:\s*([^/\s]+)/([^/\s]+)/([^/\s]+)\s*[?.!]*\s*",
         input_text,
@@ -1466,7 +1488,7 @@ def _execute_provider_query(
             ),
             "nist_codata": "Physical constant",
             "wikidata": _wikidata_async_descriptor(request)[0],
-            "dbnomics": "Economic time series",
+            "dbnomics": "Economic datasets" if request.operation == "search" else "Economic time series",
             "geonames": "Place matches",
         }
         input_image = (
@@ -1521,7 +1543,11 @@ def _execute_provider_query(
         ),
         "nist_codata": ("Physical constant", "PhysicalConstant", "ScientificConstant"),
         "wikidata": _wikidata_provider_presentation(request),
-        "dbnomics": ("Economic time series", "EconomicSeries", "Economics"),
+        "dbnomics": (
+            ("Economic datasets", "EconomicDatasetSearch", "Economics")
+            if request.operation == "search"
+            else ("Economic time series", "EconomicSeries", "Economics")
+        ),
         "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
     title, pod_id, datatype = provider_presentation[request.provider]
@@ -1610,9 +1636,13 @@ def _execute_provider_query(
         classification={
             "name": "deterministic_provider_router",
             "method": (
-                "Wikidata label search; ranked entity candidates are retained"
-                if request.provider == "wikidata" and _wikidata_property_id(request) is not None
-                else "explicit query pattern or supported constant alias"
+                "DBnomics full-text dataset search; results are ranked candidates"
+                if request.provider == "dbnomics" and request.operation == "search"
+                else (
+                    "Wikidata label search; ranked entity candidates are retained"
+                    if request.provider == "wikidata" and _wikidata_property_id(request) is not None
+                    else "explicit query pattern or supported constant alias"
+                )
             ),
             "ranks_candidates_only": True,
             "selection_authority": False,
@@ -1622,7 +1652,11 @@ def _execute_provider_query(
             "Wikidata's ranked entity matches are returned as candidates. "
             f"{wikidata_property_name.capitalize()} statements are retrieved data, not a formal proof."
             if wikidata_property_name is not None
-            else knowledge["qualification"]
+            else (
+                "DBnomics search results are dataset candidates. Select a provider and dataset explicitly, then request a specific series; no dataset is selected automatically. Retrieved data is not a formal proof."
+                if request.provider == "dbnomics" and request.operation == "search"
+                else knowledge["qualification"]
+            )
         ),
         sources=knowledge["sources"],
         retrieved_at=knowledge["retrieved_at"],
@@ -1813,6 +1847,22 @@ def _provider_plaintext(provider: str, data: Any) -> str:
             rows.append(f"{name} ({'; '.join(details)})" if details else name)
         return "\n".join(rows) if rows else "No matching places were found."
     if provider == "dbnomics" and isinstance(data, dict):
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            blocks = []
+            for candidate in candidates[:10]:
+                if not isinstance(candidate, dict):
+                    continue
+                provider_name = candidate.get("provider_name") or candidate.get("provider_code") or "Provider"
+                name = candidate.get("name") or candidate.get("dataset_code") or "Dataset"
+                provider_code = candidate.get("provider_code", "")
+                dataset_code = candidate.get("dataset_code", "")
+                matching = candidate.get("matching_series_count")
+                suffix = f" ({matching} matching series)" if isinstance(matching, int) else ""
+                blocks.append(f"{name} — {provider_name} [{provider_code}/{dataset_code}]{suffix}")
+            if blocks:
+                return "\n".join(blocks)
+            return "No matching DBnomics datasets were found."
         documents = data.get("docs")
         if isinstance(documents, list):
             blocks = []

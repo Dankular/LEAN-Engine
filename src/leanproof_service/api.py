@@ -248,7 +248,7 @@ def capabilities() -> dict[str, object]:
         },
         "factual_sources": {
             "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36), official language (P37), currency (P38), population (P1082), nominal GDP (P2131), GDP at purchasing power parity (P4010), nominal GDP per capita (P2132), and PPP GDP per capita (P2299) retrieval with ranked candidates; ambiguous GDP and GDP per capita queries require explicit typed assumptions", "status": "implemented_initial_slice"},
-            "dbnomics": {"coverage": "individual time series", "status": "implemented"},
+            "dbnomics": {"coverage": "ranked full-text dataset discovery and exact individual time-series retrieval; search results require caller selection", "status": "implemented_initial_slice"},
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},
             "open_meteo": {"coverage": "current weather and seven-day forecasts by location or coordinates; forecast chart included", "status": "implemented"},
@@ -273,7 +273,7 @@ def capabilities() -> dict[str, object]:
                     "natural-language nominal and PPP GDP per capita lookups using Wikidata with typed disambiguation",
                     "natural-language capital relationship lookups using Wikidata",
                     "explicit GeoNames place searches",
-                    "explicit DBnomics time-series requests",
+                    "DBnomics dataset candidate search and explicit time-series requests",
                 ],
                 "natural_language_math": {
                     "status": "bounded_initial_slice",

@@ -43,7 +43,7 @@ class KnowledgeRequest(StrictModel):
     def validate_provider_operation(self) -> KnowledgeRequest:
         expected = {
             "wikidata": {"search", "entity", "population", "capital", "property"},
-            "dbnomics": {"series"},
+            "dbnomics": {"search", "series"},
             "nist_codata": {"constant"},
             "geonames": {"search"},
             "open_meteo": {"weather", "weather_forecast"},
@@ -62,7 +62,9 @@ class KnowledgeRequest(StrictModel):
         elif self.property_id is not None:
             raise ValueError("property_id is only supported for Wikidata")
         elif self.provider == "dbnomics":
-            if not all((self.provider_code, self.dataset_code, self.series_code)):
+            if self.operation == "search" and self.query is None:
+                raise ValueError("DBnomics dataset search requires query")
+            if self.operation == "series" and not all((self.provider_code, self.dataset_code, self.series_code)):
                 raise ValueError("DBnomics series lookup requires provider_code, dataset_code, and series_code")
         elif self.provider == "nist_codata" and self.constant is None:
             raise ValueError("NIST lookup requires constant")
@@ -698,6 +700,61 @@ def _wikidata_entity_values(
 def _dbnomics(
     request: KnowledgeRequest, deadline: float | None
 ) -> tuple[object, dict[str, str]]:
+    if request.operation == "search":
+        url = "https://api.db.nomics.world/v22/search?" + urlencode(
+            {"q": request.query or "", "limit": request.max_results}
+        )
+        response = _request_json(url, request.timeout_seconds, deadline)
+        results = response.get("results")
+        docs = results.get("docs") if isinstance(results, dict) else None
+        if not isinstance(docs, list):
+            raise KnowledgeProviderError("DBnomics returned an invalid dataset search response")
+        candidates: list[dict[str, object]] = []
+        for rank, item in enumerate(docs[: request.max_results], start=1):
+            if not isinstance(item, dict):
+                continue
+            provider_code = item.get("provider_code")
+            dataset_code = item.get("code")
+            if not isinstance(provider_code, str) or not isinstance(dataset_code, str):
+                continue
+            candidate: dict[str, object] = {
+                "id": f"dbnomics:dataset:{provider_code}/{dataset_code}",
+                "rank": rank,
+                "provider_code": provider_code,
+                "provider_name": item.get("provider_name"),
+                "dataset_code": dataset_code,
+                "name": item.get("name") or dataset_code,
+                "url": (
+                    "https://db.nomics.world/"
+                    f"{quote(provider_code, safe='')}/{quote(dataset_code, safe='')}"
+                ),
+            }
+            description = item.get("description")
+            if isinstance(description, str) and description.strip():
+                candidate["description"] = description[:1000]
+            for source_key, target_key in (
+                ("nb_matching_series", "matching_series_count"),
+                ("nb_series", "series_count"),
+                ("updated_at", "updated_at"),
+            ):
+                value = item.get(source_key)
+                if isinstance(value, (int, str)) and not isinstance(value, bool):
+                    candidate[target_key] = value
+            candidates.append(candidate)
+        meta = response.get("_meta")
+        args = meta.get("args") if isinstance(meta, dict) else None
+        return {
+            "query": request.query,
+            "num_found": results.get("num_found"),
+            "limit": args.get("limit") if isinstance(args, dict) else request.max_results,
+            "offset": args.get("offset") if isinstance(args, dict) else 0,
+            "candidates": candidates,
+            "selection_required": bool(candidates),
+        }, {
+            "name": "DBnomics Web API dataset search",
+            "url": url,
+            "license": "Dataset-specific; consult the original series provider",
+        }
     provider = quote(request.provider_code or "", safe="")
     dataset = quote(request.dataset_code or "", safe="")
     series = quote(request.series_code or "", safe="")
