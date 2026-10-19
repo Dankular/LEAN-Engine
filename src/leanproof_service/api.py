@@ -401,7 +401,7 @@ def capabilities() -> dict[str, object]:
                     "syntax": "Limit[expression, {variable, point}]",
                     "domain": "bounded rational functions over the reals with real parameters",
                     "point": "exact rational with numerator and denominator up to 256 bits, or a rational-coefficient polynomial in real parameters of total degree at most 64 and coefficient components up to 256 bits",
-                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero values at the point as explicit domain conditions; selected removable singularities are supported when each vanishing denominator is an affine rational expression or a positive integer power of a nonzero rational-slope affine factor, while any other denominator must be nonzero at the point; Lean proves those denominators remain nonzero nearby and proves eventual equality on the punctured neighborhood before checking the exact value",
+                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero values at the point as explicit domain conditions; selected removable singularities are supported for affine vanishing factors and explicit products with affine vanishing factors, while other product factors need a Lean-checked continuity proof and nonzero-at-point evidence; Lean proves the factors remain nonzero nearby and proves eventual equality on the punctured neighborhood before checking the exact value",
                 },
                 "rational_function_limits": {
                     "operators": ["+", "-", "*", "/", "^"],
@@ -412,7 +412,7 @@ def capabilities() -> dict[str, object]:
                     "variable_domain": "real numbers; symbolic denominator values at the limit point are explicit proof conditions",
                     "symbolic_point_maximum_total_degree": 64,
                     "symbolic_points": "bounded rational-coefficient polynomials in real parameters; free real parameter names are returned in evidence.real_parameters, and nonconstant denominators must be nonzero after substitution except for supported removable singularities",
-                    "removable_singularities": "at least one nonconstant denominator must vanish at the point; each vanishing denominator must be an affine rational expression or a positive integer power of a nonzero rational-slope affine factor; remaining denominators require explicit nonzero-at-point conditions and are proved nonzero in a neighborhood; simplification must yield a bounded rational function",
+                    "removable_singularities": "at least one nonconstant denominator must vanish at the point; vanishing factors must be affine rational expressions or positive integer powers of nonzero rational-slope affine factors; explicit products are supported when every vanishing factor meets that rule and each remaining factor has a Lean-checked continuity proof with numeric nonzero-at-point evidence or an explicit condition; simplification must yield a bounded rational function",
                 },
                 "derivative": {
                     "syntax": "D[expression, variable]",

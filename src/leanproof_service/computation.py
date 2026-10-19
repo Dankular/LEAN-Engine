@@ -770,8 +770,12 @@ def _prepare_removable_rational_limit(
     denominators = _variable_denominators(expression_tree.body)
     if not denominators:
         return None
-    vanishing_denominators: list[tuple[ast.AST, Fraction, int]] = []
-    nonvanishing_denominators: list[tuple[ast.AST, Fraction | None]] = []
+    vanishing_denominators: list[
+        tuple[ast.AST, list[tuple[str, ast.AST, int, Fraction | None, int | None]]]
+    ] = []
+    nonvanishing_denominators: list[
+        tuple[ast.AST, Fraction | None, int, int | None]
+    ] = []
     for denominator in denominators:
         denominator_value = _rational_node_value_at_point(
             denominator, variable, point, point_tree
@@ -779,25 +783,63 @@ def _prepare_removable_rational_limit(
         if denominator_value is None:
             return None
         if denominator_value == 0 or getattr(denominator_value, "is_zero", None) is True:
-            vanishing_factor = _vanishing_affine_power(
-                denominator, variable, point
-            ) if point is not None else None
-            if point is None:
-                if point_tree is None:
-                    return None
-                vanishing_factor = _vanishing_affine_power_at_symbolic_point(
-                    denominator, variable, point_tree
-                )
-            if vanishing_factor is None:
+            factors = _flatten_multiplicative_factors(denominator)
+            if factors is None:
                 return None
-            vanishing_denominators.append((denominator, *vanishing_factor))
+            group_index = len(vanishing_denominators)
+            components: list[
+                tuple[str, ast.AST, int, Fraction | None, int | None]
+            ] = []
+            has_vanishing_factor = False
+            for factor, multiplicity in factors:
+                if _variable_denominators(factor):
+                    return None
+                factor_value = _rational_node_value_at_point(
+                    factor, variable, point, point_tree
+                )
+                if factor_value is None:
+                    return None
+                if factor_value == 0 or getattr(factor_value, "is_zero", None) is True:
+                    vanishing_factor = _vanishing_affine_power(
+                        factor, variable, point
+                    ) if point is not None else None
+                    if point is None:
+                        if point_tree is None:
+                            return None
+                        vanishing_factor = _vanishing_affine_power_at_symbolic_point(
+                            factor, variable, point_tree
+                        )
+                    if vanishing_factor is None:
+                        return None
+                    slope, affine_exponent = vanishing_factor
+                    exponent = multiplicity * affine_exponent
+                    if exponent > 16:
+                        return None
+                    components.append(("vanishing", factor, exponent, slope, None))
+                    has_vanishing_factor = True
+                else:
+                    rational_value = None
+                    if getattr(factor_value, "is_Rational", False):
+                        rational_value = Fraction(
+                            int(factor_value.p), int(factor_value.q)
+                        )
+                    factor_index = len(nonvanishing_denominators)
+                    nonvanishing_denominators.append(
+                        (factor, rational_value, multiplicity, group_index)
+                    )
+                    components.append(
+                        ("nonvanishing", factor, multiplicity, None, factor_index)
+                    )
+            if not has_vanishing_factor:
+                return None
+            vanishing_denominators.append((denominator, components))
         else:
             rational_value = None
             if getattr(denominator_value, "is_Rational", False):
                 rational_value = Fraction(
                     int(denominator_value.p), int(denominator_value.q)
                 )
-            nonvanishing_denominators.append((denominator, rational_value))
+            nonvanishing_denominators.append((denominator, rational_value, 1, None))
 
     used_names = (
         expression_symbols | simplified_symbols | result_symbols | point_symbols | {variable}
@@ -849,7 +891,9 @@ def _prepare_removable_rational_limit(
     if continuity_proof is None:
         return None
 
-    denominator_continuity_proofs: list[tuple[str, str, str, str, str, str]] = []
+    denominator_continuity_proofs: list[
+        tuple[int, str, str, str, str, str, str]
+    ] = []
     domain_binders = continuity_state["domain_binders"]
     domain_conditions = continuity_state["domain_conditions"]
     assumed_denominators = continuity_state["assumed_denominators"]
@@ -861,7 +905,9 @@ def _prepare_removable_rational_limit(
         or not isinstance(denominator_assumptions, list)
     ):
         return None
-    for index, (denominator, rational_value) in enumerate(nonvanishing_denominators):
+    for index, (denominator, rational_value, _exponent, _group_index) in enumerate(
+        nonvanishing_denominators
+    ):
         denominator_body = _render_rational_limit_node(
             denominator,
             set(),
@@ -944,6 +990,7 @@ def _prepare_removable_rational_limit(
         )
         denominator_continuity_proofs.append(
             (
+                index,
                 hden_continuous,
                 hden_eventually,
                 hden_eventually_within,
@@ -968,48 +1015,11 @@ def _prepare_removable_rational_limit(
     hcontinuous_limit = _fresh_identifier("h_limit_continuous_tendsto", used_names)
     hfilter_mem = _fresh_identifier("h_limit_filter_mem", used_names)
     hpoint = _fresh_identifier("h_limit_point", used_names)
-    denominator_proofs: list[str] = []
-    denominator_names: list[str] = []
-    for index, (denominator, slope, exponent) in enumerate(vanishing_denominators):
-        denominator_used_names = continuity_state["used_names"]
-        if not isinstance(denominator_used_names, set):
-            return None
-        hden = _fresh_identifier(f"h_limit_denominator_{index}", denominator_used_names)
-        hslope = _fresh_identifier(f"h_limit_slope_{index}", denominator_used_names)
-        hdiff = _fresh_identifier(f"h_limit_point_ne_{index}", denominator_used_names)
-        hzero = _fresh_identifier(f"h_limit_denominator_zero_{index}", denominator_used_names)
-        hfactor = _fresh_identifier(f"h_limit_denominator_factor_{index}", denominator_used_names)
-        denominator_term = _render_rational_limit_node(
-            denominator,
-            set(),
-            {"nodes": 0},
-            0,
-            substitutions={variable: limit_variable},
-        )
-        if denominator_term is None:
-            return None
-        slope_lean = _lean_rational(slope)
-        factor = f"({slope_lean} * ({limit_variable} - {point_lean}))"
-        denominator_proof = (
-            f"  have {hdiff} : {limit_variable} - {point_lean} ≠ 0 := by\n"
-            f"    intro {hzero}\n"
-            f"    apply {hpoint}\n"
-            f"    linarith\n"
-            f"  have {hslope} : {slope_lean} ≠ 0 := by norm_num\n"
-            f"  have {hden} : {denominator_term} ≠ 0 := by\n"
-            f"    have {hfactor} : {denominator_term} = {factor} ^ {exponent} := by ring\n"
-            f"    rw [{hfactor}]\n"
-        )
-        denominator_proof += (
-            f"    exact pow_ne_zero {exponent} (mul_ne_zero {hslope} {hdiff})"
-        )
-        denominator_proofs.append(denominator_proof)
-        denominator_names.append(hden)
-
     eventual_names: list[str] = []
     eventual_hypotheses: list[str] = []
     eventual_proof_blocks: list[str] = []
     for (
+        _index,
         hden_continuous,
         hden_eventually,
         hden_eventually_within,
@@ -1035,7 +1045,137 @@ def _prepare_removable_rational_limit(
             f"{hden_eventually}.filter_mono nhdsWithin_le_nhds"
         )
 
-    all_denominator_names = [*denominator_names, *eventual_hypotheses]
+    denominator_proofs: list[str] = []
+    denominator_names: list[str] = []
+    for index, (denominator, components) in enumerate(vanishing_denominators):
+        denominator_used_names = continuity_state["used_names"]
+        if not isinstance(denominator_used_names, set):
+            return None
+        hden = _fresh_identifier(f"h_limit_denominator_{index}", denominator_used_names)
+        denominator_term = _render_rational_limit_node(
+            denominator,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: limit_variable},
+        )
+        if denominator_term is None:
+            return None
+
+        component_terms: list[str] = []
+        component_names: list[str] = []
+        proof_lines: list[str] = []
+        for component_index, (
+            component_kind,
+            component,
+            exponent,
+            slope,
+            nonvanishing_index,
+        ) in enumerate(components):
+            component_body = _render_rational_limit_node(
+                component,
+                set(),
+                {"nodes": 0},
+                0,
+                substitutions={variable: limit_variable},
+            )
+            if component_body is None:
+                return None
+            component_term = (
+                f"({component_body})"
+                if exponent == 1
+                else f"({component_body}) ^ {exponent}"
+            )
+            component_terms.append(component_term)
+            component_name = _fresh_identifier(
+                f"h_limit_denominator_factor_{index}_{component_index}",
+                denominator_used_names,
+            )
+            component_names.append(component_name)
+
+            if component_kind == "vanishing":
+                if slope is None:
+                    return None
+                hdiff = _fresh_identifier(
+                    f"h_limit_point_ne_{index}_{component_index}",
+                    denominator_used_names,
+                )
+                hzero = _fresh_identifier(
+                    f"h_limit_point_eq_{index}_{component_index}",
+                    denominator_used_names,
+                )
+                hslope = _fresh_identifier(
+                    f"h_limit_slope_{index}_{component_index}",
+                    denominator_used_names,
+                )
+                hfactor = _fresh_identifier(
+                    f"h_limit_affine_factor_{index}_{component_index}",
+                    denominator_used_names,
+                )
+                slope_lean = _lean_rational(slope)
+                affine_factor = f"({slope_lean} * ({limit_variable} - {point_lean}))"
+                proof_lines.extend(
+                    [
+                        f"  have {hdiff} : {limit_variable} - {point_lean} ≠ 0 := by",
+                        f"    intro {hzero}",
+                        f"    apply {hpoint}",
+                        "    linarith",
+                        f"  have {hslope} : {slope_lean} ≠ 0 := by norm_num",
+                        f"  have {hfactor} : {component_body} = {affine_factor} := by ring",
+                        f"  have {component_name} : {component_term} ≠ 0 := by",
+                        f"    rw [{hfactor}]",
+                    ]
+                )
+                if exponent == 1:
+                    proof_lines.append(
+                        f"    exact mul_ne_zero {hslope} {hdiff}"
+                    )
+                else:
+                    proof_lines.append(
+                        f"    exact pow_ne_zero {exponent} "
+                        f"(mul_ne_zero {hslope} {hdiff})"
+                    )
+            else:
+                if nonvanishing_index is None:
+                    return None
+                factor_nonzero = eventual_hypotheses[nonvanishing_index]
+                nonzero_proof = (
+                    f"exact {factor_nonzero}"
+                    if exponent == 1
+                    else f"exact pow_ne_zero {exponent} {factor_nonzero}"
+                )
+                proof_lines.extend(
+                    [
+                        f"  have {component_name} : {component_term} ≠ 0 := by",
+                        f"    {nonzero_proof}",
+                    ]
+                )
+
+        hfactorization = _fresh_identifier(
+            f"h_limit_denominator_product_{index}", denominator_used_names
+        )
+        product_term = " * ".join(component_terms)
+        product_nonzero = component_names[0]
+        for component_name in component_names[1:]:
+            product_nonzero = f"mul_ne_zero ({product_nonzero}) {component_name}"
+        proof_lines.extend(
+            [
+                f"  have {hfactorization} : {denominator_term} = {product_term} := by ring",
+                f"  have {hden} : {denominator_term} ≠ 0 := by",
+                f"    rw [{hfactorization}]",
+                f"    exact {product_nonzero}",
+            ]
+        )
+        denominator_proofs.append("\n".join(proof_lines))
+        denominator_names.append(hden)
+
+    direct_eventual_hypotheses = [
+        eventual_hypotheses[index]
+        for index, (_denominator, _value, _exponent, group_index)
+        in enumerate(nonvanishing_denominators)
+        if group_index is None
+    ]
+    all_denominator_names = [*denominator_names, *direct_eventual_hypotheses]
     field_simp = f"field_simp [{', '.join(all_denominator_names)}] <;> ring"
     point_denominator_proof_source = "\n".join(
         f"  have {name} : {denominator} ≠ 0 := by norm_num"
@@ -1099,6 +1239,35 @@ theorem wolfram_language_compute{theorem_binders} :
         domain_conditions=tuple(dict.fromkeys(domain_conditions)),
         real_parameters=tuple(theorem_symbols),
     )
+
+
+def _flatten_multiplicative_factors(
+    node: ast.AST,
+) -> list[tuple[ast.AST, int]] | None:
+    """Return explicit product factors with their bounded integer multiplicities."""
+    factors: list[tuple[ast.AST, int]] = []
+
+    def collect(current: ast.AST, multiplicity: int) -> bool:
+        if isinstance(current, ast.BinOp) and isinstance(current.op, ast.Mult):
+            return collect(current.left, multiplicity) and collect(
+                current.right, multiplicity
+            )
+        if isinstance(current, ast.BinOp) and isinstance(current.op, ast.Pow):
+            exponent = _constant_fraction(current.right)
+            if exponent is None or exponent.denominator != 1 or exponent < 0:
+                return False
+            if exponent == 0:
+                return True
+            total_multiplicity = multiplicity * exponent.numerator
+            if total_multiplicity > 16:
+                return False
+            return collect(current.left, total_multiplicity)
+        factors.append((current, multiplicity))
+        return len(factors) <= 256
+
+    if not collect(node, 1) or not factors:
+        return None
+    return factors
 
 
 def _vanishing_affine_power(
