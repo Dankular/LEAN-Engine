@@ -772,7 +772,7 @@ def _query_claim_type(request: SymbolicRequest, code: str) -> str:
     if request.operation == "solve":
         return "real_solution_set_equivalence"
     if request.operation == "limit":
-        return "continuous_rational_limit"
+        return "rational_function_limit"
     if request.operation == "sum":
         return "finite_sum_equality"
     if request.operation == "product":

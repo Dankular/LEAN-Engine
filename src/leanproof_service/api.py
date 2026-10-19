@@ -282,7 +282,7 @@ def capabilities() -> dict[str, object]:
                     "sum_product_bounds": "integer literals only",
                     "sum_product_proof_bounds": "Lean proofs support rational-polynomial finite sums/products over inclusive integer ranges of up to 128 terms",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial, real-calculus, finite polynomial Sum/Product computations over up to 128 integer terms, and finite rational-function limits at exact rational points under explicit denominator conditions; unsupported operations remain unverified",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial, real-calculus, finite polynomial Sum/Product computations over up to 128 integer terms, and rational-function limits at exact rational points, including supported removable singularities; denominator conditions are explicit",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
@@ -293,7 +293,7 @@ def capabilities() -> dict[str, object]:
                     "ignorecase": True,
                     "reinterpret": False,
                     "translation": False,
-                    "verify": "optional Lean check for supported exact polynomial, real-calculus, finite polynomial Sum/Product computations, and rational-function limits at exact rational points under explicit denominator conditions",
+                    "verify": "optional Lean check for supported exact polynomial, real-calculus, finite polynomial Sum/Product computations, and rational-function limits at exact rational points, including supported removable singularities",
                 },
                 "formal_verification": {
                     "query_parameter": "verify=true",
@@ -308,7 +308,7 @@ def capabilities() -> dict[str, object]:
                         "indefinite polynomial antiderivatives",
                         "definite integrals of supported expressions with exact rational bounds",
                         "finite sums and products of rational-coefficient polynomials over inclusive integer ranges of up to 128 terms",
-                        "finite limits of bounded rational functions at exact rational points when denominator values are proven nonzero or returned as explicit domain conditions",
+                        "finite limits of bounded rational functions at exact rational points with explicit symbolic denominator conditions and supported affine-factor removable singularities",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
@@ -401,7 +401,7 @@ def capabilities() -> dict[str, object]:
                     "syntax": "Limit[expression, {variable, point}]",
                     "domain": "bounded rational functions with real parameters",
                     "point": "exact rational with numerator and denominator up to 256 bits",
-                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero denominator values as explicit domain conditions; continuity and exact evaluation are checked under those conditions",
+                    "proof": "Lean proves numeric denominator values nonzero and carries symbolic nonzero values as explicit domain conditions; for supported removable singularities it proves eventual equality on the punctured neighborhood before checking the exact value",
                 },
                 "rational_function_limits": {
                     "operators": ["+", "-", "*", "/", "^"],
@@ -410,6 +410,7 @@ def capabilities() -> dict[str, object]:
                     "maximum_power": 16,
                     "maximum_numeric_component_bits": 256,
                     "variable_domain": "real numbers; symbolic denominator values at the limit point are explicit proof conditions",
+                    "removable_singularities": "supported when variable-dependent denominators are affine rational expressions or positive integer powers thereof vanishing at the point, and simplification yields a bounded polynomial",
                 },
                 "derivative": {
                     "syntax": "D[expression, variable]",

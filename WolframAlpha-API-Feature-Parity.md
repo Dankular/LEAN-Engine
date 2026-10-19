@@ -52,9 +52,13 @@ that exact result matches the SymPy result.
 functions at exact rational points within the 256-bit numeric limit, when every
 denominator at the point is either proved nonzero or returned as an explicit domain
 condition. Lean proves continuity under those conditions and checks the exact value.
-Free real parameters are supported in numerators and symbolic denominators. On
-`/v2/query`, limits at poles and removable singularities remain symbolic results without
-Lean evidence; the CAG route returns its documented unsupported-expression status for
+Free real parameters are supported in numerators and symbolic denominators. For
+removable singularities, each variable-dependent denominator must be an affine rational
+expression, or a positive integer power of one, that vanishes at the requested point;
+the full expression must simplify to a bounded polynomial. Lean proves the original
+formula equals that polynomial on the punctured neighborhood and checks its exact value.
+True poles and other cancellation forms remain symbolic results without Lean evidence on
+`/v2/query`; the CAG route returns its documented unsupported-expression status for
 those forms.
 
 The verified calculus subset also supports `D[ArcTan[2x], x]` and the

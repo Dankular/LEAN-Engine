@@ -313,12 +313,13 @@ def _prepare_real_rational_limit(
     ):
         return None
 
+    symbolic_deadline = monotonic() + max(0.001, min(time_limit_seconds, 60.0))
     symbolic = run_symbolic(SymbolicRequest(
         operation="limit",
         expression=parsed.expression,
         variable=variable,
         point=_fraction_text(point),
-        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+        time_limit_seconds=max(0.001, min(symbolic_deadline - monotonic(), 60.0)),
     ))
     if symbolic.get("timed_out"):
         return Computation("", "", timed_out=True)
@@ -371,7 +372,17 @@ def _prepare_real_rational_limit(
         0,
     )
     if continuity_proof is None:
-        return None
+        remaining_symbolic_time = symbolic_deadline - monotonic()
+        if remaining_symbolic_time <= 0.001:
+            return Computation("", "", timed_out=True)
+        return _prepare_removable_rational_limit(
+            parsed.expression,
+            expression_tree,
+            result,
+            variable,
+            point,
+            remaining_symbolic_time,
+        )
 
     theorem_symbols = sorted(
         (expression_symbols | result_symbols) - {variable, limit_variable}
@@ -419,13 +430,16 @@ def _prepare_real_rational_limit(
         hypothesis_name = _fresh_identifier(
             "h_result_denominator", used_hypothesis_names
         )
+        zero_name = _fresh_identifier(
+            "h_result_denominator_zero", used_hypothesis_names
+        )
         proof_branches = "\n".join(
-            f"    | exact {assumption_name} (by nlinarith [h_zero])"
+            f"    | exact {assumption_name} (by nlinarith [{zero_name}])"
             for assumption_name, _ in assumed_denominators
         )
         proof = (
             f"have {hypothesis_name} : {denominator_expression} ≠ 0 := by\n"
-            "    intro h_zero\n"
+            f"    intro {zero_name}\n"
             "    first\n"
             f"{proof_branches}"
         )
@@ -448,6 +462,11 @@ def _prepare_real_rational_limit(
     result_denominator_source = (
         f"{result_denominator_source}\n" if result_denominator_source else ""
     )
+    proof_used_names = continuity_state["used_names"]
+    if not isinstance(proof_used_names, set):
+        return None
+    hcont = _fresh_identifier("h_limit_continuous", proof_used_names)
+    hvalue = _fresh_identifier("h_limit_value", proof_used_names)
     source = f"""import Mathlib.Basic.Real.Basic
 import Mathlib.Topology.Instances.Real.Lemmas
 import Mathlib.Topology.Continuous
@@ -458,10 +477,10 @@ import Mathlib.Tactic.Ring
 theorem wolfram_language_compute{theorem_binders} :
     Filter.Tendsto (fun {limit_variable} : ℝ => {limit_body})
       (nhds {point_lean}) (nhds {result_lean}) := by
-{denominator_proofs}  have hcont : ContinuousAt (fun {limit_variable} : ℝ => {limit_body})
+{denominator_proofs}  have {hcont} : ContinuousAt (fun {limit_variable} : ℝ => {limit_body})
       {point_lean} := {continuity_proof}
-{result_denominator_source}  have hvalue : {value_at_point} = {result_lean} := by {value_proof}
-  simpa only [hvalue] using hcont.tendsto
+{result_denominator_source}  have {hvalue} : {value_at_point} = {result_lean} := by {value_proof}
+  simpa only [{hvalue}] using {hcont}.tendsto
 
 #print axioms wolfram_language_compute
 """
@@ -578,6 +597,249 @@ def _rational_continuity_proof(
         ast.Mult: "mul",
     }.get(type(node.op))
     return f"({left}).{method} ({right})" if method is not None else None
+
+
+def _prepare_removable_rational_limit(
+    expression_source: str,
+    expression_tree: ast.Expression,
+    limit_result: str,
+    variable: str,
+    point: Fraction,
+    time_limit_seconds: float,
+) -> Computation | None:
+    simplified = run_symbolic(SymbolicRequest(
+        operation="simplify",
+        expression=expression_source,
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if simplified.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if simplified.get("error") or not isinstance(simplified.get("result"), str):
+        return None
+
+    simplified_source = simplified["result"]
+    simplified_lean, simplified_symbols = _render_polynomial_lean(simplified_source)
+    result_lean, result_symbols = _render_polynomial_lean(limit_result)
+    expression_lean, expression_symbols = _render_rational_limit_lean(expression_source)
+    if simplified_lean is None or result_lean is None or expression_lean is None:
+        return None
+    try:
+        simplified_tree = ast.parse(simplified_source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError):
+        return None
+
+    denominators = _variable_denominators(expression_tree.body)
+    if not denominators:
+        return None
+    vanishing_denominators: list[tuple[ast.AST, Fraction, int]] = []
+    for denominator in denominators:
+        denominator_value = _exact_rational_node_value(denominator, variable, point)
+        vanishing_factor = _vanishing_affine_power(denominator, variable, point)
+        if denominator_value != 0 or vanishing_factor is None:
+            return None
+        vanishing_denominators.append((denominator, *vanishing_factor))
+
+    used_names = expression_symbols | simplified_symbols | result_symbols
+    limit_variable = _fresh_identifier("limit_variable", used_names)
+    expression = _render_rational_limit_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: limit_variable},
+    )
+    simplified_expression = _render_polynomial_node(
+        simplified_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: limit_variable},
+    )
+    simplified_value = _render_polynomial_node(
+        simplified_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={variable: _lean_rational(point)},
+    )
+    if expression is None or simplified_expression is None or simplified_value is None:
+        return None
+    real_simplified_expression = f"({simplified_expression} : ℝ)"
+    real_simplified_value = f"({simplified_value} : ℝ)"
+
+    continuity_state: dict[str, object] = {
+        "nodes": 0,
+        "denominator_assumptions": [],
+        "assumed_denominators": [],
+        "domain_binders": [],
+        "domain_conditions": [],
+        "used_names": used_names | {limit_variable},
+    }
+    continuity_proof = _rational_continuity_proof(
+        simplified_tree.body,
+        variable,
+        point,
+        continuity_state,
+        0,
+    )
+    if continuity_proof is None:
+        return None
+
+    theorem_symbols = sorted(
+        (expression_symbols | simplified_symbols | result_symbols)
+        - {variable, limit_variable}
+    )
+    binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
+    theorem_binders = f" {binders}" if binders else ""
+    point_lean = _lean_rational(point)
+    hcont = _fresh_identifier("h_limit_continuous", used_names)
+    hvalue = _fresh_identifier("h_limit_value", used_names)
+    heq = _fresh_identifier("h_limit_eventual_eq", used_names)
+    hlim = _fresh_identifier("h_limit_tendsto", used_names)
+    hcontinuous_limit = _fresh_identifier("h_limit_continuous_tendsto", used_names)
+    hfilter_mem = _fresh_identifier("h_limit_filter_mem", used_names)
+    hpoint = _fresh_identifier("h_limit_point", used_names)
+    denominator_proofs: list[str] = []
+    denominator_names: list[str] = []
+    for index, (denominator, slope, exponent) in enumerate(vanishing_denominators):
+        denominator_used_names = continuity_state["used_names"]
+        if not isinstance(denominator_used_names, set):
+            return None
+        hden = _fresh_identifier(f"h_limit_denominator_{index}", denominator_used_names)
+        hslope = _fresh_identifier(f"h_limit_slope_{index}", denominator_used_names)
+        hdiff = _fresh_identifier(f"h_limit_point_ne_{index}", denominator_used_names)
+        hzero = _fresh_identifier(f"h_limit_denominator_zero_{index}", denominator_used_names)
+        hfactor = _fresh_identifier(f"h_limit_denominator_factor_{index}", denominator_used_names)
+        denominator_term = _render_rational_limit_node(
+            denominator,
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: limit_variable},
+        )
+        if denominator_term is None:
+            return None
+        slope_lean = _lean_rational(slope)
+        factor = f"({slope_lean} * ({limit_variable} - {point_lean}))"
+        denominator_proof = (
+            f"  have {hdiff} : {limit_variable} - {point_lean} ≠ 0 := by\n"
+            f"    intro {hzero}\n"
+            f"    apply {hpoint}\n"
+            f"    linarith\n"
+            f"  have {hslope} : {slope_lean} ≠ 0 := by norm_num\n"
+            f"  have {hden} : {denominator_term} ≠ 0 := by\n"
+            f"    have {hfactor} : {denominator_term} = {factor} ^ {exponent} := by ring\n"
+            f"    rw [{hfactor}]\n"
+        )
+        denominator_proof += (
+            f"    exact pow_ne_zero {exponent} (mul_ne_zero {hslope} {hdiff})"
+        )
+        denominator_proofs.append(denominator_proof)
+        denominator_names.append(hden)
+
+    field_simp = f"field_simp [{', '.join(denominator_names)}] <;> ring"
+    denominator_proof_source = "\n".join(
+        "  " + line
+        for proof in denominator_proofs
+        for line in proof.splitlines()
+    )
+    source = f"""import Mathlib.Basic.Real.Basic
+import Mathlib.Topology.Instances.Real.Lemmas
+import Mathlib.Topology.Continuous
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.NormNum
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    Filter.Tendsto (fun {limit_variable} : ℝ => {expression})
+      (nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)) (nhds {result_lean}) := by
+  have {hcont} : ContinuousAt (fun {limit_variable} : ℝ => {real_simplified_expression})
+      {point_lean} := {continuity_proof}
+  have {hvalue} : {real_simplified_value} = {result_lean} := by ring
+  have {heq} : (fun {limit_variable} : ℝ => {expression}) =ᶠ[
+      nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)]
+      (fun {limit_variable} : ℝ => {real_simplified_expression}) := by
+    filter_upwards [self_mem_nhdsWithin] with {limit_variable} {hfilter_mem}
+    have {hpoint} : {limit_variable} ≠ {point_lean} := by simpa using {hfilter_mem}
+{denominator_proof_source}
+    {field_simp}
+  have {hlim} : Filter.Tendsto (fun {limit_variable} : ℝ => {real_simplified_expression})
+      (nhdsWithin {point_lean} ({{{point_lean}}}ᶜ)) (nhds {result_lean}) := by
+    have {hcontinuous_limit} := tendsto_nhdsWithin_of_tendsto_nhds
+      (s := ({{{point_lean}}}ᶜ)) {hcont}.tendsto
+    simpa only [{hvalue}] using {hcontinuous_limit}
+  exact (Filter.tendsto_congr' {heq}).2 {hlim}
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(limit_result.replace("**", "^"), source)
+
+
+def _vanishing_affine_power(
+    node: ast.AST,
+    variable: str,
+    point: Fraction,
+) -> tuple[Fraction, int] | None:
+    exponent = 1
+    affine_node = node
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+        power = _constant_fraction(node.right)
+        if power is None or power.denominator != 1 or not 1 <= power <= 16:
+            return None
+        exponent = power.numerator
+        affine_node = node.left
+    linear = _linear_rational_form(affine_node, variable)
+    if linear is None:
+        return None
+    slope, intercept = linear
+    if slope == 0 or slope * point + intercept != 0:
+        return None
+    return slope, exponent
+
+
+def _linear_rational_form(
+    node: ast.AST,
+    variable: str,
+) -> tuple[Fraction, Fraction] | None:
+    constant = _constant_fraction(node)
+    if constant is not None:
+        return Fraction(0), constant
+    if isinstance(node, ast.Name):
+        return (Fraction(1), Fraction(0)) if node.id == variable else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        form = _linear_rational_form(node.operand, variable)
+        if form is None or isinstance(node.op, ast.UAdd):
+            return form
+        return -form[0], -form[1]
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _linear_rational_form(node.left, variable)
+    right = _linear_rational_form(node.right, variable)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.Add):
+        return left[0] + right[0], left[1] + right[1]
+    if isinstance(node.op, ast.Sub):
+        return left[0] - right[0], left[1] - right[1]
+    if isinstance(node.op, ast.Mult):
+        if left[0] == 0:
+            return right[0] * left[1], right[1] * left[1]
+        if right[0] == 0:
+            return left[0] * right[1], left[1] * right[1]
+        return None
+    if isinstance(node.op, ast.Div):
+        if right[0] != 0 or right[1] == 0:
+            return None
+        return left[0] / right[1], left[1] / right[1]
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if exponent is None or exponent.denominator != 1:
+            return None
+        if exponent == 0:
+            return Fraction(0), Fraction(1)
+        if exponent == 1:
+            return left
+    return None
 
 
 def _prepare_definite_real_integral(
