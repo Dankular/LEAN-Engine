@@ -186,7 +186,7 @@
     {
       "id": "coordinate:cartesian-3d",
       "type": "CoordinateSystem",
-      "description": "Interpret vector components in 3D Cartesian coordinates.",
+      "description": "Interpret scalar fields and vector components in 3D Cartesian coordinates.",
       "coordinate_system": "Cartesian3D",
       "entry_version": 1,
       "service_default": true
@@ -194,7 +194,7 @@
     {
       "id": "coordinate:cylindrical-3d",
       "type": "CoordinateSystem",
-      "description": "Interpret vector components in cylindrical coordinates (rho radial, theta azimuth, z axial).",
+      "description": "Interpret scalar fields and vector components in cylindrical coordinates (rho radial, theta azimuth, z axial).",
       "coordinate_system": "Cylindrical3D",
       "entry_version": 2,
       "service_default": false
@@ -202,7 +202,7 @@
     {
       "id": "coordinate:spherical-3d",
       "type": "CoordinateSystem",
-      "description": "Interpret vector components in spherical coordinates (r radius, theta polar angle, phi azimuth).",
+      "description": "Interpret scalar fields and vector components in spherical coordinates (r radius, theta polar angle, phi azimuth).",
       "coordinate_system": "Spherical3D",
       "entry_version": 2,
       "service_default": false

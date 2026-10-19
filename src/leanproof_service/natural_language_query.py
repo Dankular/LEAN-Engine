@@ -59,7 +59,7 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
 
     coordinate = re.fullmatch(
         r"(?:(?:please\s+)?(?:(?:find|compute|calculate|determine)\s+)?|what\s+is\s+)"
-        r"(?:the\s+)?(?P<operator>gradient|grad|divergence|div|curl)\s+"
+        r"(?:the\s+)?(?P<operator>gradient|grad|divergence|div|curl|laplacian|lap)\s+"
         r"(?:(?:of|for)\s+)?(?P<body>.+)",
         query,
         re.IGNORECASE,
@@ -67,9 +67,22 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     if coordinate:
         operator = coordinate.group("operator").lower()
         body, coordinate_system = _split_coordinate_chart(coordinate.group("body"))
+        if operator in {"laplacian", "lap"}:
+            expression = _math_phrase(_strip_coordinate_field_prefix(body))
+            if not expression or expression.casefold() in {"of", "for"}:
+                raise NaturalLanguageClarification(
+                    "Give the scalar field for the Laplacian, for example "
+                    "'find the Laplacian of x^2 + y^2 + z^2'."
+                )
+            return NaturalLanguageOperation(
+                operation="coordinate_laplacian",
+                expression=expression,
+                coordinate_system=coordinate_system,
+                rule_id="coordinate_laplacian_scalar",
+            )
         if operator in {"gradient", "grad"}:
             expression = _math_phrase(_strip_coordinate_field_prefix(body))
-            if not expression:
+            if not expression or expression.casefold() in {"of", "for"}:
                 raise NaturalLanguageClarification(
                     "Give the scalar field for the gradient, for example "
                     "'find the gradient of x^2 + y^2'."
@@ -97,6 +110,18 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
             components=normalized_components,
             coordinate_system=coordinate_system,
             rule_id="coordinate_curl_components",
+        )
+
+    incomplete_laplacian = re.fullmatch(
+        r"(?:(?:please\s+)?(?:(?:find|compute|calculate|determine)\s+)?|what\s+is\s+)"
+        r"(?:the\s+)?(?:laplacian|lap)(?:\s+(?:of|for))?\s*",
+        query,
+        re.IGNORECASE,
+    )
+    if incomplete_laplacian:
+        raise NaturalLanguageClarification(
+            "Give the scalar field for the Laplacian, for example "
+            "'find the Laplacian of x^2 + y^2 + z^2'."
         )
 
     match = re.fullmatch(

@@ -6960,6 +6960,302 @@ import Mathlib.Tactic.Ring"""
     )
 
 
+def prepare_coordinate_laplacian(
+    expression: str,
+    coordinate_system: str,
+    first_derivative_terms: list[str],
+    second_derivative_terms: list[str],
+    expected_result: str,
+) -> Computation | None:
+    """Prepare a sound Lean proof of a bounded scalar-field Laplacian."""
+    if (
+        len(first_derivative_terms) != 3
+        or len(second_derivative_terms) != 3
+        or coordinate_system not in {"Cartesian3D", "Cylindrical3D", "Spherical3D"}
+    ):
+        return None
+
+    coordinate_names = {
+        "Cartesian3D": ("x", "y", "z"),
+        "Cylindrical3D": ("rho", "theta", "z"),
+        "Spherical3D": ("r", "theta", "phi"),
+    }[coordinate_system]
+    coordinate_variables = set(coordinate_names)
+    domain_conditions: tuple[str, ...] = (
+        ("rho > 0",)
+        if coordinate_system == "Cylindrical3D"
+        else ("r > 0", "sin(theta) != 0")
+        if coordinate_system == "Spherical3D"
+        else ()
+    )
+
+    exact_expression = _normalize_decimal_literals(expression)
+    exact_expected = _normalize_decimal_literals(expected_result)
+    if exact_expression is None or exact_expected is None:
+        return None
+    try:
+        parsed_expression = parse_math_input(exact_expression)
+        expression_tree = ast.parse(parsed_expression.expression, mode="eval")
+        parsed_expected = parse_math_input(exact_expected)
+        expected_tree = ast.parse(parsed_expected.expression, mode="eval")
+    except (MathInputError, SyntaxError, ValueError, RecursionError):
+        return None
+    for tree in (expression_tree, expected_tree):
+        if any(
+            isinstance(node, ast.Call)
+            and (
+                not isinstance(node.func, ast.Name)
+                or node.func.id not in {"sin", "cos"}
+                or len(node.args) != 1
+                or bool(node.keywords)
+            )
+            for node in ast.walk(tree)
+        ):
+            return None
+
+    used_names = set(coordinate_variables)
+    second_derivative_proofs: list[str] = []
+    first_derivative_proofs: list[str] = []
+    actual_first_derivatives: list[str] = []
+    actual_second_derivatives: list[str] = []
+    rewrite_theorems: list[str] = []
+
+    for index, (variable, first_source, second_source) in enumerate(zip(
+        coordinate_names,
+        first_derivative_terms,
+        second_derivative_terms,
+        strict=True,
+    )):
+        exact_first = _normalize_decimal_literals(first_source)
+        exact_second = _normalize_decimal_literals(second_source)
+        if exact_first is None or exact_second is None:
+            return None
+        try:
+            parsed_first = parse_math_input(exact_first)
+            first_tree = ast.parse(parsed_first.expression, mode="eval")
+            parsed_second = parse_math_input(exact_second)
+            second_tree = ast.parse(parsed_second.expression, mode="eval")
+        except (MathInputError, SyntaxError, ValueError, RecursionError):
+            return None
+        for tree in (first_tree, second_tree):
+            if any(
+                isinstance(node, ast.Call)
+                and (
+                    not isinstance(node.func, ast.Name)
+                    or node.func.id not in {"sin", "cos"}
+                    or len(node.args) != 1
+                    or bool(node.keywords)
+                )
+                for node in ast.walk(tree)
+            ):
+                return None
+
+        function_variable = f"coordinate_laplacian_var_{index}"
+        point_variable = f"coordinate_laplacian_point_{index}"
+        second_function_variable = f"coordinate_laplacian_second_var_{index}"
+        if {function_variable, point_variable, second_function_variable} & used_names:
+            return None
+        expression_names: set[str] = set()
+        rendered_field = _render_real_calculus_node(
+            expression_tree.body,
+            expression_names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: function_variable},
+            allow_variable_denominators=True,
+        )
+        first_names_at_point: set[str] = set()
+        first_value_at_point = _render_real_calculus_node(
+            first_tree.body,
+            first_names_at_point,
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        first_names_at_coordinate: set[str] = set()
+        first_value_at_coordinate = _render_real_calculus_node(
+            first_tree.body,
+            first_names_at_coordinate,
+            {"nodes": 0},
+            0,
+            substitutions={variable: variable},
+            allow_variable_denominators=True,
+        )
+        first_names_in_function: set[str] = set()
+        first_value_in_function = _render_real_calculus_node(
+            first_tree.body,
+            first_names_in_function,
+            {"nodes": 0},
+            0,
+            substitutions={variable: second_function_variable},
+            allow_variable_denominators=True,
+        )
+        second_names: set[str] = set()
+        second_value = _render_real_calculus_node(
+            second_tree.body,
+            second_names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: variable},
+            allow_variable_denominators=True,
+        )
+        if any(value is None for value in (
+            rendered_field,
+            first_value_at_point,
+            first_value_at_coordinate,
+            first_value_in_function,
+            second_value,
+        )):
+            return None
+        if function_variable in expression_names or point_variable in first_names_at_point:
+            return None
+
+        first_proof = _derivative_proof_term(
+            expression_tree.body,
+            variable,
+            function_variable,
+            point_variable,
+            {"nodes": 0},
+            0,
+        )
+        second_proof = _derivative_proof_term(
+            first_tree.body,
+            variable,
+            second_function_variable,
+            variable,
+            {"nodes": 0},
+            0,
+        )
+        if first_proof is None or second_proof is None:
+            return None
+
+        field_function = f"(fun {function_variable} : ℝ => {rendered_field})"
+        first_function = (
+            f"(fun {second_function_variable} : ℝ => {first_value_in_function})"
+        )
+        outer_variable = f"coordinate_laplacian_outer_{index}"
+        first_derivative_proofs.append(
+            f"  have h_coordinate_laplacian_first_{index} "
+            f"({point_variable} : ℝ) : HasDerivAt {field_function} "
+            f"({first_value_at_point}) {point_variable} := by\n"
+            f"    convert ({first_proof}) using 1\n"
+            "    all_goals\n"
+            "      first\n"
+            f"      | ext {function_variable}; simp [id_eq] <;> ring\n"
+            "      | simp [id_eq] <;> ring"
+        )
+        second_derivative_proofs.append(
+            f"  have h_coordinate_laplacian_first_eq_{index} : "
+            f"(fun {outer_variable} : ℝ => deriv {field_function} {outer_variable}) "
+            f"=ᶠ[nhds {variable}] {first_function} := by\n"
+            f"    filter_upwards with {outer_variable}\n"
+            f"    exact (h_coordinate_laplacian_first_{index} {outer_variable}).deriv\n"
+            f"  have h_coordinate_laplacian_second_explicit_{index} : "
+            f"HasDerivAt {first_function} ({second_value}) {variable} := by\n"
+            f"    convert ({second_proof}) using 1\n"
+            "    all_goals\n"
+            "      first\n"
+            f"      | ext {second_function_variable}; simp [id_eq] <;> ring\n"
+            "      | simp [id_eq] <;> ring\n"
+            f"  have h_coordinate_laplacian_second_{index} : "
+            f"HasDerivAt (fun {outer_variable} : ℝ => "
+            f"deriv {field_function} {outer_variable}) ({second_value}) {variable} := by\n"
+            f"    exact h_coordinate_laplacian_second_explicit_{index}."
+            f"congr_of_eventuallyEq h_coordinate_laplacian_first_eq_{index}"
+        )
+        actual_first_derivatives.append(f"(deriv {field_function} {variable})")
+        actual_second_derivatives.append(
+            f"(deriv (fun {outer_variable} : ℝ => "
+            f"deriv {field_function} {outer_variable}) {variable})"
+        )
+        rewrite_theorems.extend([
+            f"h_coordinate_laplacian_second_{index}.deriv",
+        ])
+        used_names.update(expression_names)
+        used_names.update(first_names_at_point)
+        used_names.update(first_names_at_coordinate)
+        used_names.update(first_names_in_function)
+        used_names.update(second_names)
+
+    expected_names: set[str] = set()
+    expected_lean = _render_real_calculus_node(
+        expected_tree.body,
+        expected_names,
+        {"nodes": 0},
+        0,
+        allow_variable_denominators=True,
+    )
+    if expected_lean is None:
+        return None
+    used_names.update(expected_names)
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) for name in used_names):
+        return None
+
+    if coordinate_system == "Cylindrical3D":
+        rewrite_theorems.append("(h_coordinate_laplacian_first_0 rho).deriv")
+        binders = f"{' '.join(f'({name} : ℝ)' for name in sorted(used_names))} (h_rho : 0 < rho)"
+        actual_terms = [
+            actual_second_derivatives[0],
+            f"({actual_first_derivatives[0]}) / rho",
+            f"({actual_second_derivatives[1]}) / rho^2",
+            actual_second_derivatives[2],
+        ]
+        final_tactic = "field_simp [ne_of_gt h_rho] <;> ring"
+    elif coordinate_system == "Spherical3D":
+        rewrite_theorems.extend([
+            "(h_coordinate_laplacian_first_0 r).deriv",
+            "(h_coordinate_laplacian_first_1 theta).deriv",
+        ])
+        binders = (
+            f"{' '.join(f'({name} : ℝ)' for name in sorted(used_names))} "
+            "(h_spherical_radius : 0 < r) (h_spherical_sine : Real.sin theta ≠ 0)"
+        )
+        actual_terms = [
+            actual_second_derivatives[0],
+            f"2 * ({actual_first_derivatives[0]}) / r",
+            f"({actual_second_derivatives[1]}) / r^2",
+            f"(Real.cos theta * ({actual_first_derivatives[1]})) / "
+            "(r^2 * Real.sin theta)",
+            f"({actual_second_derivatives[2]}) / (r^2 * Real.sin theta^2)",
+        ]
+        final_tactic = (
+            "field_simp [ne_of_gt h_spherical_radius, h_spherical_sine] <;> ring"
+        )
+    else:
+        binders = " ".join(f"({name} : ℝ)" for name in sorted(used_names))
+        actual_terms = list(actual_second_derivatives)
+        final_tactic = "all_goals ring"
+
+    actual_result = " + ".join(f"({term})" for term in actual_terms)
+    imports = """import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
+import Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring"""
+    theorem_name = "coordinate_laplacian"
+    source = (
+        f"{imports}\n\n"
+        f"theorem {theorem_name} {binders} :\n"
+        f"  {actual_result} = {expected_lean} := by\n"
+        + "\n".join(first_derivative_proofs)
+        + "\n"
+        + "\n".join(second_derivative_proofs)
+        + "\n  rw ["
+        + ", ".join(rewrite_theorems)
+        + f"] <;> {final_tactic}\n\n#print axioms {theorem_name}\n"
+    )
+    return Computation(
+        expected_result.replace("**", "^"),
+        source,
+        domain_conditions=domain_conditions,
+        real_parameters=tuple(sorted(used_names - coordinate_variables)),
+        proof_result_authoritative=True,
+    )
+
+
 def prepare_coordinate_curl(
     components: list[str],
     coordinate_system: str,

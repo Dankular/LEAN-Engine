@@ -38,7 +38,7 @@ _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
-    "coordinate_gradient", "coordinate_curl",
+    "coordinate_gradient", "coordinate_curl", "coordinate_laplacian",
 ]
 
 
@@ -98,6 +98,25 @@ class SymbolicRequest(StrictModel):
             ):
                 raise ValueError(
                     "coordinate_gradient requires one scalar expression and a coordinate system only"
+                )
+            return self
+        if self.operation == "coordinate_laplacian":
+            if (
+                self.expression is None
+                or self.coordinate_system is None
+                or self.components is not None
+                or self.lhs is not None
+                or self.rhs is not None
+                or self.variable is not None
+                or self.lower is not None
+                or self.upper is not None
+                or self.point is not None
+                or self.order is not None
+                or self.assumptions
+                or self.named_units
+            ):
+                raise ValueError(
+                    "coordinate_laplacian requires one scalar expression and a coordinate system only"
                 )
             return self
         if self.operation == "coordinate_divergence":
@@ -227,6 +246,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         return _execute_coordinate_divergence(request, sp, parser)
     if request.operation == "coordinate_gradient":
         return _execute_coordinate_gradient(request, sp, parser)
+    if request.operation == "coordinate_laplacian":
+        return _execute_coordinate_laplacian(request, sp, parser)
     if request.operation == "coordinate_curl":
         return _execute_coordinate_curl(request, sp, parser)
     if request.operation == "identity":
@@ -659,6 +680,138 @@ def _execute_coordinate_gradient(
         "qualification": (
             "The gradient is computed in the selected coordinate system; verify=true can "
             "request a Lean check of the selected chart formula."
+        ),
+    }
+
+
+def _execute_coordinate_laplacian(
+    request: SymbolicRequest,
+    sympy: object,
+    parser: _SafeParser,
+) -> dict[str, object]:
+    """Compute a bounded real-field scalar Laplacian in one selected 3D chart."""
+    parsing_started = perf_counter()
+    source = request.expression or ""
+    try:
+        syntax_tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, ValueError) as exc:
+        raise SymbolicInputError("scalar field syntax is invalid") from exc
+    syntax_nodes = list(ast.walk(syntax_tree))
+    has_calls = any(isinstance(node, ast.Call) for node in syntax_nodes)
+    if len(syntax_nodes) > 256:
+        raise SymbolicInputError(
+            "coordinate-system Laplacian limits expressions to 256 nodes"
+        )
+    if has_calls and not _coordinate_expression_is_bounded(syntax_tree.body):
+        raise SymbolicInputError(
+            "coordinate-system Laplacian accepts bounded real fields with only sin and cos calls"
+        )
+
+    coordinate_names = {
+        "Cartesian3D": ("x", "y", "z"),
+        "Cylindrical3D": ("rho", "theta", "z"),
+        "Spherical3D": ("r", "theta", "phi"),
+    }[request.coordinate_system]
+    # Coordinate fields and any additional field parameters are real-valued.
+    parser.symbols.update(
+        {name: sympy.Symbol(name, real=True) for name in coordinate_names}
+    )
+    function_names = {"sin", "cos"}
+    for node in syntax_nodes:
+        if not isinstance(node, ast.Name):
+            continue
+        name = node.id
+        if name in function_names or name in {"pi", "E"}:
+            continue
+        parser.symbols.setdefault(name, sympy.Symbol(name, real=True))
+
+    expression = parser.parse(source)
+    parse_timing = perf_counter() - parsing_started
+
+    generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
+    if not has_calls:
+        if not generators:
+            if expression.is_Rational is not True:
+                raise SymbolicInputError(
+                    "coordinate-system Laplacian requires a rational-coefficient polynomial"
+                )
+        else:
+            try:
+                polynomial = sympy.Poly(expression, *generators, domain=sympy.QQ)
+            except (sympy.PolynomialError, TypeError, ValueError) as exc:
+                raise SymbolicInputError(
+                    "coordinate-system Laplacian requires a rational-coefficient polynomial"
+                ) from exc
+            if polynomial.total_degree() > 16:
+                raise SymbolicInputError(
+                    "coordinate-system Laplacian limits scalar-field total degree to 16"
+                )
+
+    variables = tuple(parser.symbols[name] for name in coordinate_names)
+    first_derivative_terms = [sympy.diff(expression, variable) for variable in variables]
+    second_derivative_terms = [
+        sympy.diff(expression, variable, 2) for variable in variables
+    ]
+
+    if request.coordinate_system == "Cartesian3D":
+        result_expression = sum(second_derivative_terms)
+        domain_conditions: list[str] = []
+    elif request.coordinate_system == "Cylindrical3D":
+        rho, theta, _z = variables
+        first_rho, _first_theta, _first_z = first_derivative_terms
+        _second_rho, second_theta, _second_z = second_derivative_terms
+        result_expression = (
+            second_derivative_terms[0]
+            + first_rho / rho
+            + second_theta / rho**2
+            + second_derivative_terms[2]
+        )
+        domain_conditions = ["rho > 0"]
+    else:
+        radius, theta, _phi = variables
+        first_radius, first_theta, _first_phi = first_derivative_terms
+        _second_radius, second_theta, second_phi = second_derivative_terms
+        sine = sympy.sin(theta)
+        cosine = sympy.cos(theta)
+        result_expression = (
+            second_derivative_terms[0]
+            + 2 * first_radius / radius
+            + second_theta / radius**2
+            + cosine * first_theta / (sine * radius**2)
+            + second_phi / (radius**2 * sine**2)
+        )
+        domain_conditions = ["r > 0", "sin(theta) != 0"]
+
+    # cancel() performs rational/algebraic normalization without applying
+    # trigonometric identities such as sin(theta)^2 + cos(theta)^2 = 1.
+    result = sympy.cancel(result_expression)
+    normalized_first_derivatives = [sympy.cancel(term) for term in first_derivative_terms]
+    normalized_second_derivatives = [sympy.cancel(term) for term in second_derivative_terms]
+    return {
+        "operation": request.operation,
+        "coordinate_system": request.coordinate_system,
+        "coordinate_variables": list(coordinate_names),
+        "normalized_expression": sympy.sstr(expression),
+        "first_derivative_terms": [
+            sympy.sstr(term) for term in normalized_first_derivatives
+        ],
+        "second_derivative_terms": [
+            sympy.sstr(term) for term in normalized_second_derivatives
+        ],
+        "result": sympy.sstr(result),
+        "parse_timing_seconds": parse_timing,
+        "input_mathml": _mathml_output(sympy, expression),
+        "result_mathml": _mathml_output(sympy, result),
+        "domain_conditions": domain_conditions,
+        "evidence": {
+            **_symbolic_evidence(sympy),
+            "kind": "coordinate_system_symbolic_result",
+            "coordinate_system": request.coordinate_system,
+            "domain_conditions": domain_conditions,
+        },
+        "qualification": (
+            "The scalar Laplacian is computed in the selected coordinate system; this symbolic "
+            "result is not a formal proof."
         ),
     }
 

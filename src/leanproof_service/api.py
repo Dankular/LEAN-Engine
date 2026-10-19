@@ -167,7 +167,7 @@ def capabilities() -> dict[str, object]:
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
             "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
-            "coordinate_gradient", "coordinate_curl",
+            "coordinate_gradient", "coordinate_curl", "coordinate_laplacian",
         ],
         "symbolic_coordinate_divergence": {
             "status": "implemented_initial_slice",
@@ -186,6 +186,12 @@ def capabilities() -> dict[str, object]:
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
             "components": "three rational-coefficient polynomial components through total degree 16, or bounded real expressions using exact constants, arithmetic, and sin/cos (256 nodes, depth 32, integer powers 0 through 16, no variable denominators), in the orthonormal coordinate basis",
             "proof_status": "verify=true adds Lean-checked component derivatives and chart factors with an axiom audit; English interpretation is not proved",
+        },
+        "symbolic_coordinate_laplacian": {
+            "status": "implemented_initial_slice",
+            "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
+            "scalar_field": "rational-coefficient polynomial through total degree 16, or a bounded real expression using exact constants, arithmetic, and sin/cos (256 nodes, depth 32, integer powers 0 through 16, no variable denominators)",
+            "proof_status": "verify=true adds Lean-checked first and second derivatives and the selected chart formula with domain conditions and an axiom audit; English interpretation is not proved",
         },
         "numeric_evaluation": {
             "syntax": ["N[expression]", "N[expression, precision]"],
@@ -317,7 +323,7 @@ def capabilities() -> dict[str, object]:
                     "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
                     "bounded N[expression] and N[expression, precision] numeric evaluations",
                     "bounded natural-language symbolic instructions",
-                    "bounded three-component divergence with a typed coordinate-system assumption",
+                    "bounded gradient/divergence/curl/Laplacian calculations with typed coordinate-system assumptions",
                     "weather location queries",
                     "explicit seven-day weather forecast queries",
                     "supported CODATA constants",
@@ -336,13 +342,14 @@ def capabilities() -> dict[str, object]:
                     "operations": [
                         "evaluate", "identity proof", "simplify", "factor", "expand", "differentiate",
                         "integrate", "solve", "limit", "series", "sum", "product", "plot",
+                        "coordinate gradient/divergence/curl/Laplacian",
                     ],
                     "parser": "deterministic allowlisted templates; no model ranking",
                     "symbolic_backend": "SymPy",
                     "sum_product_bounds": "integer literals only",
                     "sum_product_proof_bounds": "Lean proofs support rational-polynomial finite sums/products over inclusive integer ranges of up to 128 terms",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial and real-calculus computations, finite polynomial Sum/Product computations over up to 128 integer terms, rational-function limits at exact rational or bounded real-polynomial points including selected removable singularities, and bounded arithmetic expressions over supported exact sin/cos/tan values at rational multiples of pi, plus certified numeric approximations for supported rational, radical, exact-trigonometric, and Pi interval expressions; denominator conditions are explicit",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial and real-calculus computations, coordinate gradient/divergence/curl/Laplacian chart formulas, finite polynomial Sum/Product computations over up to 128 integer terms, rational-function limits at exact rational or bounded real-polynomial points including selected removable singularities, and bounded arithmetic expressions over supported exact sin/cos/tan values at rational multiples of pi, plus certified numeric approximations for supported rational, radical, exact-trigonometric, and Pi interval expressions; denominator and chart conditions are explicit",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
@@ -353,7 +360,7 @@ def capabilities() -> dict[str, object]:
                     "ignorecase": True,
                     "reinterpret": False,
                     "translation": False,
-                    "verify": "optional Lean check for supported exact polynomial, real-calculus, finite polynomial Sum/Product computations, rational-function limits at exact rational or bounded real-polynomial points, selected removable singularities, and bounded arithmetic expressions over supported exact sin/cos/tan values at rational multiples of pi",
+                    "verify": "optional Lean check for supported exact polynomial, real-calculus, coordinate gradient/divergence/curl/Laplacian chart formulas, finite polynomial Sum/Product computations, rational-function limits at exact rational or bounded real-polynomial points, selected removable singularities, and bounded arithmetic expressions over supported exact sin/cos/tan values at rational multiples of pi",
                 },
                 "formal_verification": {
                     "query_parameter": "verify=true",
@@ -370,6 +377,7 @@ def capabilities() -> dict[str, object]:
                         "finite sums and products of rational-coefficient polynomials over inclusive integer ranges of up to 128 terms",
                         "finite limits of bounded rational functions at exact rational or bounded real-polynomial points, including selected mixed-denominator removable singularities with explicit conditions",
                         "bounded arithmetic expressions over supported exact sine, cosine, and tangent values at rational multiples of pi",
+                        "coordinate gradient, divergence, curl, and scalar Laplacian formulas in Cartesian3D, Cylindrical3D, and Spherical3D charts",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",

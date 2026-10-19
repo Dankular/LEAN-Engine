@@ -28,6 +28,7 @@ from .computation import (
     prepare_coordinate_curl,
     prepare_coordinate_divergence,
     prepare_coordinate_gradient,
+    prepare_coordinate_laplacian,
     prepare_computation,
 )
 from .interpretations import (
@@ -1031,6 +1032,7 @@ def _verify_query_computation(
     is_coordinate_divergence = is_coordinate_calculus and coordinate_operation == "divergence"
     is_coordinate_gradient = is_coordinate_calculus and coordinate_operation == "gradient"
     is_coordinate_curl = is_coordinate_calculus and coordinate_operation == "curl"
+    is_coordinate_laplacian = is_coordinate_calculus and coordinate_operation == "laplacian"
     code = (
         "CoordinateDivergence"
         if is_coordinate_divergence
@@ -1038,6 +1040,8 @@ def _verify_query_computation(
         if is_coordinate_gradient
         else "CoordinateCurl"
         if is_coordinate_curl
+        else "CoordinateLaplacian"
+        if is_coordinate_laplacian
         else _query_computation_code(request)
     )
     if code is None:
@@ -1068,6 +1072,14 @@ def _verify_query_computation(
             str(typed_ast.get("coordinate_system", "")),
             typed_ast.get("derivative_terms", []),
             typed_ast.get("resolved_components", []),
+        )
+    elif is_coordinate_laplacian:
+        computation = prepare_coordinate_laplacian(
+            str(typed_ast.get("expression", "")),
+            str(typed_ast.get("coordinate_system", "")),
+            typed_ast.get("first_derivative_terms", []),
+            typed_ast.get("second_derivative_terms", []),
+            query_result,
         )
     else:
         computation = prepare_computation(
@@ -1114,7 +1126,12 @@ def _verify_query_computation(
             "reason": "The numeric backend did not produce a certified approximation bound.",
         }
 
-    if request.operation == "numeric" or is_coordinate_gradient or is_coordinate_curl:
+    if (
+        request.operation == "numeric"
+        or is_coordinate_gradient
+        or is_coordinate_curl
+        or is_coordinate_laplacian
+    ):
         query_normalized = candidate_normalized = None
     elif request.operation == "solve" and request.variable is not None:
         query_normalized = _symbolic_solve_signature(
@@ -1165,6 +1182,8 @@ def _verify_query_computation(
             if is_coordinate_gradient
             else "coordinate_curl"
             if is_coordinate_curl
+            else "coordinate_laplacian"
+            if is_coordinate_laplacian
             else _query_claim_type(request, code)
         ),
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
@@ -1191,10 +1210,16 @@ def _verify_query_computation(
                         "Cartesian3D, Cylindrical3D, or Spherical3D orthonormal chart, under "
                         "the listed chart-domain conditions"
                         if is_coordinate_curl
-                        else
-                        "checks the exact selected formula and result under the listed real-parameter "
-                        "and domain conditions; "
-                        "it does not verify the English language-to-formula translation"
+                        else (
+                            "Lean proves the selected scalar Laplacian formula and second derivatives "
+                            "in the chosen Cartesian3D, Cylindrical3D, or Spherical3D chart, under "
+                            "the listed chart-domain conditions"
+                            if is_coordinate_laplacian
+                            else
+                            "checks the exact selected formula and result under the listed real-parameter "
+                            "and domain conditions; "
+                            "it does not verify the English language-to-formula translation"
+                        )
                     )
                 )
             )
@@ -3087,6 +3112,7 @@ def _prepare_query(
                 "coordinate_gradient",
                 "coordinate_divergence",
                 "coordinate_curl",
+                "coordinate_laplacian",
             }:
                 operation_request = _request_from_natural_language_plan(natural_language_plan)
     except NaturalLanguageClarification as exc:
@@ -3135,6 +3161,7 @@ def _prepare_query(
                 "coordinate_gradient",
                 "coordinate_divergence",
                 "coordinate_curl",
+                "coordinate_laplacian",
             }
         )
         if is_natural_language_coordinate:
@@ -3208,8 +3235,18 @@ def _prepare_query(
                 "divergence": "coordinate_divergence",
                 "gradient": "coordinate_gradient",
                 "curl": "coordinate_curl",
+                "laplacian": "coordinate_laplacian",
             }.get(coordinate_operation)
             if symbolic_operation == "coordinate_gradient":
+                symbolic_request = SymbolicRequest(
+                    operation=symbolic_operation,
+                    expression=str(typed_ast.get("expression", "")),
+                    coordinate_system=str(typed_ast.get("coordinate_system", "")),
+                    time_limit_seconds=time_limit_seconds,
+                    numeric_precision=numeric_precision,
+                )
+                return interpreted, symbolic_request
+            if symbolic_operation == "coordinate_laplacian":
                 symbolic_request = SymbolicRequest(
                     operation=symbolic_operation,
                     expression=str(typed_ast.get("expression", "")),
@@ -3404,6 +3441,10 @@ def _coordinate_query_from_natural_language_plan(
         if not plan.expression:
             raise InterpretationError("gradient requires a scalar field")
         return f"grad({plan.expression})"
+    if plan.operation == "coordinate_laplacian":
+        if not plan.expression:
+            raise InterpretationError("Laplacian requires a scalar field")
+        return f"laplacian({plan.expression})"
     function_name = {
         "coordinate_divergence": "div",
         "coordinate_curl": "curl",
