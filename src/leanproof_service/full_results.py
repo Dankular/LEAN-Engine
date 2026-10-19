@@ -2630,14 +2630,23 @@ def _prepare_query(
         if value is None:
             continue
         try:
-            parsed_input = parse_math_input(value)
+            source_value = (
+                _normalize_wolfram_real_functions(value)
+                if operation_request.operation == "numeric"
+                else value
+            )
+            parsed_input = parse_math_input(source_value)
         except MathInputError as exc:
             raise InterpretationError(str(exc)) from exc
         normalized_fields[field] = parsed_input.expression
         input_formats.add(parsed_input.input_format)
     operation_request = operation_request.model_copy(update={
         **normalized_fields,
-        "numeric_precision": numeric_precision,
+        **(
+            {"numeric_precision": numeric_precision}
+            if operation_request.operation != "numeric"
+            else {}
+        ),
         "time_limit_seconds": time_limit_seconds,
     })
 
@@ -2687,6 +2696,8 @@ def _prepare_query(
         typed_ast["point"] = operation_request.point
     if operation_request.order is not None:
         typed_ast["order"] = operation_request.order
+    if operation_request.operation == "numeric":
+        typed_ast["precision"] = operation_request.numeric_precision
     interpreted = {
         "input": input_text,
         "outcome": "validated" if validate_only else "prepared",
@@ -2775,6 +2786,7 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         return None
     operation_name = node.func.id.lower()
     aliases = {
+        "n": "numeric",
         "simplify": "simplify",
         "factor": "factor",
         "expand": "expand",
@@ -2809,6 +2821,7 @@ def _operation_request(
     variable: str | None,
 ) -> SymbolicRequest | None:
     aliases = {
+        "n": "numeric",
         "simplify": "simplify", "factor": "factor", "expand": "expand",
         "differentiate": "differentiate", "diff": "differentiate",
         "integrate": "integrate", "integral": "integrate", "limit": "limit", "series": "series",
@@ -2820,6 +2833,18 @@ def _operation_request(
     operation = aliases.get(operation_name.lower())
     if operation is None:
         return None
+    if operation == "numeric":
+        if len(arguments) not in {1, 2}:
+            raise InterpretationError("N requires an expression and optional integer precision")
+        precision = 16 if len(arguments) == 1 else _bounded_integer_literal(arguments[1])
+        if precision is None or not 1 <= precision <= 500:
+            raise InterpretationError("N precision must be an integer from 1 to 500")
+        return SymbolicRequest(
+            operation="numeric",
+            expression=arguments[0],
+            numeric_precision=precision,
+            time_limit_seconds=5,
+        )
     if operation in {"simplify", "factor", "expand"}:
         if len(arguments) != 1:
             raise InterpretationError(f"{operation} requires exactly one expression")
@@ -2961,15 +2986,16 @@ def _bounded_integer_literal(source: str) -> int | None:
 
 
 def _split_operation_call(query: str) -> tuple[str, list[str]] | None:
-    match = re.match(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*\(", query)
+    match = re.match(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*([\(\[])", query)
     if match is None:
         return None
-    opening_index = query.find("(", match.start(1) + len(match.group(1)))
+    opening = match.group(2)
+    opening_index = query.find(opening, match.start(1) + len(match.group(1)))
     if opening_index < 0:
         return None
     arguments: list[str] = []
     start = opening_index + 1
-    stack = [")"]
+    stack = [{"(": ")", "[": "]"}[opening]]
     xml_depth = 0
     index = start
     while index < len(query):
@@ -3502,6 +3528,8 @@ def _wolfram_input_for_query(
 
     rendered_expression = _wolfram_expression(request.expression or "")
     variable = _wolfram_symbol(request.variable or "")
+    if request.operation == "numeric" and rendered_expression is not None:
+        return f"N[{rendered_expression}, {request.numeric_precision}]"
     if request.operation == "simplify" and rendered_expression is not None:
         return f"Simplify[{rendered_expression}]"
     if request.operation == "factor" and rendered_expression is not None:

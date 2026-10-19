@@ -36,7 +36,7 @@ _DECIMAL_LITERAL = re.compile(
 )
 _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
-    "validate", "simplify", "factor", "expand", "trigexpand", "differentiate", "integrate",
+    "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot",
 ]
 
@@ -55,7 +55,7 @@ class SymbolicRequest(StrictModel):
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=60.0)
-    numeric_precision: int = Field(default=50, ge=10, le=500)
+    numeric_precision: int = Field(default=50, ge=1, le=500)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> SymbolicRequest:
@@ -202,7 +202,13 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             },
         }
     variable = _get_symbol(sp, symbols, request.variable) if request.variable else None
-    if request.operation == "simplify":
+    if request.operation == "numeric":
+        if not expression.is_number:
+            raise SymbolicInputError("N requires a numeric expression without free symbols")
+        result = sp.N(expression, request.numeric_precision)
+        if result.is_finite is False:
+            raise SymbolicInputError("N requires a finite numeric result")
+    elif request.operation == "simplify":
         result = sp.simplify(expression)
     elif request.operation == "factor":
         result = sp.factor(expression)
@@ -328,7 +334,7 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         ]
     numeric_approximation = None
     if (
-        isinstance(result, sp.Basic)
+        request.operation != "numeric" and isinstance(result, sp.Basic)
         and result.is_number
         and result.is_finite is not False
         and result.is_integer is not True

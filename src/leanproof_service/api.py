@@ -164,9 +164,17 @@ def capabilities() -> dict[str, object]:
             "lean_kernel": "configured" if _lean_available() else "not_configured",
         },
         "symbolic_operations": [
-            "validate", "simplify", "factor", "expand", "trigexpand", "differentiate", "integrate",
+            "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
             "limit", "series", "sum", "product", "solve", "identity", "plot",
         ],
+        "numeric_evaluation": {
+            "syntax": ["N[expression]", "N[expression, precision]"],
+            "default_precision_digits": 16,
+            "precision_digits_range": [1, 500],
+            "expression_scope": "finite numeric expressions without free symbols in the bounded parser",
+            "backend": "SymPy arbitrary-precision evaluation; decimal input literals retain exact base-10 semantics",
+            "proof_status": "numeric approximations are not Lean proofs",
+        },
         "symbolic_plot": {
             "syntax": "plot(expression, variable, lower, upper)",
             "bounds": "explicit finite real values with lower < upper",
@@ -287,6 +295,7 @@ def capabilities() -> dict[str, object]:
                     "safe symbolic expressions",
                     "presentation LaTeX and MathML expressions",
                     "simplify/factor/expand/differentiate/integrate/limit/series/sum/product/solve/identity calls",
+                    "bounded N[expression] and N[expression, precision] numeric evaluations",
                     "bounded natural-language symbolic instructions",
                     "weather location queries",
                     "explicit seven-day weather forecast queries",
