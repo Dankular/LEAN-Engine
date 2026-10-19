@@ -320,6 +320,63 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
                 self.assertEqual(verification["result_match"], True)
                 self.assertEqual(verification["axiom_audit"]["status"], "passed")
 
+    def test_divergence_and_gradient_accept_bounded_trigonometric_fields(self) -> None:
+        cases = [
+            {
+                "input": "div(sin(x),cos(y),0)",
+                "operation": "coordinate_divergence",
+                "expected": "-sin(y) + cos(x)",
+                "domain": [],
+            },
+            {
+                "input": "div(0,sin(theta),0)",
+                "assumption": "coordinate:spherical-3d",
+                "operation": "coordinate_divergence",
+                "expected": "2*cos(theta)/r",
+                "domain": ["r > 0", "sin(theta) != 0"],
+            },
+            {
+                "input": "grad(sin(rho)+cos(theta)+z)",
+                "assumption": "coordinate:cylindrical-3d",
+                "operation": "coordinate_gradient",
+                "expected": "(cos(rho), -sin(theta)/rho, 1)",
+                "domain": ["rho > 0"],
+            },
+            {
+                "input": "grad(r*sin(theta)*cos(phi))",
+                "assumption": "coordinate:spherical-3d",
+                "operation": "coordinate_gradient",
+                "expected": "(sin(theta)*cos(phi), cos(phi)*cos(theta), -sin(phi))",
+                "domain": ["r > 0", "sin(theta) != 0"],
+            },
+        ]
+        for case in cases:
+            params = {
+                "input": case["input"],
+                "verify": "true",
+                "output": "json",
+            }
+            if "assumption" in case:
+                params["assumption"] = case["assumption"]
+            with self.subTest(input=case["input"]):
+                response = self.client.get(
+                    "/v2/query", params=params, headers=self.headers
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                queryresult = response.json()["queryresult"]
+                result = next(
+                    pod for pod in queryresult["pods"] if pod["id"] == "Result"
+                )
+                self.assertEqual(result["subpods"][0]["plaintext"], case["expected"])
+                self.assertEqual(queryresult["evidence"]["domain_conditions"], case["domain"])
+                verification = queryresult["evidence"]["formal_verification"]
+                self.assertEqual(verification["status"], "checked", verification)
+                self.assertEqual(verification["claim_type"], case["operation"])
+                self.assertTrue(verification["verified"])
+                self.assertEqual(verification["result_match"], True)
+                self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
     def test_curl_supports_bounded_sine_cosine_fields_in_all_charts(self) -> None:
         cases = [
             {

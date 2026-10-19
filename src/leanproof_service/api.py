@@ -172,13 +172,13 @@ def capabilities() -> dict[str, object]:
         "symbolic_coordinate_divergence": {
             "status": "implemented_initial_slice",
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
-            "components": "three rational-coefficient polynomial expressions, total degree at most 16",
+            "components": "three rational-coefficient polynomial expressions through total degree 16, or bounded real expressions using exact constants, arithmetic, and sin/cos (256 nodes, depth 32, integer powers 0 through 16, no variable denominators)",
             "proof_status": "verify=true adds a Lean-checked chart formula and axiom audit; English interpretation is not proved",
         },
         "symbolic_coordinate_gradient": {
             "status": "implemented_initial_slice",
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D", "Spherical3D"],
-            "scalar_field": "rational-coefficient polynomial, total degree at most 16",
+            "scalar_field": "rational-coefficient polynomial through total degree 16, or a bounded real expression using exact constants, arithmetic, and sin/cos (256 nodes, depth 32, integer powers 0 through 16, no variable denominators)",
             "proof_status": "verify=true adds Lean-checked component derivatives and chart factors with an axiom audit; English interpretation is not proved",
         },
         "symbolic_coordinate_curl": {

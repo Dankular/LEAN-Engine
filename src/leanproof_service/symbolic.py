@@ -441,24 +441,33 @@ def _execute_coordinate_divergence(
     sympy: object,
     parser: _SafeParser,
 ) -> dict[str, object]:
-    """Compute a bounded polynomial divergence in one selected 3D chart."""
+    """Compute a bounded real-field divergence in one selected 3D chart."""
     parsing_started = perf_counter()
     components_source = request.components or []
     expressions = []
+    component_has_calls: list[bool] = []
     for component in components_source:
         try:
             syntax_tree = ast.parse(component, mode="eval")
         except (SyntaxError, RecursionError, ValueError) as exc:
             raise SymbolicInputError("vector component syntax is invalid") from exc
-        if any(isinstance(node, ast.Call) for node in ast.walk(syntax_tree)):
+        syntax_nodes = list(ast.walk(syntax_tree))
+        has_calls = any(isinstance(node, ast.Call) for node in syntax_nodes)
+        component_has_calls.append(has_calls)
+        if has_calls and (
+            len(syntax_nodes) > 256
+            or not _coordinate_expression_is_bounded(syntax_tree.body)
+        ):
             raise SymbolicInputError(
-                "coordinate-system divergence accepts polynomial components without function calls"
+                "coordinate-system divergence accepts bounded real components with only sin and cos calls"
             )
         expressions.append(parser.parse(component))
     parse_timing = perf_counter() - parsing_started
 
     generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
-    for expression in expressions:
+    for expression, has_calls in zip(expressions, component_has_calls, strict=True):
+        if has_calls:
+            continue
         if not generators:
             if expression.is_Rational is not True:
                 raise SymbolicInputError(
@@ -551,37 +560,43 @@ def _execute_coordinate_gradient(
     sympy: object,
     parser: _SafeParser,
 ) -> dict[str, object]:
-    """Compute a bounded polynomial gradient in one selected 3D chart."""
+    """Compute a bounded real-field gradient in one selected 3D chart."""
     parsing_started = perf_counter()
     source = request.expression or ""
     try:
         syntax_tree = ast.parse(source, mode="eval")
     except (SyntaxError, RecursionError, ValueError) as exc:
         raise SymbolicInputError("scalar field syntax is invalid") from exc
-    if any(isinstance(node, ast.Call) for node in ast.walk(syntax_tree)):
+    syntax_nodes = list(ast.walk(syntax_tree))
+    has_calls = any(isinstance(node, ast.Call) for node in syntax_nodes)
+    if has_calls and (
+        len(syntax_nodes) > 256
+        or not _coordinate_expression_is_bounded(syntax_tree.body)
+    ):
         raise SymbolicInputError(
-            "coordinate-system gradient accepts polynomial scalar fields without function calls"
+            "coordinate-system gradient accepts bounded real fields with only sin and cos calls"
         )
     expression = parser.parse(source)
     parse_timing = perf_counter() - parsing_started
 
     generators = tuple(parser.symbols[name] for name in sorted(parser.symbols))
-    if not generators:
-        if expression.is_Rational is not True:
-            raise SymbolicInputError(
-                "coordinate-system gradient requires a rational-coefficient polynomial"
-            )
-    else:
-        try:
-            polynomial = sympy.Poly(expression, *generators, domain=sympy.QQ)
-        except (sympy.PolynomialError, TypeError, ValueError) as exc:
-            raise SymbolicInputError(
-                "coordinate-system gradient requires a rational-coefficient polynomial"
-            ) from exc
-        if polynomial.total_degree() > 16:
-            raise SymbolicInputError(
-                "coordinate-system gradient limits scalar-field total degree to 16"
-            )
+    if not has_calls:
+        if not generators:
+            if expression.is_Rational is not True:
+                raise SymbolicInputError(
+                    "coordinate-system gradient requires a rational-coefficient polynomial"
+                )
+        else:
+            try:
+                polynomial = sympy.Poly(expression, *generators, domain=sympy.QQ)
+            except (sympy.PolynomialError, TypeError, ValueError) as exc:
+                raise SymbolicInputError(
+                    "coordinate-system gradient requires a rational-coefficient polynomial"
+                ) from exc
+            if polynomial.total_degree() > 16:
+                raise SymbolicInputError(
+                    "coordinate-system gradient limits scalar-field total degree to 16"
+                )
 
     if request.coordinate_system == "Cartesian3D":
         variables = [
@@ -665,7 +680,7 @@ def _coordinate_numeric_literal(node: ast.AST) -> Fraction | None:
     return None
 
 
-def _coordinate_curl_expression_is_bounded(node: ast.AST, depth: int = 0) -> bool:
+def _coordinate_expression_is_bounded(node: ast.AST, depth: int = 0) -> bool:
     if depth > 32:
         return False
     if isinstance(node, ast.Constant):
@@ -679,14 +694,14 @@ def _coordinate_curl_expression_is_bounded(node: ast.AST, depth: int = 0) -> boo
             r"[a-z][a-z0-9_]{0,31}", node.id
         ) is not None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        return _coordinate_curl_expression_is_bounded(node.operand, depth + 1)
+        return _coordinate_expression_is_bounded(node.operand, depth + 1)
     if isinstance(node, ast.BinOp):
         if isinstance(node.op, ast.Div):
             denominator = _coordinate_numeric_literal(node.right)
             return (
                 denominator is not None
                 and denominator != 0
-                and _coordinate_curl_expression_is_bounded(node.left, depth + 1)
+                and _coordinate_expression_is_bounded(node.left, depth + 1)
             )
         if isinstance(node.op, ast.Pow):
             exponent = _coordinate_numeric_literal(node.right)
@@ -694,12 +709,12 @@ def _coordinate_curl_expression_is_bounded(node: ast.AST, depth: int = 0) -> boo
                 exponent is not None
                 and exponent.denominator == 1
                 and 0 <= exponent <= 16
-                and _coordinate_curl_expression_is_bounded(node.left, depth + 1)
+                and _coordinate_expression_is_bounded(node.left, depth + 1)
             )
         if isinstance(node.op, (ast.Add, ast.Sub, ast.Mult)):
-            return _coordinate_curl_expression_is_bounded(
+            return _coordinate_expression_is_bounded(
                 node.left, depth + 1
-            ) and _coordinate_curl_expression_is_bounded(node.right, depth + 1)
+            ) and _coordinate_expression_is_bounded(node.right, depth + 1)
         return False
     if isinstance(node, ast.Call):
         return (
@@ -707,7 +722,7 @@ def _coordinate_curl_expression_is_bounded(node: ast.AST, depth: int = 0) -> boo
             and node.func.id in {"sin", "cos"}
             and len(node.args) == 1
             and not node.keywords
-            and _coordinate_curl_expression_is_bounded(node.args[0], depth + 1)
+            and _coordinate_expression_is_bounded(node.args[0], depth + 1)
         )
     return False
 
@@ -734,7 +749,7 @@ def _execute_coordinate_curl(
         component_has_calls.append(has_trigonometric_calls)
         if has_trigonometric_calls and (
             len(syntax_nodes) > 256
-            or not _coordinate_curl_expression_is_bounded(syntax_tree.body)
+            or not _coordinate_expression_is_bounded(syntax_tree.body)
         ):
             raise SymbolicInputError(
                 "coordinate-system curl accepts bounded real expressions with only sin and cos calls"

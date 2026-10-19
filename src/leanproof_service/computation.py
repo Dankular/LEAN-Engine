@@ -6599,7 +6599,7 @@ def prepare_coordinate_divergence(
     derivative_terms: list[str],
     expected_result: str,
 ) -> Computation | None:
-    """Prepare a Lean theorem for a selected polynomial 3D divergence chart."""
+    """Prepare a Lean theorem for bounded real-field divergence in a selected chart."""
     if (
         len(components) != 3
         or len(derivative_terms) != 3
@@ -6644,14 +6644,11 @@ def prepare_coordinate_divergence(
             return None
         if any(
             isinstance(node, ast.Call)
-            and not (
-                coordinate_system == "Spherical3D"
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "sin"
-                and len(node.args) == 1
-                and not node.keywords
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id == "theta"
+            and (
+                not isinstance(node.func, ast.Name)
+                or node.func.id not in {"sin", "cos"}
+                or len(node.args) != 1
+                or bool(node.keywords)
             )
             for node in ast.walk(expression_tree)
         ):
@@ -6766,7 +6763,7 @@ import Mathlib.Tactic.Ring"""
         + ", ".join(
             f"h_coordinate_derivative_{index}.deriv" for index in range(3)
         )
-        + f"]\n  {final_tactic}\n\n#print axioms {theorem_name}\n"
+        + f"] <;> {final_tactic}\n\n#print axioms {theorem_name}\n"
     )
     return Computation(
         expected_result.replace("**", "^"),
@@ -6782,7 +6779,7 @@ def prepare_coordinate_gradient(
     derivative_terms: list[str],
     expected_components: list[str],
 ) -> Computation | None:
-    """Prepare a Lean theorem for a selected polynomial 3D gradient chart."""
+    """Prepare a Lean theorem for a bounded real-field gradient in a selected chart."""
     if (
         len(derivative_terms) != 3
         or len(expected_components) != 3
@@ -6812,7 +6809,16 @@ def prepare_coordinate_gradient(
         expression_tree = ast.parse(parsed_expression.expression, mode="eval")
     except (MathInputError, SyntaxError, ValueError, RecursionError):
         return None
-    if any(isinstance(node, ast.Call) for node in ast.walk(expression_tree)):
+    if any(
+        isinstance(node, ast.Call)
+        and (
+            not isinstance(node.func, ast.Name)
+            or node.func.id not in {"sin", "cos"}
+            or len(node.args) != 1
+            or bool(node.keywords)
+        )
+        for node in ast.walk(expression_tree)
+    ):
         return None
 
     used_names = set(coordinate_variables)
@@ -6942,7 +6948,7 @@ import Mathlib.Tactic.Ring"""
         + ", ".join(
             f"h_coordinate_gradient_{index}.deriv" for index in range(3)
         )
-        + f"]\n  {final_tactic}\n\n#print axioms {theorem_name}\n"
+        + f"] <;> {final_tactic}\n\n#print axioms {theorem_name}\n"
     )
     display_result = f"({', '.join(component.replace('**', '^') for component in expected_components)})"
     return Computation(
@@ -7146,7 +7152,7 @@ import Mathlib.Tactic.Ring"""
         + "\n".join(derivative_proofs)
         + "\n  simp only ["
         + ", ".join(f"h_coordinate_curl_{index}.deriv" for index in range(6))
-        + f"]\n  {final_tactic}\n\n#print axioms coordinate_curl\n"
+        + f"] <;> {final_tactic}\n\n#print axioms coordinate_curl\n"
     )
     display_result = f"({', '.join(component.replace('**', '^') for component in expected_components)})"
     return Computation(
