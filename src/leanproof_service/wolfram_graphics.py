@@ -337,16 +337,18 @@ def _primitive(value: object, style: _Style) -> list[_Primitive] | None:
         else:
             return None
         return [_make_primitive("rectangle", (low, high), style)]
-    if name in {"Line", "Polygon", "Point"} and len(value.args) == 1:
+    if name in {"Arrow", "Line", "Polygon", "Point"} and len(value.args) == 1:
         paths = _coordinate_paths(value.args[0])
         if paths is None:
             return None
         minimum = 1 if name == "Point" else (3 if name == "Polygon" else 2)
         if any(len(path) < minimum for path in paths):
             return None
+        if name == "Arrow" and any(path[-1] == path[-2] for path in paths):
+            return None
         if sum(len(path) for path in paths) > _MAX_GRAPHIC_VERTICES:
             return None
-        kind = name.lower()
+        kind = "arrow" if name == "Arrow" else name.lower()
         return [_make_primitive(kind, path, style) for path in paths]
     return None
 
@@ -513,15 +515,38 @@ def _svg(
                 f'height="{_fmt(bottom-top)}" fill="{color}" fill-opacity="{opacity}" '
                 f'stroke="{color}" stroke-opacity="{opacity}" stroke-width="{width}"/>'
             )
-        elif primitive.kind in {"line", "polygon"}:
-            coordinates = " ".join(
-                f"{_fmt(x)},{_fmt(y)}" for x, y in (point(*coordinate) for coordinate in primitive.points)
-            )
+        elif primitive.kind in {"arrow", "line", "polygon"}:
+            screen_points = [point(*coordinate) for coordinate in primitive.points]
+            coordinates = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in screen_points)
             if primitive.kind == "line":
                 elements.append(
                     f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
                     f'stroke-opacity="{opacity}" stroke-width="{width}" stroke-linecap="round" '
                     'stroke-linejoin="round"/>'
+                )
+            elif primitive.kind == "arrow":
+                elements.append(
+                    f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
+                    f'stroke-opacity="{opacity}" stroke-width="{width}" stroke-linecap="round" '
+                    'stroke-linejoin="round"/>'
+                )
+                (start_x, start_y), (tip_x, tip_y) = screen_points[-2:]
+                direction_x = tip_x - start_x
+                direction_y = tip_y - start_y
+                length = math.hypot(direction_x, direction_y)
+                unit_x, unit_y = direction_x / length, direction_y / length
+                head_length = max(8.0, min(16.0, primitive.stroke_width * 3.5))
+                head_half_width = head_length * 0.38
+                base_x = tip_x - unit_x * head_length
+                base_y = tip_y - unit_y * head_length
+                left_x = base_x - unit_y * head_half_width
+                left_y = base_y + unit_x * head_half_width
+                right_x = base_x + unit_y * head_half_width
+                right_y = base_y - unit_x * head_half_width
+                elements.append(
+                    f'<polygon points="{_fmt(tip_x)},{_fmt(tip_y)} '
+                    f'{_fmt(left_x)},{_fmt(left_y)} {_fmt(right_x)},{_fmt(right_y)}" '
+                    f'fill="{color}" fill-opacity="{opacity}"/>'
                 )
             else:
                 elements.append(

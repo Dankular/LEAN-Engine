@@ -33,7 +33,7 @@ The [README](README.md) covers local setup and the main API areas. Supported ope
 
 ### CAG graphics slice
 
-The CAG route renders bounded `Graphics` expressions containing circles and ellipses, disks, rectangles, lines, polygons, and points. It supports a curated set of color directives (`Red`, `Blue`, `Green`, `Black`, `White`, `Gray`, `Orange`, `Purple`, `Cyan`, `Magenta`, `Yellow`, `Pink`, `Brown`, `RGBColor`, and `GrayLevel`), plus `Opacity`, line thickness, point size, `PlotRange`, `ImageSize`, and `Background`. Results are Markdown links to service-hosted SVGs. The capability URL is retained in a bounded process-local store for 15 minutes. Expressions and options outside this grammar remain unsupported; graphics are renderings, not Lean proofs.
+The CAG route renders bounded `Graphics` expressions containing circles and ellipses, disks, rectangles, lines, arrows, polygons, and points. `Arrow[{{x1,y1},...,{xn,yn}}]` draws a linear path with a default endpoint head; custom `Arrowheads`, curved paths, and 3D graphics remain unsupported. It supports a curated set of color directives (`Red`, `Blue`, `Green`, `Black`, `White`, `Gray`, `Orange`, `Purple`, `Cyan`, `Magenta`, `Yellow`, `Pink`, `Brown`, `RGBColor`, and `GrayLevel`), plus `Opacity`, line thickness, point size, `PlotRange`, `ImageSize`, and `Background`. Results are Markdown links to service-hosted SVGs. The capability URL is retained in a bounded process-local store for 15 minutes. Expressions and options outside this grammar remain unsupported; graphics are renderings, not Lean proofs.
 
 ### CAG API request contract
 

@@ -84,8 +84,22 @@ class WolframGraphicsTests(unittest.TestCase):
         self.assertIn('fill="#ed7d31"', svg)
         self.assertIn('fill-opacity="0.5"', svg)
 
+    def test_arrow_path_renders_a_directed_endpoint_head(self) -> None:
+        svg = render_wolfram_graphics(
+            "Graphics[{Blue, Arrow[{{0, 0}, {1, 1}, {2, 1}}]}]"
+        )
+
+        self.assertIsNotNone(svg)
+        assert svg is not None
+        self.assertIn('<polyline points="', svg)
+        self.assertIn('<polygon points="250,100 ', svg)
+        self.assertIn('fill="#1565c0"', svg)
+
     def test_unknown_primitives_and_executable_syntax_remain_rejected(self) -> None:
-        self.assertIsNone(render_wolfram_graphics("Graphics[{Red, Arrow[{{0,0},{1,1}}]}]"))
+        self.assertIsNone(
+            render_wolfram_graphics("Graphics[{Red, BezierCurve[{{0,0},{1,1},{2,0}}]}]")
+        )
+        self.assertIsNone(render_wolfram_graphics("Graphics[{Red, Arrow[{{0,0},{0,0}}]}]"))
         self.assertIsNone(
             render_wolfram_graphics('Graphics[{Red, Circle[]}]; Export["x.svg", 1]')
         )

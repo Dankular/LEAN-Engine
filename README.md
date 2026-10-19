@@ -54,7 +54,7 @@ Supported results include Lean evidence. For this example, the derivative is che
 
 The Wolfram-compatible CAG route also accepts `FreeformPrompt["France population"]` and the leading `=` prompt form for supported provider-backed natural-language lookups. These results retain provider provenance; retrieved facts are not Lean proofs. Unsupported or ambiguous prompts return suggestions.
 
-The CAG route renders bounded 2D `Graphics` expressions containing circles, disks, rectangles, lines, polygons, and points as service-hosted SVG image URLs. It supports a curated color/style set and plot-range sizing. It does not execute arbitrary Wolfram graphics code, and graphics are not Lean proofs.
+The CAG route renders bounded 2D `Graphics` expressions containing circles, disks, rectangles, lines, arrows, polygons, and points as service-hosted SVG image URLs. Arrow paths receive a default endpoint head. It supports a curated color/style set and plot-range sizing. It does not execute arbitrary Wolfram graphics code, and graphics are not Lean proofs.
 
 - **Proofs and counterexamples:** typed claims and bounded arithmetic formulas, checked with Lean or searched with Z3.
 - **Symbolic computation:** a bounded expression grammar for algebra, calculus, and solving.
