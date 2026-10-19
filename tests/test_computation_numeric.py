@@ -39,6 +39,10 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[1 + Pi, 20]": ("4.1415926535897932385", 20, "1/20000000000000000000"),
             "N[-Pi, 20]": ("-3.1415926535897932385", 20, "1/20000000000000000000"),
             "N[Pi - 3, 19]": ("0.1415926535897932385", 19, "1/20000000000000000000"),
+            "N[Pi^2, 16]": ("9.869604401089359", 16, "1/2000000000000000"),
+            "N[Sqrt[Pi], 10]": ("1.772453851", 10, "1/2000000000"),
+            "N[Pi+Sqrt[2], 15]": ("4.55580621596289", 15, "1/200000000000000"),
+            "N[Pi*Sqrt[2], 15]": ("4.44288293815837", 15, "1/200000000000000"),
             "N[Sqrt[2]]": ("1.414213562373095", 16, "1/2000000000000000"),
             "N[Sqrt[2], 3]": ("1.41", 3, "1/200"),
             "N[-Sqrt[2], 3]": ("-1.41", 3, "1/200"),
@@ -130,6 +134,29 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         self.assertEqual(evidence["axiom_audit"]["status"], "passed")
         self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
         self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
+
+    def test_non_affine_pi_numeric_expressions_are_interval_checked(self) -> None:
+        cases = {
+            "N[Pi^2, 16]": "9.869604401089359",
+            "N[Sqrt[Pi], 10]": "1.772453851",
+            "N[Pi+Sqrt[2], 15]": "4.55580621596289",
+            "N[Pi*Sqrt[2], 15]": "4.44288293815837",
+        }
+        for code, expected_value in cases.items():
+            with self.subTest(code=code):
+                response = self.client.post(
+                    "/api/cag/v1/WolframLanguageCompute",
+                    json={"code": code, "timeConstraint": 60},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                evidence = response.json()["evidence"]
+                approximation = evidence["numeric_approximation"]
+                self.assertEqual(approximation["value"], expected_value)
+                self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+                self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
+                self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
 
     def test_exact_trigonometric_numeric_result_composes_lean_proofs(self) -> None:
         cases = {
@@ -251,6 +278,7 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         for code in (
             "N[Pi, 21]",
             "N[Pi - 3, 20]",
+            "N[Pi^2, 20]",
             "N[Sqrt[-2]]",
             "N[Sqrt[x]]",
             "N[1/3, 0]",

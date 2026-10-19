@@ -73,6 +73,8 @@ _FINITE_SUM_PRODUCT = re.compile(
 _TRIG_EXPAND_MAX_MULTIPLE = 12
 _MAX_DYADIC_PI_DENOMINATOR_EXPONENT = 12
 _MAX_RECURSIVE_HALF_ANGLE_STEPS = 8
+_PI_LOWER_D20 = Fraction(314159265358979323846, 10**20)
+_PI_UPPER_D20 = Fraction(314159265358979323847, 10**20)
 _EXACT_PI_TRIG_VALUES: dict[
     str, dict[int, tuple[str, str, str]]
 ] = {
@@ -381,7 +383,13 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
         affine_pi = _prepare_affine_pi_numeric_approximation(arguments[0], precision)
         if affine_pi is not None:
             return affine_pi
-        return _prepare_exact_trig_rational_numeric_approximation(
+        exact_trig_numeric = _prepare_exact_trig_rational_numeric_approximation(
+            arguments[0],
+            precision,
+        )
+        if exact_trig_numeric is not None:
+            return exact_trig_numeric
+        return _prepare_general_interval_numeric_approximation(
             arguments[0],
             precision,
         )
@@ -581,8 +589,8 @@ def _prepare_affine_pi_numeric_approximation(
             precision,
         )
 
-    pi_lower = Fraction(314159265358979323846, 10**20)
-    pi_upper = Fraction(314159265358979323847, 10**20)
+    pi_lower = _PI_LOWER_D20
+    pi_upper = _PI_UPPER_D20
     if pi_coefficient > 0:
         lower = pi_coefficient * pi_lower + rational_offset
         upper = pi_coefficient * pi_upper + rational_offset
@@ -827,7 +835,7 @@ def _prepare_exact_trig_radical_numeric_approximation(
 
     exact_lhs, exact_rhs = equation
     selected: tuple[
-        Fraction, Fraction, Fraction, str, list[str], str
+        Fraction, Fraction, Fraction, str, list[str], str, str, str
     ] | None = None
     for guard_digits in (12, 32, 64, 96):
         scale = 10 ** (precision + guard_digits)
@@ -880,16 +888,24 @@ def _prepare_exact_trig_radical_numeric_approximation(
             _fraction_text(error_bound),
             proof_lines,
             display_result,
+            lean_expression,
+            hypothesis,
         )
         break
 
     if selected is None:
         return None
 
-    lower, upper, approximation, error_bound_text, interval_proof, display_result = selected
-    lean_expression = _render_exact_radical_lean(tree.body)
-    if lean_expression is None:
-        return None
+    (
+        lower,
+        upper,
+        approximation,
+        error_bound_text,
+        interval_proof,
+        display_result,
+        lean_expression,
+        hypothesis,
+    ) = selected
 
     exact_source_lines = exact_computation.lean_source.splitlines()
     imports = list(dict.fromkeys(
@@ -897,7 +913,9 @@ def _prepare_exact_trig_radical_numeric_approximation(
             line for line in exact_source_lines if line.startswith("import ")
         ]
         + [
+            "import Mathlib.Analysis.Real.Pi.Bounds",
             "import Mathlib.Analysis.SpecialFunctions.Sqrt",
+            "import Mathlib.Algebra.Order.Ring.Basic",
             "import Mathlib.Tactic.Linarith",
             "import Mathlib.Tactic.NormNum",
             "import Mathlib.Tactic.Ring",
@@ -947,6 +965,129 @@ def _prepare_exact_trig_radical_numeric_approximation(
     )
 
 
+def _prepare_general_interval_numeric_approximation(
+    expression_source: str,
+    precision: int,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    selected: tuple[
+        Fraction, Fraction, Fraction, str, list[str], str, str, str, str
+    ] | None = None
+    for guard_digits in (12, 32, 64, 96):
+        scale = 10 ** (precision + guard_digits)
+        proof_lines: list[str] = []
+        interval = _build_exact_radical_interval(
+            tree.body,
+            scale,
+            proof_lines,
+            {"next_name": 0},
+        )
+        if interval is None:
+            return None
+        lower, upper, interval_expression, hypothesis = interval
+        if lower > 0:
+            magnitude_lower, magnitude_upper = lower, upper
+        elif upper < 0:
+            magnitude_lower, magnitude_upper = -upper, -lower
+        else:
+            continue
+        lower_exponent = _decimal_exponent(magnitude_lower)
+        upper_exponent = _decimal_exponent(magnitude_upper)
+        if lower_exponent != upper_exponent:
+            continue
+
+        midpoint = (lower + upper) / 2
+        try:
+            with localcontext() as context:
+                context.prec = precision + guard_digits
+                context.rounding = ROUND_HALF_EVEN
+                midpoint_decimal = Decimal(midpoint.numerator) / Decimal(midpoint.denominator)
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = ROUND_HALF_EVEN
+                decimal_value = +midpoint_decimal
+        except (InvalidOperation, OverflowError, ValueError):
+            return None
+
+        approximation = Fraction(decimal_value)
+        error_bound = _rounding_error_bound_at_exponent(lower_exponent, precision)
+        if lower < approximation - error_bound or upper > approximation + error_bound:
+            continue
+        display_result = format(decimal_value, "f")
+        if display_result in {"-0", "-0.0"}:
+            display_result = "0"
+        lean_expression = _render_exact_radical_lean(tree.body)
+        if lean_expression is None:
+            return None
+        selected = (
+            lower,
+            upper,
+            approximation,
+            _fraction_text(error_bound),
+            proof_lines,
+            display_result,
+            lean_expression,
+            interval_expression,
+            hypothesis,
+        )
+        break
+
+    if selected is None:
+        return None
+
+    (
+        lower,
+        upper,
+        approximation,
+        error_bound_text,
+        interval_proof,
+        display_result,
+        lean_expression,
+        interval_expression,
+        hypothesis,
+    ) = selected
+    interval_body = "\n".join(
+        f"  {nested_line}"
+        for line in interval_proof
+        for nested_line in line.splitlines()
+    )
+    lean_source = f"""import Mathlib.Analysis.Real.Pi.Bounds
+import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Algebra.Order.Ring.Basic
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.NormNum
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute :
+  |{lean_expression} - {_lean_rational(approximation)}| ≤ {_lean_rational(Fraction(error_bound_text))} := by
+  have h_expression : {lean_expression} = {interval_expression} := by
+    ring
+  rw [h_expression]
+{interval_body}
+  rw [abs_le]
+  constructor
+  · linarith [{hypothesis}.1]
+  · linarith [{hypothesis}.2]
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(
+        display_result,
+        lean_source,
+        numeric_precision=precision,
+        numeric_error_bound=error_bound_text,
+    )
+
+
 def _build_exact_radical_interval(
     node: ast.AST,
     scale: int,
@@ -962,6 +1103,15 @@ def _build_exact_radical_interval(
             f"{expression} ≤ {expression} := by norm_num"
         )
         return exact_rational, exact_rational, expression, name
+
+    if isinstance(node, ast.Name) and node.id == "pi":
+        name = _next_numeric_interval_name(state)
+        proof_lines.append(
+            f"have {name} : {_lean_rational(_PI_LOWER_D20)} ≤ Real.pi ∧ "
+            f"Real.pi ≤ {_lean_rational(_PI_UPPER_D20)} := by\n"
+            "  constructor <;> linarith [Real.pi_gt_d20, Real.pi_lt_d20]"
+        )
+        return _PI_LOWER_D20, _PI_UPPER_D20, "Real.pi", name
 
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         child = _build_exact_radical_interval(node.operand, scale, proof_lines, state)
@@ -1034,6 +1184,52 @@ def _build_exact_radical_interval(
     if not isinstance(node, ast.BinOp):
         return None
 
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if (
+            exponent is None
+            or exponent.denominator != 1
+            or not 0 <= exponent <= 16
+        ):
+            return None
+        base = _build_exact_radical_interval(node.left, scale, proof_lines, state)
+        if base is None or base[0] < 0:
+            return None
+        base_lower, base_upper, base_expression, base_name = base
+        power = exponent.numerator
+        expression = f"({base_expression} ^ {power})"
+        name = _next_numeric_interval_name(state)
+        if power == 0:
+            lower = upper = Fraction(1)
+            proof_lines.append(
+                f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
+                f"{expression} ≤ {_lean_rational(upper)} := by norm_num"
+            )
+            return lower, upper, expression, name
+        lower, upper = _quantize_rational_interval(
+            base_lower**power,
+            base_upper**power,
+            scale,
+        )
+        lower_exact = f"({_lean_rational(base_lower)} ^ {power})"
+        upper_exact = f"({_lean_rational(base_upper)} ^ {power})"
+        lower_name = f"{name}_lower"
+        upper_name = f"{name}_upper"
+        proof_lines.extend(
+            [
+                f"have {lower_name} : {lower_exact} ≤ {expression} := by",
+                f"  exact pow_le_pow_left₀ (by norm_num) {base_name}.1 {power}",
+                f"have {upper_name} : {expression} ≤ {upper_exact} := by",
+                f"  exact pow_le_pow_left₀ (by linarith [{base_name}.1]) {base_name}.2 {power}",
+                f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
+                f"{expression} ≤ {_lean_rational(upper)} := by",
+                "  constructor",
+                f"  · calc\n      {_lean_rational(lower)} ≤ {lower_exact} := by norm_num\n      _ ≤ {expression} := {lower_name}",
+                f"  · calc\n      {expression} ≤ {upper_exact} := {upper_name}\n      _ ≤ {_lean_rational(upper)} := by norm_num",
+            ]
+        )
+        return lower, upper, expression, name
+
     if isinstance(node.op, (ast.Mult, ast.Div)):
         if isinstance(node.op, ast.Div):
             denominator = _constant_fraction(node.right)
@@ -1105,21 +1301,33 @@ def _build_exact_radical_interval(
         elif coefficient is None:
             coefficient = _constant_fraction(node.right)
             other_node = node.left
-        if coefficient is None:
-            return None
-        child = _build_exact_radical_interval(other_node, scale, proof_lines, state)
-        if child is None:
-            return None
-        child_lower, child_upper, child_expression, child_name = child
-        lower, upper = _scale_rational_interval(child_lower, child_upper, coefficient, scale)
-        expression = f"({_lean_rational(coefficient)} * ({child_expression}))"
-        name = _next_numeric_interval_name(state)
-        proof_lines.append(
-            f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
-            f"{expression} ≤ {_lean_rational(upper)} := by\n"
-            f"  constructor <;> linarith [{child_name}.1, {child_name}.2]"
-        )
-        return lower, upper, expression, name
+        if coefficient is not None:
+            child = _build_exact_radical_interval(other_node, scale, proof_lines, state)
+            if child is None:
+                return None
+            child_lower, child_upper, child_expression, child_name = child
+            lower, upper = _scale_rational_interval(child_lower, child_upper, coefficient, scale)
+            expression = f"({_lean_rational(coefficient)} * ({child_expression}))"
+            name = _next_numeric_interval_name(state)
+            proof_lines.append(
+                f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
+                f"{expression} ≤ {_lean_rational(upper)} := by\n"
+                f"  constructor <;> linarith [{child_name}.1, {child_name}.2]"
+            )
+            return lower, upper, expression, name
+        if isinstance(node.op, ast.Mult):
+            left = _build_exact_radical_interval(node.left, scale, proof_lines, state)
+            right = _build_exact_radical_interval(node.right, scale, proof_lines, state)
+            if left is None or right is None:
+                return None
+            return _build_nonnegative_product_interval(
+                left,
+                right,
+                scale,
+                proof_lines,
+                state,
+            )
+        return None
 
     if isinstance(node.op, (ast.Add, ast.Sub)):
         left = _build_exact_radical_interval(node.left, scale, proof_lines, state)
@@ -1154,6 +1362,52 @@ def _build_exact_radical_interval(
     return None
 
 
+def _build_nonnegative_product_interval(
+    left: tuple[Fraction, Fraction, str, str],
+    right: tuple[Fraction, Fraction, str, str],
+    scale: int,
+    proof_lines: list[str],
+    state: dict[str, int],
+) -> tuple[Fraction, Fraction, str, str] | None:
+    left_lower, left_upper, left_expression, left_name = left
+    right_lower, right_upper, right_expression, right_name = right
+    if left_lower < 0 or right_lower < 0:
+        return None
+    lower, upper = _quantize_rational_interval(
+        left_lower * right_lower,
+        left_upper * right_upper,
+        scale,
+    )
+    expression = f"(({left_expression}) * ({right_expression}))"
+    lower_product = (
+        f"({_lean_rational(left_lower)} * {_lean_rational(right_lower)})"
+    )
+    upper_product = (
+        f"({_lean_rational(left_upper)} * {_lean_rational(right_upper)})"
+    )
+    name = _next_numeric_interval_name(state)
+    proof_lines.extend(
+        [
+            f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
+            f"{expression} ≤ {_lean_rational(upper)} := by",
+            "  constructor",
+            "  · calc",
+            f"      {_lean_rational(lower)} ≤ {lower_product} := by norm_num",
+            f"      _ ≤ ({left_expression}) * {_lean_rational(right_lower)} := "
+            f"mul_le_mul_of_nonneg_right {left_name}.1 (by norm_num)",
+            f"      _ ≤ {expression} := mul_le_mul_of_nonneg_left "
+            f"{right_name}.1 (by linarith [{left_name}.1])",
+            "  · calc",
+            f"      {expression} ≤ {_lean_rational(left_upper)} * ({right_expression}) := "
+            f"mul_le_mul_of_nonneg_right {left_name}.2 (by linarith [{right_name}.1])",
+            f"      _ ≤ {upper_product} := mul_le_mul_of_nonneg_left "
+            f"{right_name}.2 (by norm_num)",
+            f"      _ ≤ {_lean_rational(upper)} := by norm_num",
+        ]
+    )
+    return lower, upper, expression, name
+
+
 def _render_exact_radical_lean(node: ast.AST) -> str | None:
     rational = _constant_fraction(node)
     if rational is not None:
@@ -1173,6 +1427,8 @@ def _render_exact_radical_lean(node: ast.AST) -> str | None:
             return None
         argument = _render_exact_radical_lean(node.args[0])
         return f"Real.sqrt ({argument})" if argument is not None else None
+    if isinstance(node, ast.Name) and node.id == "pi":
+        return "Real.pi"
     if not isinstance(node, ast.BinOp):
         return None
     if isinstance(node.op, (ast.Add, ast.Sub)):
@@ -1199,7 +1455,11 @@ def _render_exact_radical_lean(node: ast.AST) -> str | None:
                 if other is not None
                 else None
             )
-        return None
+        left = _render_exact_radical_lean(node.left)
+        right = _render_exact_radical_lean(node.right)
+        if left is None or right is None:
+            return None
+        return f"(({left}) * ({right}))"
     if isinstance(node.op, ast.Div):
         denominator = _constant_fraction(node.right)
         numerator = _render_exact_radical_lean(node.left)
@@ -1216,6 +1476,16 @@ def _render_exact_radical_lean(node: ast.AST) -> str | None:
             f"(({numerator}) / "
             f"({denominator_expression}))"
         )
+    if isinstance(node.op, ast.Pow):
+        exponent = _constant_fraction(node.right)
+        if (
+            exponent is None
+            or exponent.denominator != 1
+            or not 0 <= exponent <= 16
+        ):
+            return None
+        base = _render_exact_radical_lean(node.left)
+        return f"({base} ^ {exponent.numerator})" if base is not None else None
     return None
 
 

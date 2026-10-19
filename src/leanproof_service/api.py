@@ -448,7 +448,7 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
-                    "N for exact rationals, rational square roots, rational-valued and supported radical-valued exact Pi-trigonometric expressions, and affine rational-Pi expressions, with a Lean-checked absolute error bound",
+                    "N for exact rationals, rational square roots, supported radical-valued exact Pi-trigonometric expressions, and bounded Pi expressions, with a Lean-checked absolute error bound",
                     "Exact Sin/Cos/Tan values for bounded rational Pi multiples reducible to supported angles, checked by Lean",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
@@ -460,15 +460,16 @@ def capabilities() -> dict[str, object]:
                 ],
                 "numeric_approximation": {
                     "syntax": ["N[expression]", "N[expression, precision]"],
-                    "scope": "exact rationals, square roots of nonnegative rationals, exact Pi-trigonometric expressions reducible to rational linear combinations or positive-denominator quotients of supported nested square roots, and affine expressions in Pi with rational coefficients",
+                    "scope": "exact rationals, square roots of nonnegative rationals, exact Pi-trigonometric expressions reducible to rational linear combinations or positive-denominator quotients of supported nested square roots, and bounded expressions involving Pi with supported rational arithmetic, nonnegative products/powers, square roots, and positive-denominator quotients",
                     "precision_significant_digits": {
                         "default": 16,
                         "exact_rational_trigonometric_and_sqrt_range": [1, 500],
                         "affine_pi_range": [1, 20],
+                        "other_pi_interval": "accepted only when Mathlib's imported Pi interval proves the requested absolute-error bound",
                     },
                     "proof": "Lean checks a rational absolute-error bound connecting the evaluated expression to the returned decimal value",
                     "evidence_fields": ["value", "precision_significant_digits", "absolute_error_bound"],
-                    "unsupported": "algebraic and transcendental expressions outside rational square roots, rational linear combinations or positive-denominator quotients of supported nested square roots from exact Pi-trigonometric values, and affine rational-Pi forms; affine-Pi requests are rejected when the available interval cannot prove the requested precision",
+                    "unsupported": "algebraic and transcendental expressions outside rational square roots, supported exact Pi-trigonometric radicals, and the bounded Pi interval grammar; Pi expressions are rejected when the available interval cannot prove the requested precision",
                 },
                 "explicit_base_log": {
                     "syntax": "Log[base, argument]",
@@ -1396,7 +1397,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
         "Supported operations include bounded arithmetic, exact reducible rational-Pi Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
-        "finite polynomial Sum/Product, certified rational, rational-square-root, rational-valued and supported radical-valued exact-trigonometric, and affine-Pi N approximations, rational-function limits, selected exact Pi-bound "
+        "finite polynomial Sum/Product, certified rational and square-root, supported radical-valued exact-trigonometric and bounded Pi N approximations, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof."
     ),
