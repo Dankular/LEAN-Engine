@@ -50,10 +50,8 @@ _REAL_POLYNOMIAL_SOLVE = re.compile(
     r"(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*Reals\s*\]\s*"
 )
 _REAL_LINEAR_SYSTEM_SOLVE = re.compile(
-    r"(?is)\s*Solve\s*\[\s*\{\s*(?P<first_equation>[^,{}]+?)\s*,\s*"
-    r"(?P<second_equation>[^,{}]+?)\s*\}\s*,\s*\{\s*"
-    r"(?P<first_variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
-    r"(?P<second_variable>[a-z][a-z0-9_]{0,31})\s*\}\s*,\s*Reals\s*\]\s*"
+    r"(?is)\s*Solve\s*\[\s*\{(?P<equations>.*?)\}\s*,\s*"
+    r"\{(?P<variables>.*?)\}\s*,\s*Reals\s*\]\s*"
 )
 
 
@@ -129,11 +127,22 @@ theorem wolfram_language_compute (x : ℝ) :
 
     real_linear_system_solve = _REAL_LINEAR_SYSTEM_SOLVE.fullmatch(code)
     if real_linear_system_solve is not None:
+        equation_sources = _split_top_level_commas(
+            real_linear_system_solve.group("equations")
+        )
+        variable_sources = _split_top_level_commas(
+            real_linear_system_solve.group("variables")
+        )
+        if equation_sources is None or variable_sources is None:
+            return None
+        if any(
+            re.fullmatch(r"[a-z][a-z0-9_]{0,31}", variable) is None
+            for variable in variable_sources
+        ):
+            return None
         return _prepare_real_linear_system_solve(
-            real_linear_system_solve.group("first_equation"),
-            real_linear_system_solve.group("second_equation"),
-            real_linear_system_solve.group("first_variable"),
-            real_linear_system_solve.group("second_variable"),
+            equation_sources,
+            variable_sources,
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
@@ -1317,23 +1326,45 @@ def _prepare_real_polynomial_solve(
     return Computation(display_result, proof_source)
 
 
+def _split_top_level_commas(source: str) -> list[str] | None:
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    closing_tokens = set(closing_for.values())
+    stack: list[str] = []
+    items: list[str] = []
+    item_start = 0
+    for index, character in enumerate(source):
+        if character in closing_for:
+            stack.append(closing_for[character])
+        elif character in closing_tokens:
+            if not stack or stack.pop() != character:
+                return None
+        elif character == "," and not stack:
+            items.append(source[item_start:index].strip())
+            item_start = index + 1
+    if stack:
+        return None
+    items.append(source[item_start:].strip())
+    return items if all(items) else None
+
+
 def _prepare_real_linear_system_solve(
-    first_equation_source: str,
-    second_equation_source: str,
-    first_variable: str,
-    second_variable: str,
+    equation_sources: list[str],
+    variables: list[str],
 ) -> Computation | None:
     import sympy as _sympy
 
-    variables = (first_variable, second_variable)
-    if first_variable == second_variable:
+    if (
+        not 2 <= len(variables) <= 4
+        or len(equation_sources) != len(variables)
+        or len(set(variables)) != len(variables)
+    ):
         return None
 
     lean_equations: list[str] = []
     sympy_equations = []
     symbols = tuple(_sympy.Symbol(variable) for variable in variables)
     allowed_variables = set(variables)
-    for equation_source in (first_equation_source, second_equation_source):
+    for equation_source in equation_sources:
         comparison = re.fullmatch(
             r"(?is)\s*(?P<lhs>.+?)\s*==\s*(?P<rhs>.+?)\s*",
             equation_source,
@@ -1415,21 +1446,60 @@ def _prepare_real_linear_system_solve(
             f"{variable} = {_lean_rational(value)}"
             for variable, value in zip(variables, solution_fractions)
         )
-        forward_proof = """  · rintro ⟨hequation1, hequation2⟩
-    constructor
-    · linarith [hequation1, hequation2]
-    · linarith [hequation1, hequation2]"""
-        backward_proof = f"""  · rintro ⟨h{first_variable}, h{second_variable}⟩
-    subst {first_variable}
-    subst {second_variable}
-    constructor <;> norm_num"""
+        equation_hypotheses = [
+            f"hequation{index + 1}" for index in range(len(variables))
+        ]
+        solution_hypotheses = [f"h{variable}" for variable in variables]
+        linear_hypothesis_list = (
+            "[" + ", ".join(equation_hypotheses) + "]"
+        )
+
+        def render_conjunction_proof(
+            tactics: list[str],
+            indent: int = 4,
+            bullet: bool = False,
+        ) -> list[str]:
+            prefix = " " * indent
+            bullet_prefix = "· " if bullet else ""
+            if len(tactics) == 1:
+                return [f"{prefix}{bullet_prefix}{tactics[0]}"]
+            lines = [f"{prefix}{bullet_prefix}constructor"]
+            child_indent = indent + (2 if bullet else 0)
+            lines.extend(
+                render_conjunction_proof([tactics[0]], child_indent, bullet=True)
+            )
+            lines.extend(
+                render_conjunction_proof(tactics[1:], child_indent, bullet=True)
+            )
+            return lines
+
+        forward_proof = "\n".join(
+            [
+                f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩",
+                *render_conjunction_proof(
+                    [f"linarith {linear_hypothesis_list}" for _ in variables]
+                ),
+            ]
+        )
+        backward_proof = "\n".join(
+            [
+                f"  · rintro ⟨{', '.join(solution_hypotheses)}⟩",
+                *[f"    subst {variable}" for variable in variables],
+                *render_conjunction_proof(["norm_num" for _ in variables]),
+            ]
+        )
     else:
         if matrix.rank() == matrix.row_join(right_hand_side).rank():
             return None
         result = "{}"
         result_proposition = "False"
-        forward_proof = """  · rintro ⟨hequation1, hequation2⟩
-    linarith [hequation1, hequation2]"""
+        equation_hypotheses = [
+            f"hequation{index + 1}" for index in range(len(variables))
+        ]
+        forward_proof = (
+            f"  · rintro ⟨{', '.join(equation_hypotheses)}⟩\n"
+            f"    linarith [{', '.join(equation_hypotheses)}]"
+        )
         backward_proof = """  · intro hfalse
     exact False.elim hfalse"""
 
@@ -1440,7 +1510,7 @@ def _prepare_real_linear_system_solve(
 import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.NormNum
 
-theorem wolfram_language_compute ({first_variable} {second_variable} : ℝ) :
+theorem wolfram_language_compute ({' '.join(variables)} : ℝ) :
     ({system_proposition}) ↔ ({result_proposition}) := by
   constructor
 {forward_proof}

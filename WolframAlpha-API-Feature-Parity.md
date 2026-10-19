@@ -49,12 +49,12 @@ included in the evidence when the proof currently needs them.
 `Solve[lhs == rhs, variable, Reals]` supports univariate rational-coefficient
 polynomials of degree at most four when they factor completely over the rationals,
 plus exact real quadratic-radical roots and quadratics with no real roots. Nonzero
-constant equations are also supported. `Solve[{eq1, eq2}, {x, y}, Reals]` supports
-rational 2-by-2 linear systems with a unique solution or no solution. Underdetermined,
-nonlinear, or larger systems remain
-unsupported, as do complex-domain solving, degree greater than four, and degree-three
-or degree-four polynomials without a complete rational factorization. Lean checks each
-returned solution set against the submitted equation or system.
+constant equations are also supported. `Solve[{eq1, ..., eqn}, {x1, ..., xn}, Reals]`
+supports rational square linear systems of size two through four with a unique solution
+or no solution. Underdetermined, nonlinear, or larger systems remain unsupported, as do
+complex-domain solving, degree greater than four, and degree-three or degree-four
+polynomials without a complete rational factorization. Lean checks each returned
+solution set against the submitted equation or system.
 
 `D[ArcSin[argument], x]` and `D[ArcCos[argument], x]` now require the explicit real
 domain conditions `-1 < argument` and `argument < 1`. Constant arguments outside
