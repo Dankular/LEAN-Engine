@@ -172,7 +172,7 @@ def capabilities() -> dict[str, object]:
             "status": "implemented_initial_slice",
             "coordinate_systems": ["Cartesian3D", "Cylindrical3D"],
             "components": "three rational-coefficient polynomial expressions, total degree at most 16",
-            "proof_status": "SymPy result; coordinate-calculus transformation is not Lean-verified",
+            "proof_status": "verify=true adds a Lean-checked chart formula and axiom audit; English interpretation is not proved",
         },
         "numeric_evaluation": {
             "syntax": ["N[expression]", "N[expression, precision]"],

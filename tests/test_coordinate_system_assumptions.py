@@ -80,7 +80,7 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
         self.assertEqual(assumption["selection_source"], "per_occurrence_override")
         self.assertEqual(assumption["occurrences"][0]["id"], "CoordinateSystem:1")
 
-    def test_verify_does_not_claim_a_proof_of_the_coordinate_transformation(self) -> None:
+    def test_cylindrical_divergence_is_lean_checked_under_chart_domain(self) -> None:
         response = self.client.get(
             "/v2/query",
             params={
@@ -93,9 +93,34 @@ class CoordinateSystemAssumptionApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.text)
-        verification = response.json()["queryresult"]["evidence"]["formal_verification"]
-        self.assertEqual(verification["status"], "unsupported")
-        self.assertFalse(verification["verified"])
+        queryresult = response.json()["queryresult"]
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["claim_type"], "coordinate_divergence")
+        self.assertEqual(verification["domain_conditions"], ["rho > 0"])
+        self.assertEqual(verification["real_parameters"], ["x", "y"])
+        self.assertEqual(verification["axiom_audit"]["status"], "passed")
+
+    def test_cartesian_divergence_can_be_lean_checked(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "div(x rho,y z,z x)",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        verification = queryresult["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["claim_type"], "coordinate_divergence")
+        self.assertEqual(verification["real_parameters"], ["rho"])
+        self.assertNotIn("domain_conditions", verification)
 
 
 if __name__ == "__main__":

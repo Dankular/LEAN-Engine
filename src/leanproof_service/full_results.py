@@ -25,6 +25,7 @@ from .computation import (
     _real_sympy_expression,
     _split_top_level_commas,
     check_computation,
+    prepare_coordinate_divergence,
     prepare_computation,
 )
 from .interpretations import (
@@ -1013,16 +1014,8 @@ def _verify_query_computation(
     symbolic_result: object,
 ) -> dict[str, Any]:
     typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
-    if typed_ast.get("node") == "vector_calculus_operation":
-        return {
-            "status": "unsupported",
-            "verified": False,
-            "reason": (
-                "Lean verification of coordinate-system divergence transformations is not "
-                "implemented; only the selected symbolic result was computed."
-            ),
-        }
-    code = _query_computation_code(request)
+    is_coordinate_divergence = typed_ast.get("node") == "vector_calculus_operation"
+    code = "CoordinateDivergence" if is_coordinate_divergence else _query_computation_code(request)
     if code is None:
         return {
             "status": "unsupported",
@@ -1031,10 +1024,18 @@ def _verify_query_computation(
         }
 
     proof_deadline = perf_counter() + max(0.001, min(timeout_seconds, 180.0))
-    computation = prepare_computation(
-        code,
-        max(0.001, min(timeout_seconds, 60.0)),
-    )
+    if is_coordinate_divergence:
+        computation = prepare_coordinate_divergence(
+            typed_ast.get("components", []),
+            str(typed_ast.get("coordinate_system", "")),
+            typed_ast.get("derivative_terms", []),
+            query_result,
+        )
+    else:
+        computation = prepare_computation(
+            code,
+            max(0.001, min(timeout_seconds, 60.0)),
+        )
     if computation is None:
         if request.operation == "numeric":
             return {
@@ -1120,6 +1121,8 @@ def _verify_query_computation(
         "claim_type": (
             "numeric_approximation"
             if request.operation == "numeric"
+            else "coordinate_divergence"
+            if is_coordinate_divergence
             else _query_claim_type(request, code)
         ),
         "interpretation_kind": interpreted.get("interpretation", {}).get("kind"),
@@ -1131,6 +1134,11 @@ def _verify_query_computation(
             )
             if request.operation == "numeric"
             else (
+                "Lean proves the selected three-component polynomial divergence formula "
+                "in the chosen Cartesian3D or Cylindrical3D coordinate chart, under the "
+                "listed chart-domain conditions"
+                if is_coordinate_divergence
+                else
                 "checks the exact selected formula and result under the listed real-parameter "
                 "and domain conditions; "
                 "it does not verify the English language-to-formula translation"

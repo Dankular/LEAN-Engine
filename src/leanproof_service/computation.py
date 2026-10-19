@@ -6593,6 +6593,153 @@ theorem wolfram_language_compute{theorem_binders} :
     )
 
 
+def prepare_coordinate_divergence(
+    components: list[str],
+    coordinate_system: str,
+    derivative_terms: list[str],
+    expected_result: str,
+) -> Computation | None:
+    """Prepare a Lean theorem for a selected polynomial 3D divergence chart."""
+    if (
+        len(components) != 3
+        or len(derivative_terms) != 3
+        or coordinate_system not in {"Cartesian3D", "Cylindrical3D"}
+    ):
+        return None
+
+    if coordinate_system == "Cartesian3D":
+        derivative_sources = list(zip(components, ("x", "y", "z"), derivative_terms, strict=True))
+        coordinate_variables = {"x", "y", "z"}
+        domain_conditions: tuple[str, ...] = ()
+    else:
+        derivative_sources = [
+            (f"rho*({components[0]})", "rho", derivative_terms[0]),
+            (components[1], "theta", derivative_terms[1]),
+            (components[2], "z", derivative_terms[2]),
+        ]
+        coordinate_variables = {"rho", "theta", "z"}
+        domain_conditions = ("rho > 0",)
+
+    rendered_derivatives: list[str] = []
+    derivative_proofs: list[str] = []
+    used_names = set(coordinate_variables)
+    for index, (expression_source, variable, derivative_source) in enumerate(derivative_sources):
+        exact_expression = _normalize_decimal_literals(expression_source)
+        exact_derivative = _normalize_decimal_literals(derivative_source)
+        if exact_expression is None or exact_derivative is None:
+            return None
+        try:
+            parsed_expression = parse_math_input(exact_expression)
+            parsed_derivative = parse_math_input(exact_derivative)
+            expression_tree = ast.parse(parsed_expression.expression, mode="eval")
+        except (MathInputError, SyntaxError, ValueError, RecursionError):
+            return None
+        if any(isinstance(node, ast.Call) for node in ast.walk(expression_tree)):
+            return None
+
+        expression_names: set[str] = set()
+        rendered_function = _render_real_calculus_node(
+            expression_tree.body,
+            expression_names,
+            {"nodes": 0},
+            0,
+            substitutions={variable: f"coordinate_deriv_var_{index}"},
+            allow_variable_denominators=True,
+        )
+        derivative_lean, derivative_names = _render_real_calculus_lean(
+            parsed_derivative.expression,
+            allow_variable_denominators=True,
+        )
+        function_variable = f"coordinate_deriv_var_{index}"
+        if (
+            rendered_function is None
+            or derivative_lean is None
+            or function_variable in expression_names
+        ):
+            return None
+        proof = _derivative_proof_term(
+            expression_tree.body,
+            variable,
+            function_variable,
+            variable,
+            {"nodes": 0},
+            0,
+        )
+        if proof is None:
+            return None
+
+        derivative_function = f"(fun {function_variable} : ℝ => {rendered_function})"
+        rendered_derivatives.append(f"(deriv {derivative_function} {variable})")
+        derivative_proofs.append(
+            f"  have h_coordinate_derivative_{index} : HasDerivAt {derivative_function} "
+            f"{derivative_lean} {variable} := by\n"
+            f"    convert ({proof}) using 1\n"
+            f"    all_goals\n"
+            f"      first\n"
+            f"      | ext {function_variable}; simp [id_eq] <;> ring\n"
+            f"      | simp [id_eq] <;> ring"
+        )
+        used_names.update(expression_names)
+        used_names.update(derivative_names)
+
+    expected_exact = _normalize_decimal_literals(expected_result)
+    if expected_exact is None:
+        return None
+    try:
+        parsed_expected = parse_math_input(expected_exact)
+    except MathInputError:
+        return None
+    expected_lean, expected_names = _render_real_calculus_lean(
+        parsed_expected.expression,
+        allow_variable_denominators=True,
+    )
+    if expected_lean is None:
+        return None
+    used_names.update(expected_names)
+    used_names.update(coordinate_variables)
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) for name in used_names):
+        return None
+
+    binders = " ".join(f"({name} : ℝ)" for name in sorted(used_names))
+    if coordinate_system == "Cylindrical3D":
+        binders = f"{binders} (h_rho : 0 < rho)"
+    operator_terms = (
+        " + ".join(rendered_derivatives)
+        if coordinate_system == "Cartesian3D"
+        else f"({rendered_derivatives[0]}) / rho + "
+        f"({rendered_derivatives[1]}) / rho + {rendered_derivatives[2]}"
+    )
+    imports = """import Mathlib.Analysis.Calculus.Deriv.Add
+import Mathlib.Analysis.Calculus.Deriv.Mul
+import Mathlib.Analysis.Calculus.Deriv.Pow
+import Mathlib.Analysis.Calculus.Deriv.Inv
+import Mathlib.Tactic.FieldSimp
+import Mathlib.Tactic.Ring"""
+    final_tactic = (
+        "field_simp [ne_of_gt h_rho] <;> ring"
+        if coordinate_system == "Cylindrical3D"
+        else "ring"
+    )
+    theorem_name = "coordinate_divergence"
+    source = (
+        f"{imports}\n\n"
+        f"theorem {theorem_name} {binders} :\n"
+        f"  ({operator_terms}) = {expected_lean} := by\n"
+        + "\n".join(derivative_proofs)
+        + "\n  rw ["
+        + ", ".join(
+            f"h_coordinate_derivative_{index}.deriv" for index in range(3)
+        )
+        + f"]\n  {final_tactic}\n\n#print axioms {theorem_name}\n"
+    )
+    return Computation(
+        expected_result.replace("**", "^"),
+        source,
+        domain_conditions=domain_conditions,
+        real_parameters=tuple(sorted(used_names - coordinate_variables)),
+    )
+
+
 def _prepare_polynomial_computation(
     code: str,
     time_limit_seconds: float,

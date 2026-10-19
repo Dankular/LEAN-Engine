@@ -679,6 +679,7 @@ def _interpret_coordinate_divergence(
             if coordinate_system == "Cartesian3D"
             else ["rho", "theta", "z"]
         ),
+        "derivative_terms": symbolic.get("derivative_terms", []),
         "resolved_expression": resolved_expression,
         "display_expression": source_query,
         "assumption_id": selected_item["id"],
