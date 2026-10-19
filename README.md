@@ -62,6 +62,8 @@ Supported results include Lean evidence. For this example, the derivative is che
 
 `/v2/query` also accepts Wolfram-style `N[expression]` and `N[expression, precision]` calls for finite numeric expressions in the bounded parser. `N[expression]` defaults to 16 digits; explicit precision is limited to 1–500 digits. These are SymPy numeric approximations, not Lean proofs. Decimal input literals use the service's exact base-10 semantics.
 
+The CAG endpoint supports `N[expression]` and `N[expression, precision]` for exact rational expressions. Lean checks that `evidence.numeric_approximation.value` differs from the exact rational input by no more than `evidence.numeric_approximation.absolute_error_bound`; precision is 1–500 significant digits and defaults to 16. Irrational and transcendental numeric inputs are not yet supported by this certified route.
+
 After choosing a DBnomics dataset, discover matching series with input such as `series search: GDP within OECD/DP_LIVE`. `/v2/query` returns five candidates per page; use `seriesoffset` to page through results. `/v1/knowledge/query` accepts the same provider, dataset, and phrase with an `offset` field.
 
 ### Assumption overrides

@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from time import monotonic
 
@@ -32,6 +32,8 @@ class Computation:
     domain_conditions: tuple[str, ...] = ()
     real_parameters: tuple[str, ...] = ()
     proof_result_authoritative: bool = False
+    numeric_precision: int | None = None
+    numeric_error_bound: str | None = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,24 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
     # Wolfram Language uses case-sensitive `Pi`; the shared parser reserves lowercase `pi`.
     if re.search(r"\bpi\b|π", code):
         return None
+
+    numeric_call = re.fullmatch(
+        r"(?is)\s*N\s*\[(?P<arguments>.*)\]\s*",
+        code,
+    )
+    if numeric_call is not None:
+        arguments = _split_top_level_commas(numeric_call.group("arguments"))
+        if arguments is None or len(arguments) not in (1, 2):
+            return None
+        precision = 16
+        if len(arguments) == 2:
+            if re.fullmatch(r"\d{1,3}", arguments[1]) is None:
+                return None
+            precision = int(arguments[1])
+            if not 1 <= precision <= 500:
+                return None
+        return _prepare_rational_numeric_approximation(arguments[0], precision)
+
     exact_trig_constant = _prepare_exact_pi_trigonometric_constant(code)
     if exact_trig_constant is not None:
         return exact_trig_constant
@@ -473,6 +493,64 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_rational_numeric_approximation(
+    expression_source: str,
+    precision: int,
+) -> Computation | None:
+    exact_value = _parse_exact_rational(expression_source)
+    if exact_value is None:
+        return None
+
+    try:
+        with localcontext() as context:
+            context.prec = precision
+            context.rounding = ROUND_HALF_EVEN
+            decimal_value = Decimal(exact_value.numerator) / Decimal(exact_value.denominator)
+    except (InvalidOperation, OverflowError, ValueError):
+        return None
+
+    approximation = Fraction(decimal_value)
+    error_bound = _rounding_error_bound(exact_value, precision)
+    display_result = format(decimal_value, "f")
+    if display_result in {"-0", "-0.0"}:
+        display_result = "0"
+
+    lean_source = f"""import Mathlib.Data.Real.Basic
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute :
+  |({_lean_rational(exact_value)} - {_lean_rational(approximation)})| ≤ {_lean_rational(error_bound)} := by
+  norm_num
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(
+        display_result,
+        lean_source,
+        numeric_precision=precision,
+        numeric_error_bound=_fraction_text(error_bound),
+    )
+
+
+def _rounding_error_bound(value: Fraction, precision: int) -> Fraction:
+    if value == 0:
+        return Fraction(0)
+
+    numerator = abs(value.numerator)
+    denominator = value.denominator
+    exponent = len(str(numerator)) - len(str(denominator))
+    if exponent >= 0:
+        if numerator < denominator * (10 ** exponent):
+            exponent -= 1
+    elif numerator * (10 ** -exponent) < denominator:
+        exponent -= 1
+
+    decimal_place = exponent - precision + 1
+    if decimal_place >= 0:
+        return Fraction(10 ** decimal_place, 2)
+    return Fraction(1, 2 * (10 ** -decimal_place))
 
 
 def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:

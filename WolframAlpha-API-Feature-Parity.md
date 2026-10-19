@@ -289,6 +289,10 @@ expressions without free symbols in the bounded parser. The default is 16 decima
 explicit integer precision is limited to 1–500. Wolfram documents `N[expr]` as machine
 precision and `N[expr,n]` as an attempt at n-digit precision ([official `N` reference](https://reference.wolfram.com/language/ref/N.html)). The service uses SymPy and returns the approximation as the primary Result; it does not claim a Lean proof. `verify=true` reports that numerical approximation is outside the Lean fragment. Decimal literals keep the service's exact base-10 interpretation, so approximate-input precision propagation is not reproduced.
 
+## Certified numeric evaluation
+
+The CAG endpoint accepts Wolfram-style `N[expression]` and `N[expression, precision]` for exact rational expressions, with 16 significant digits by default and an explicit precision range of 1–500. The result includes `evidence.numeric_approximation.value`, the requested significant digits, and a rational absolute-error bound. Lean proves that this value differs from the exact rational input by no more than that bound, and the normal axiom audit applies. Irrational and transcendental inputs remain unsupported by this certified CAG path. `/v2/query` numeric evaluation continues to cover bounded finite numeric expressions through SymPy and does not claim a Lean proof.
+
 ## Acceptance checklist for a parity release
 
 - The `/v2/query` route has a stable, documented request contract and does not confuse our credentials with Wolfram credentials.

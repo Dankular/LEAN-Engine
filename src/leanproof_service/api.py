@@ -448,6 +448,7 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
+                    "N for exact rational expressions, with a Lean-checked absolute error bound",
                     "Exact Sin/Cos/Tan values for bounded rational Pi multiples reducible to supported angles, checked by Lean",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
@@ -457,6 +458,14 @@ def capabilities() -> dict[str, object]:
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
                     "Solve for univariate equations through degree eight with complete rational factorization, exact real quadratic roots, and bounded rational linear systems over Reals",
                 ],
+                "numeric_approximation": {
+                    "syntax": ["N[expression]", "N[expression, precision]"],
+                    "scope": "exact rational expressions",
+                    "precision_significant_digits": {"default": 16, "range": [1, 500]},
+                    "proof": "Lean checks an exact rational absolute-error bound for the returned decimal value",
+                    "evidence_fields": ["value", "precision_significant_digits", "absolute_error_bound"],
+                    "unsupported": "irrational and transcendental expressions",
+                },
                 "explicit_base_log": {
                     "syntax": "Log[base, argument]",
                     "base": "statically rational, greater than zero, and different from one",
@@ -1383,7 +1392,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
         "Supported operations include bounded arithmetic, exact reducible rational-Pi Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
-        "finite polynomial Sum/Product, rational-function limits, selected exact Pi-bound "
+        "finite polynomial Sum/Product, certified rational N approximations, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof."
     ),
@@ -1496,6 +1505,13 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
             "time_constraint_applied": effective_budget,
         },
     }
+    if computation.numeric_precision is not None:
+        body["evidence"]["numeric_approximation"] = {
+            "value": computation.display_result,
+            "precision_significant_digits": computation.numeric_precision,
+            "absolute_error_bound": computation.numeric_error_bound,
+            "claim": "the exact rational input differs from value by at most this bound",
+        }
     return JSONResponse(status_code=200, content=body)
 
 
