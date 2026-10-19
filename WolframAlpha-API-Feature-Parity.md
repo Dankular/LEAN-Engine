@@ -158,7 +158,10 @@ represented as `1/Sinh[argument]` and returns `Sinh[argument] ≠ 0`. Their
 antiderivatives are handled separately: `Integrate[Sech[a*x+b], x]` supports
 rational nonzero slopes `a` and returns `ArcTan[Sinh[a*x+b]]/a` after Lean checks
 the derivative using `cosh² - sinh² = 1`. It needs no additional domain
-condition. `Integrate[Csch[a*x+b], x]` supports rational nonzero slopes `a` and
+condition. Definite `Integrate[Sech[a*x+b], {x,l,u}]` also supports rational
+nonzero slopes and exact rational bounds; Lean checks the arctan-sinh endpoint
+difference, with no extra domain conditions. `Integrate[Csch[a*x+b], x]` supports
+rational nonzero slopes `a` and
 returns `Log[Abs[Tanh[(a*x+b)/2]]]/a` after Lean checks the derivative using the
 hyperbolic double-angle identity. It returns nonzero conditions for both
 `Tanh[(a*x+b)/2]` and `Sinh[a*x+b]`; nonlinear Csch arguments remain unsupported.

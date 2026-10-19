@@ -1482,6 +1482,12 @@ def _prepare_definite_real_integral(
     )
     if csch_arguments and csch_affine is None:
         return None
+    sech_arguments = _sech_arguments(expression_tree.body)
+    sech_affine = _direct_sech_affine_integrand(
+        expression_tree.body, variable
+    )
+    if sech_arguments and sech_affine is None:
+        return None
     explicit_base_log_arguments = {
         ast.dump(node.args[0], include_attributes=False)
         for node in ast.walk(expression_tree.body)
@@ -1509,6 +1515,14 @@ def _prepare_definite_real_integral(
         ):
             return None
         csch_endpoint_arguments = (lower_argument, upper_argument)
+    sech_endpoint_arguments: tuple[Fraction, Fraction] | None = None
+    if sech_affine is not None:
+        argument = sech_affine[0]
+        lower_argument = _exact_rational_node_value(argument, variable, lower)
+        upper_argument = _exact_rational_node_value(argument, variable, upper)
+        if lower_argument is None or upper_argument is None:
+            return None
+        sech_endpoint_arguments = (lower_argument, upper_argument)
     for node in ast.walk(expression_tree.body):
         if (
             not isinstance(node, ast.Call)
@@ -1549,6 +1563,11 @@ def _prepare_definite_real_integral(
         antiderivative = (
             "log(abs(tanh(("
             f"{argument_text})/2)))/({_fraction_text(csch_affine[1])})"
+        )
+    elif sech_affine is not None:
+        argument_text = ast.unparse(sech_affine[0])
+        antiderivative = (
+            f"atan(sinh({argument_text}))/({_fraction_text(sech_affine[1])})"
         )
     try:
         antiderivative_tree = ast.parse(antiderivative, mode="eval")
@@ -1592,6 +1611,16 @@ def _prepare_definite_real_integral(
             endpoint_difference
             if csch_affine[1] == 1
             else f"({endpoint_difference})/({_fraction_text(csch_affine[1])})"
+        )
+    elif sech_endpoint_arguments is not None and sech_affine is not None:
+        lower_argument, upper_argument = sech_endpoint_arguments
+        lower_atan = f"atan(sinh({_fraction_text(lower_argument)}))"
+        upper_atan = f"atan(sinh({_fraction_text(upper_argument)}))"
+        endpoint_difference = f"({upper_atan} - {lower_atan})"
+        definite_result = (
+            endpoint_difference
+            if sech_affine[1] == 1
+            else f"({endpoint_difference})/({_fraction_text(sech_affine[1])})"
         )
     try:
         definite_result_tree = ast.parse(definite_result, mode="eval")
@@ -2141,6 +2170,35 @@ def _prepare_definite_real_integral(
             f"({csch_argument_derivative_proof})).div_const "
             f"({_lean_rational(csch_affine[1])})"
         )
+    elif sech_affine is not None:
+        sech_argument_at_point = _render_real_calculus_node(
+            sech_affine[0],
+            set(),
+            {"nodes": 0},
+            0,
+            substitutions={variable: point_variable},
+            allow_variable_denominators=True,
+        )
+        sech_argument_derivative_proof = _derivative_proof_term(
+            sech_affine[0],
+            variable,
+            function_variable,
+            point_variable,
+            {"nodes": 0},
+            0,
+            domain_hypotheses=domain_hypotheses,
+            positive_hypotheses=positive_hypotheses,
+        )
+        if (
+            sech_argument_at_point is None
+            or sech_argument_derivative_proof is None
+        ):
+            return None
+        proof = (
+            f"((wolfram_hasDerivAt_arctan_sinh {sech_argument_at_point}).comp "
+            f"{point_variable} ({sech_argument_derivative_proof})).div_const "
+            f"({_lean_rational(sech_affine[1])})"
+        )
     if proof is None:
         return None
 
@@ -2179,6 +2237,7 @@ def _prepare_definite_real_integral(
         interval_domain_lemma_source = "\n" + interval_domain_lemma_source
 
     csch_helper_source = ""
+    sech_helper_source = ""
     hderiv_function_proof = "simp [F, id_eq] <;> ring"
     hderiv_value_proof = (
         f"simp [F, id_eq] <;> field_simp{field_simp_arguments} <;> ring"
@@ -2207,6 +2266,26 @@ def _prepare_definite_real_integral(
             "    · fun_prop\n"
             f"    · intro {point_variable} hpoint\n"
             f"      exact {csch_sinh_hypothesis}"
+        )
+    elif sech_affine is not None:
+        sech_helper_source = _sech_primitive_derivative_lemma_source()
+        sech_cosh_nonzero = (
+            f"ne_of_gt (Real.cosh_pos {sech_argument_at_point})"
+        )
+        hderiv_function_proof = (
+            "simp [F, Function.comp_def, id_eq] <;> ring"
+        )
+        hderiv_value_proof = (
+            f"simp [F, Function.comp_def, id_eq] <;> "
+            f"field_simp [{', '.join([*interval_domain_proofs, sech_cosh_nonzero])}] <;> "
+            "ring"
+        )
+        hcont_proof = (
+            "apply ContinuousOn.div₀\n"
+            "    · exact continuousOn_const\n"
+            "    · fun_prop\n"
+            f"    · intro {point_variable} hpoint\n"
+            f"      exact ne_of_gt (Real.cosh_pos {sech_argument_at_point})"
         )
 
     binders = " ".join(
@@ -2260,10 +2339,13 @@ theorem wolfram_language_compute{theorem_binders} :
 
 #print axioms wolfram_language_compute
 """
-    if csch_helper_source:
+    helper_source = "\n".join(
+        part for part in (csch_helper_source, sech_helper_source) if part
+    )
+    if helper_source:
         source = source.replace(
             "theorem wolfram_language_compute",
-            f"{csch_helper_source}\n\ntheorem wolfram_language_compute",
+            f"{helper_source}\n\ntheorem wolfram_language_compute",
             1,
         )
     source = source.replace(
@@ -4642,6 +4724,17 @@ def _csch_primitive_derivative_lemma_source() -> str:
        field_simp [h_tanh, h_sinh, ne_of_gt (Real.cosh_pos (x / 2)),
          (wolfram_sinh_ne_zero_of_tanh (x / 2) h_tanh)] <;>
        nlinarith [wolfram_csch_identity x] <;> done)
+
+"""
+
+
+def _sech_primitive_derivative_lemma_source() -> str:
+    return """theorem wolfram_hasDerivAt_arctan_sinh (x : ℝ) :
+    HasDerivAt (fun y : ℝ => Real.arctan (Real.sinh y))
+      (1 / Real.cosh x) x := by
+  convert ((Real.hasDerivAt_sinh x).arctan) using 1
+  field_simp [ne_of_gt (Real.cosh_pos x)]
+  nlinarith [Real.cosh_sq_sub_sinh_sq x]
 
 """
 
