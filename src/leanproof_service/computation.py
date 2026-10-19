@@ -79,19 +79,6 @@ theorem wolfram_language_compute : Real.sin Real.pi = 0 := by
 """
         return Computation("0", source)
 
-    if re.fullmatch(r"\s*TrigExpand\s*@\s*Sin\s*\[\s*2\s*x\s*\]\s*", code):
-        source = """import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
-import Mathlib.Tactic.Ring
-
-theorem wolfram_language_compute (x : ℝ) :
-    Real.sin (2 * x) = 2 * Real.cos x * Real.sin x := by
-  rw [Real.sin_two_mul]
-  ring
-
-#print axioms wolfram_language_compute
-"""
-        return Computation("2*Cos[x]*Sin[x]", source)
-
     trig_expand = re.fullmatch(
         r"(?is)\s*TrigExpand\s*(?:@\s*(?P<at_expression>.+?)|\[\s*(?P<bracket_expression>.*)\s*\])\s*",
         code,
@@ -319,7 +306,11 @@ def _prepare_trig_expand(
         for node in calls
     ):
         return None
-    if not any(_trigexpand_argument_has_sum(node.args[0]) for node in calls):
+    if not any(
+        _trigexpand_argument_has_sum(node.args[0])
+        or _trigexpand_argument_has_scaled_term(node.args[0])
+        for node in calls
+    ):
         return None
 
     symbolic = run_symbolic(SymbolicRequest(
@@ -365,8 +356,10 @@ import Mathlib.Tactic.Ring
 
 theorem wolfram_language_compute{theorem_binders} :
     {original_lean} = {expanded_lean} := by
-  simp only [Real.sin_add, Real.sin_sub, Real.cos_add, Real.cos_sub, Real.sin_neg, Real.cos_neg]
-  ring
+  simp only [Real.sin_add, Real.sin_sub, Real.cos_add, Real.cos_sub,
+    Real.sin_neg, Real.cos_neg, Real.sin_two_mul, Real.cos_two_mul,
+    Real.sin_three_mul, Real.cos_three_mul]
+  <;> ring
 
 #print axioms wolfram_language_compute
 """
@@ -378,6 +371,18 @@ def _trigexpand_argument_supported(node: ast.AST) -> bool:
         return node.id != "pi" and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", node.id) is not None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         return _trigexpand_argument_supported(node.operand)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        return (
+            isinstance(node.left, ast.Constant)
+            and node.left.value in {2, 3}
+            and isinstance(node.right, ast.Name)
+            and _trigexpand_argument_supported(node.right)
+        ) or (
+            isinstance(node.right, ast.Constant)
+            and node.right.value in {2, 3}
+            and isinstance(node.left, ast.Name)
+            and _trigexpand_argument_supported(node.left)
+        )
     return (
         isinstance(node, ast.BinOp)
         and isinstance(node.op, (ast.Add, ast.Sub))
@@ -392,6 +397,22 @@ def _trigexpand_argument_has_sum(node: ast.AST) -> bool:
         or _trigexpand_argument_has_sum(node.left)
         or _trigexpand_argument_has_sum(node.right)
     )
+
+
+def _trigexpand_argument_has_scaled_term(node: ast.AST) -> bool:
+    if isinstance(node, ast.BinOp):
+        is_scaled = isinstance(node.op, ast.Mult) and (
+            (isinstance(node.left, ast.Constant) and node.left.value in {2, 3} and isinstance(node.right, ast.Name))
+            or (isinstance(node.right, ast.Constant) and node.right.value in {2, 3} and isinstance(node.left, ast.Name))
+        )
+        return (
+            is_scaled
+            or _trigexpand_argument_has_scaled_term(node.left)
+            or _trigexpand_argument_has_scaled_term(node.right)
+        )
+    if isinstance(node, ast.UnaryOp):
+        return _trigexpand_argument_has_scaled_term(node.operand)
+    return False
 
 
 def _real_ast_to_wolfram(node: ast.AST) -> str:

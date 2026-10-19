@@ -388,7 +388,7 @@ def capabilities() -> dict[str, object]:
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
-                    "TrigExpand for bounded additive Sin/Cos arguments, with a Lean proof of the identity",
+                    "TrigExpand for bounded additive and doubled/tripled Sin/Cos arguments, with a Lean proof of the identity",
                     "Limit for bounded rational functions at exact rational or bounded real-polynomial points under explicit denominator conditions",
                     "Solve for univariate degree-at-most-four equations with complete rational factorization or exact real quadratic roots, and bounded rational linear systems over Reals",
                 ],
@@ -412,8 +412,9 @@ def capabilities() -> dict[str, object]:
                 "trigonometric_expansion": {
                     "syntax": ["TrigExpand@expression", "TrigExpand[expression]"],
                     "functions": ["Sin", "Cos"],
-                    "argument_scope": "bounded additive/subtractive variable expressions",
+                    "argument_scope": "bounded sums/differences of variables and integer multiples 2 or 3 of one variable",
                     "proof": "SymPy proposes the expansion; Lean checks the identity over the reals before the result is returned",
+                    "examples": ["TrigExpand@Sin[2x]", "TrigExpand@Cos[3x]", "TrigExpand[Sin[3x+y]]"],
                 },
                 "limit": {
                     "syntax": "Limit[expression, {variable, point}]",
@@ -478,7 +479,7 @@ def capabilities() -> dict[str, object]:
                     "unsupported_examples": ["general variable-denominator integration", "non-elementary antiderivatives", "Sin[x^2] antiderivative", "Integrate[Coth[x], {x, -1, 1}] pole-crossing definite integral", "Integrate[Csch[x], {x, -1, 1}] pole-crossing definite integral"],
                 },
                 "special_cases": [
-                    "Sin[Pi]", "TrigExpand@Sin[2x]"
+                    "Sin[Pi]"
                 ],
                 "proof_status": "each returned result is compiled and axiom-audited by Lean",
             },
@@ -1011,7 +1012,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic, real-calculus, Lean-checked additive TrigExpand, finite polynomial Sum/Product, "
+        "A bounded arithmetic, real-calculus, Lean-checked bounded TrigExpand, finite polynomial Sum/Product, "
         "rational-function limit, and special-case subset is computed and "
         "compiled into Lean proofs."
     ),
