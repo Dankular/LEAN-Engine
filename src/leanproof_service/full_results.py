@@ -19,6 +19,9 @@ from pydantic import ValidationError
 
 from .computation import (
     _normalize_decimal_literals,
+    _normalize_wolfram_real_functions,
+    _real_sympy_expression,
+    _split_top_level_commas,
     check_computation,
     prepare_computation,
 )
@@ -499,6 +502,7 @@ def execute_query(
             symbolic_request,
             result_text,
             proof_timeout_seconds,
+            symbolic_result=symbolic.get("result"),
         )
         elapsed = perf_counter() - started
     result_image = None
@@ -613,6 +617,8 @@ def _verify_query_computation(
     request: SymbolicRequest,
     query_result: str,
     timeout_seconds: float,
+    *,
+    symbolic_result: object,
 ) -> dict[str, Any]:
     code = _query_computation_code(request)
     if code is None:
@@ -649,11 +655,25 @@ def _verify_query_computation(
             "reason": computation.backend_error,
         }
 
-    query_normalized = _canonical_formula(query_result)
-    candidate_normalized = _canonical_formula(
-        computation.display_result.replace("^", "**")
-    )
-    if query_normalized is None or candidate_normalized is None or query_normalized != candidate_normalized:
+    if request.operation == "solve" and request.variable is not None:
+        query_normalized = _symbolic_solve_signature(
+            symbolic_result,
+            request.variable,
+        )
+        candidate_normalized = _wolfram_solve_signature(
+            computation.display_result,
+            request.variable,
+        )
+    else:
+        query_normalized = _canonical_formula(query_result)
+        candidate_normalized = _canonical_formula(
+            computation.display_result.replace("^", "**")
+        )
+    if (
+        query_normalized is None
+        or candidate_normalized is None
+        or query_normalized != candidate_normalized
+    ):
         return {
             "status": "candidate_mismatch",
             "verified": False,
@@ -701,6 +721,8 @@ def _verify_query_computation(
 def _query_computation_code(request: SymbolicRequest) -> str | None:
     if request.operation in {"simplify", "expand", "factor"} and request.expression is not None:
         return f"{request.operation.title()}[{request.expression}]"
+    if request.operation == "solve" and request.expression is not None and request.variable:
+        return f"Solve[({request.expression}) == 0, {request.variable}, Reals]"
     if request.operation == "differentiate" and request.expression is not None and request.variable:
         return f"D[{request.expression}, {request.variable}]"
     if request.operation == "identity" and request.lhs is not None and request.rhs is not None:
@@ -728,6 +750,8 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
 
 
 def _query_claim_type(request: SymbolicRequest, code: str) -> str:
+    if request.operation == "solve":
+        return "real_solution_set_equivalence"
     if request.operation == "differentiate":
         return "HasDerivAt"
     if (
@@ -753,6 +777,81 @@ def _canonical_formula(source: str) -> str | None:
     except (MathInputError, SyntaxError, RecursionError, ValueError):
         return None
     return ast.dump(node, annotate_fields=True, include_attributes=False)
+
+
+def _symbolic_solve_signature(
+    symbolic_result: object,
+    variable: str,
+) -> tuple[str, ...] | None:
+    if not isinstance(symbolic_result, list):
+        return None
+    expressions: list[str] = []
+    for solution in symbolic_result:
+        if not isinstance(solution, dict) or set(solution) != {variable}:
+            return None
+        expressions.append(str(solution[variable]))
+    return _real_root_signature(expressions, wolfram=False)
+
+
+def _wolfram_solve_signature(
+    source: str,
+    variable: str,
+) -> tuple[str, ...] | None:
+    value = source.strip()
+    if value == "{}":
+        return ()
+    if not value.startswith("{") or not value.endswith("}"):
+        return None
+    solutions = _split_top_level_commas(value[1:-1])
+    if solutions is None:
+        return None
+
+    expressions: list[str] = []
+    for solution in solutions:
+        solution = solution.strip()
+        if not solution.startswith("{") or not solution.endswith("}"):
+            return None
+        bindings = _split_top_level_commas(solution[1:-1])
+        if bindings is None or len(bindings) != 1:
+            return None
+        binding = re.fullmatch(
+            rf"\s*{re.escape(variable)}\s*->\s*(?P<value>.+?)\s*",
+            bindings[0],
+            flags=re.DOTALL,
+        )
+        if binding is None:
+            return None
+        expressions.append(binding.group("value"))
+    return _real_root_signature(expressions, wolfram=True)
+
+
+def _real_root_signature(
+    expressions: list[str],
+    *,
+    wolfram: bool,
+) -> tuple[str, ...] | None:
+    import sympy
+
+    signatures: set[str] = set()
+    for expression in expressions:
+        source = (
+            _normalize_wolfram_real_functions(expression)
+            if wolfram
+            else expression
+        )
+        try:
+            parsed = parse_math_input(source)
+            node = ast.parse(parsed.expression, mode="eval").body
+        except (MathInputError, RecursionError, SyntaxError, ValueError):
+            return None
+        value = _real_sympy_expression(node)
+        if value is None or value.free_symbols or value.is_real is not True:
+            return None
+        value = sympy.simplify(value)
+        if value.free_symbols or value.is_real is not True:
+            return None
+        signatures.add(sympy.srepr(value))
+    return tuple(sorted(signatures))
 
 
 def validate_query(
