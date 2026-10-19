@@ -71,6 +71,7 @@ from .recalculation import (
     take_recalculation_job,
 )
 from .symbolic import SymbolicRequest, run_symbolic
+from .wolfram_graphics import get_published_graphic, publish_graphic, render_wolfram_graphics
 
 
 app = FastAPI(
@@ -1399,7 +1400,8 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
         "Supported operations include bounded arithmetic, exact reducible rational-Pi Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
         "finite polynomial Sum/Product, certified rational and square-root, supported radical-valued exact-trigonometric and bounded Pi N approximations, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
-        "checked through a generated Lean proof."
+        "checked through a generated Lean proof. Provider-backed FreeformPrompt results are "
+        "source-backed rather than proofs; the bounded local Graphics renderer returns SVG."
     ),
     openapi_extra={
         "requestBody": {
@@ -1415,7 +1417,8 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
                                 "maxLength": 4000,
                                 "description": (
                                     "Wolfram Language code or a supported FreeformPrompt "
-                                    "for provider-backed natural-language results"
+                                    "for provider-backed natural-language results, or a "
+                                    "bounded Graphics expression"
                                 ),
                             },
                             "line": {"type": "integer", "default": 1},
@@ -1448,6 +1451,31 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
         return _compat_response(400, f"Invalid request: {errors}", request_id)
 
     import asyncio
+
+    svg = render_wolfram_graphics(compute_request.code)
+    if svg is not None:
+        image_path = publish_graphic(svg)
+        image_url = f"{str(request.base_url).rstrip('/')}{image_path}"
+        result_text = _limit_output(
+            f"Out[{compute_request.line}]=![Image]({image_url})",
+            compute_request.maxChars,
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "result": result_text,
+                "code": 200,
+                "success": True,
+                "uuid": request_id,
+                "evidence": {
+                    "kind": "local_svg_graphic",
+                    "verified": False,
+                    "media_type": "image/svg+xml",
+                    "image_url": image_url,
+                    "scope": "Graphics[{Red|Blue|Green|Black, Circle[]}]",
+                },
+            },
+        )
 
     effective_budget = compute_request.timeConstraint
     try:
@@ -1700,6 +1728,18 @@ async def _compute_freeform_prompt(
             "uuid": request_id,
             "evidence": evidence,
         },
+    )
+
+
+@app.get("/api/cag/v1/graphics/{token}.svg", include_in_schema=False)
+def wolfram_graphic(token: str) -> Response:
+    svg = get_published_graphic(token)
+    if svg is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graphic not found")
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=900"},
     )
 
 
