@@ -24,7 +24,9 @@ class KnowledgeRequest(StrictModel):
     ]
     query: str | None = Field(default=None, min_length=1, max_length=400)
     entity_id: str | None = Field(default=None, pattern=r"^[QP][1-9][0-9]*$")
-    property_id: Literal["P36", "P37", "P38", "P1082", "P2131", "P4010"] | None = None
+    property_id: Literal[
+        "P36", "P37", "P38", "P1082", "P2131", "P4010", "P2132", "P2299"
+    ] | None = None
     provider_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,80}$")
     dataset_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,120}$")
     series_code: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -303,6 +305,8 @@ def _wikidata_property(
         "P1082": "population",
         "P2131": "nominal GDP",
         "P4010": "GDP at purchasing power parity",
+        "P2132": "nominal GDP per capita",
+        "P2299": "GDP per capita at purchasing power parity",
     }
     if property_id not in property_names:
         raise KnowledgeProviderError("Wikidata property is not allowlisted", 400)
@@ -367,6 +371,8 @@ def _wikidata_property(
         "P1082": "population",
         "P2131": "nominal_gdp",
         "P4010": "gdp_ppp",
+        "P2132": "nominal_gdp_per_capita",
+        "P2299": "gdp_ppp_per_capita",
     }[property_id]
     for search_rank, candidate in enumerate(candidates, start=1):
         entity_id = candidate["id"]
@@ -378,7 +384,7 @@ def _wikidata_property(
             claims = claims.get(property_id, [])
         if property_id == "P1082":
             values = _wikidata_population_values(claims)
-        elif property_id in {"P2131", "P4010"}:
+        elif property_id in {"P2131", "P4010", "P2132", "P2299"}:
             values = _wikidata_quantity_values(claims, property_id)
             target_ids.update(
                 str(value["unit_id"])
@@ -425,7 +431,7 @@ def _wikidata_property(
             relationships = match.get(value_key, [])
             if not isinstance(relationships, list):
                 continue
-            if property_id in {"P2131", "P4010"}:
+            if property_id in {"P2131", "P4010", "P2132", "P2299"}:
                 for quantity in relationships:
                     if not isinstance(quantity, dict):
                         continue
@@ -463,7 +469,7 @@ def _wikidata_property(
             "Wikidata entity search order; preferred GDP statements are used when present, "
             "otherwise the latest dated statements are returned with ties preserved; amount, "
             "unit, rank, references, and time qualifiers are preserved."
-            if property_id in {"P2131", "P4010"}
+            if property_id in {"P2131", "P4010", "P2132", "P2299"}
             else (
                 "Wikidata entity search order; all returned candidates and non-deprecated "
                 f"{property_name} statements are preserved, including rank, references, "

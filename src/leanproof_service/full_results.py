@@ -180,6 +180,10 @@ def _wikidata_async_descriptor(request: KnowledgeRequest) -> tuple[str, str, str
         return "Nominal GDP", "NominalGDP", "Data"
     if property_id == "P4010":
         return "GDP at purchasing power parity", "GDP_PPP", "Data"
+    if property_id == "P2132":
+        return "Nominal GDP per capita", "GDPPerCapita", "Data"
+    if property_id == "P2299":
+        return "GDP per capita at purchasing power parity", "GDPPerCapitaPPP", "Data"
     return "Entity matches", "EntitySearch", "Data"
 
 
@@ -201,6 +205,12 @@ def _wikidata_provider_presentation(
         "P38": ("Currency", "Currency", "Economics"),
         "P2131": ("Nominal GDP", "NominalGDP", "Economics"),
         "P4010": ("GDP at purchasing power parity", "GDP_PPP", "Economics"),
+        "P2132": ("Nominal GDP per capita", "GDPPerCapita", "Economics"),
+        "P2299": (
+            "GDP per capita at purchasing power parity",
+            "GDPPerCapitaPPP",
+            "Economics",
+        ),
     }.get(_wikidata_property_id(request), ("Entity matches", "EntitySearch", "Entity"))
 
 
@@ -992,7 +1002,11 @@ def validate_query(
                 "interpretation": {
                     "kind": "ambiguous_data_request",
                     "provider": "wikidata",
-                    "operation": "gdp",
+                    "operation": (
+                        "gdp_per_capita"
+                        if exc.assumption["type"] == "GDPPerCapitaType"
+                        else "gdp"
+                    ),
                     "selection_required": True,
                 },
                 "tips": [{"text": str(exc)}],
@@ -1280,9 +1294,39 @@ def _gdp_query_parts(input_text: str) -> tuple[str, str] | None:
         flags=re.IGNORECASE,
     )
     query = re.sub(r"[?.!]+\s*$", "", query).strip()
-    if re.search(r"\b(?:gdp|gross\s+domestic\s+product)\b.*\bper\s+capita\b", query, re.IGNORECASE):
-        raise ProviderContextNeeded("GDP per capita is not in the current Wikidata data slice")
     patterns = (
+        (
+            "ppp_per_capita",
+            r"(?:gdp|gross\s+domestic\s+product)\s*(?:\(\s*ppp\s*\)|at\s+purchasing\s+power\s+parity)\s+per\s+capita\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "ppp_per_capita",
+            r"ppp\s+(?:gdp|gross\s+domestic\s+product)\s+per\s+capita\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "ppp_per_capita",
+            r"(?:ppp\s+(?:gdp|gross\s+domestic\s+product)|(?:gdp|gross\s+domestic\s+product)\s+per\s+capita\s*(?:\(\s*ppp\s*\)|at\s+purchasing\s+power\s+parity))\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "nominal_per_capita",
+            r"nominal\s+(?:gdp|gross\s+domestic\s+product)\s+per\s+capita\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "nominal_per_capita",
+            r"(?:gdp|gross\s+domestic\s+product)\s*\(\s*nominal\s*\)\s+per\s+capita\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "nominal_per_capita",
+            r"(?:gdp|gross\s+domestic\s+product)\s+per\s+capita\s*\(\s*nominal\s*\)\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "generic_per_capita",
+            r"(?:gdp|gross\s+domestic\s+product)\s+per\s+capita\s+(?:of|in)\s+(.+?)\s*",
+        ),
+        (
+            "generic_per_capita",
+            r"(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s+per\s+capita\s*",
+        ),
         ("ppp", r"(?:gdp|gross\s+domestic\s+product)\s*(?:\(\s*ppp\s*\)|at\s+purchasing\s+power\s+parity)\s+(?:of|in)\s+(.+?)\s*"),
         ("ppp", r"ppp\s+(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s*"),
         ("nominal", r"nominal\s+(?:gdp|gross\s+domestic\s+product)\s+(?:of|in)\s+(.+?)\s*"),
@@ -1293,8 +1337,14 @@ def _gdp_query_parts(input_text: str) -> tuple[str, str] | None:
         match = re.fullmatch(pattern, query, re.IGNORECASE)
         if match:
             return kind, match.group(1).strip()
-    if re.fullmatch(r"(?:gdp|gross\s+domestic\s+product)", query, re.IGNORECASE):
+    if re.fullmatch(
+        r"(?:gdp|gross\s+domestic\s+product)(?:\s+per\s+capita)?", query, re.IGNORECASE
+    ):
         raise ProviderContextNeeded("GDP lookup needs an entity name")
+    if re.search(r"\b(?:gdp|gross\s+domestic\s+product)\b.*\bper\s+capita\b", query, re.IGNORECASE):
+        raise ProviderContextNeeded(
+            "GDP per capita lookup needs a supported form such as 'GDP per capita of <entity>'"
+        )
     return None
 
 
@@ -1305,39 +1355,44 @@ def _resolve_gdp_request(
     if parts is None:
         return None
     kind, entity_query = parts
+    per_capita = kind.endswith("_per_capita")
+    measure_kind = kind.removesuffix("_per_capita")
+    assumption_type = "GDPPerCapitaType" if per_capita else "GDPType"
     if not entity_query or entity_query.casefold() in {"of", "in"}:
         raise ProviderContextNeeded("GDP lookup needs an entity name")
 
     registry = assumption_registry()
     candidates = [
-        item for item in registry["assumptions"] if item.get("type") == "GDPType"
+        item for item in registry["assumptions"] if item.get("type") == assumption_type
     ]
     candidates_by_id = {item["id"]: item for item in candidates}
     if len(candidates_by_id) != 2:
-        raise RuntimeError("GDPType assumption registry must contain nominal and PPP choices")
+        raise RuntimeError(f"{assumption_type} registry must contain nominal and PPP choices")
     if len(selections) > 1:
-        raise AssumptionSelectionError("select one GDPType assumption")
+        raise AssumptionSelectionError(f"select one {assumption_type} assumption")
     selected = None
     if selections:
         selected = candidates_by_id.get(selections[0])
         if selected is None:
             raise AssumptionSelectionError(
-                "GDP queries accept one of: " + ", ".join(sorted(candidates_by_id))
+                f"{assumption_type} queries accept one of: "
+                + ", ".join(sorted(candidates_by_id))
             )
+    id_prefix = "gdp-per-capita:type:" if per_capita else "gdp:type:"
     explicit_id = {
-        "nominal": "gdp:type:nominal",
-        "ppp": "gdp:type:ppp",
-    }.get(kind)
+        "nominal": f"{id_prefix}nominal",
+        "ppp": f"{id_prefix}ppp",
+    }.get(measure_kind)
     if selected is not None and explicit_id is not None and selected["id"] != explicit_id:
         raise AssumptionSelectionError(
-            "the GDPType assumption conflicts with the measure named in the input"
+            f"the {assumption_type} assumption conflicts with the measure named in the input"
         )
 
     chosen = selected
     if chosen is None and explicit_id is not None:
         chosen = candidates_by_id[explicit_id]
     assumption = {
-        "type": "GDPType",
+        "type": assumption_type,
         "selected": chosen["id"] if chosen is not None else None,
         "selection_source": (
             "caller_override"
@@ -1357,10 +1412,19 @@ def _resolve_gdp_request(
         ],
     }
     if chosen is None:
+        if per_capita:
+            prompt = (
+                "GDP per capita can mean nominal GDP per capita or PPP GDP per capita; "
+                "select one with assumption=gdp-per-capita:type:nominal or "
+                "assumption=gdp-per-capita:type:ppp"
+            )
+        else:
+            prompt = (
+                "GDP can mean nominal GDP or GDP at purchasing power parity; select one "
+                "with assumption=gdp:type:nominal or assumption=gdp:type:ppp"
+            )
         raise ProviderAssumptionNeeded(
-            "GDP can mean nominal GDP or GDP at purchasing power parity; select one "
-            "with assumption=gdp:type:nominal or assumption=gdp:type:ppp",
-            assumption,
+            prompt, assumption,
         )
     request = _knowledge_request(
         provider="wikidata",
@@ -1522,6 +1586,8 @@ def _execute_provider_query(
         "P38": "currency",
         "P2131": "nominal GDP",
         "P4010": "GDP at purchasing-power parity",
+        "P2132": "nominal GDP per capita",
+        "P2299": "GDP per capita at purchasing-power parity",
     }.get(wikidata_property_id)
     payload = _query_envelope(
         success=True,
@@ -1633,6 +1699,8 @@ def _provider_plaintext(provider: str, data: Any) -> str:
     wikidata_gdp = {
         "P2131": ("nominal_gdp", "Nominal GDP"),
         "P4010": ("gdp_ppp", "GDP at purchasing power parity"),
+        "P2132": ("nominal_gdp_per_capita", "Nominal GDP per capita"),
+        "P2299": ("gdp_ppp_per_capita", "GDP per capita at purchasing power parity"),
     }
     if (
         provider == "wikidata"
@@ -2324,6 +2392,14 @@ def _provider_assumption_clarification(
     text_width: int,
 ) -> dict[str, Any]:
     del text_width  # No result image is produced while the interpretation is unresolved.
+    per_capita = error.assumption["type"] == "GDPPerCapitaType"
+    operation = "gdp_per_capita" if per_capita else "gdp"
+    measure = "GDP per capita" if per_capita else "GDP"
+    alternatives = (
+        "nominal GDP per capita and PPP GDP per capita"
+        if per_capita
+        else "nominal GDP and GDP at purchasing power parity"
+    )
     result = _query_envelope(
         success=False,
         error=False,
@@ -2336,19 +2412,19 @@ def _provider_assumption_clarification(
         interpretation={
             "kind": "ambiguous_data_request",
             "provider": "wikidata",
-            "operation": "gdp",
+            "operation": operation,
             "selection_required": True,
         },
         classification={
             "name": "deterministic_provider_router",
-            "method": "GDP measure candidates from the typed assumption registry",
+            "method": f"{measure} measure candidates from the typed assumption registry",
             "ranks_candidates_only": True,
             "selection_authority": False,
         },
         tips=[{"text": str(error)}],
         qualification=(
-            "The request is ambiguous between nominal GDP and GDP at purchasing power "
-            "parity. No provider lookup was run until a measure was selected."
+            f"The request is ambiguous between {alternatives}. No provider lookup was run "
+            "until a measure was selected."
         ),
     )
     result["queryresult"]["input"] = input_text

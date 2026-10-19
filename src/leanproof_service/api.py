@@ -247,7 +247,7 @@ def capabilities() -> dict[str, object]:
             "classifier_selects_assumptions": False,
         },
         "factual_sources": {
-            "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36), official language (P37), currency (P38), population (P1082), nominal GDP (P2131), and GDP at purchasing power parity (P4010) retrieval with ranked candidates; generic GDP queries require an explicit typed GDPType assumption", "status": "implemented_initial_slice"},
+            "wikidata": {"coverage": "entity search and entity records; allowlisted capital (P36), official language (P37), currency (P38), population (P1082), nominal GDP (P2131), GDP at purchasing power parity (P4010), nominal GDP per capita (P2132), and PPP GDP per capita (P2299) retrieval with ranked candidates; ambiguous GDP and GDP per capita queries require explicit typed assumptions", "status": "implemented_initial_slice"},
             "dbnomics": {"coverage": "individual time series", "status": "implemented"},
             "nist_codata": {"coverage": "bundled CODATA 2022 constants subset", "status": "implemented"},
             "geonames": {"coverage": "place-name search; requires GEONAMES_USERNAME", "status": "implemented"},
@@ -270,6 +270,7 @@ def capabilities() -> dict[str, object]:
                     "explicit Wikidata entity searches",
                     "natural-language population lookups using Wikidata",
                     "natural-language nominal and PPP GDP lookups using Wikidata with typed disambiguation for generic GDP",
+                    "natural-language nominal and PPP GDP per capita lookups using Wikidata with typed disambiguation",
                     "natural-language capital relationship lookups using Wikidata",
                     "explicit GeoNames place searches",
                     "explicit DBnomics time-series requests",

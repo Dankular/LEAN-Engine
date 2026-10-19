@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.1.0",
+  "registry_version": "2.2.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -212,6 +212,22 @@
       "type": "GDPType",
       "description": "Use gross domestic product at purchasing power parity.",
       "wikidata_property_id": "P4010",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "gdp-per-capita:type:nominal",
+      "type": "GDPPerCapitaType",
+      "description": "Use nominal gross domestic product per capita.",
+      "wikidata_property_id": "P2132",
+      "entry_version": 1,
+      "service_default": false
+    },
+    {
+      "id": "gdp-per-capita:type:ppp",
+      "type": "GDPPerCapitaType",
+      "description": "Use gross domestic product per capita at purchasing power parity.",
+      "wikidata_property_id": "P2299",
       "entry_version": 1,
       "service_default": false
     }
