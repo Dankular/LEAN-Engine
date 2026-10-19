@@ -41,6 +41,13 @@ HTTP 200 response with `success=true` and a Wolfram `Failure` expression contain
 documented `MessageTemplate` and `MessageParameters` fields. Authentication accepts the
 configured key directly or as a bearer token.
 
+The CAG endpoint and `/v2/query?verify=true` also support finite `Sum` and `Product`
+over inclusive integer bounds when the integrand and result fit the rational-polynomial
+grammar. Ranges are limited to 128 terms; negative bounds and reversed bounds are handled,
+with reversed ranges using the empty-sum value `0` and empty-product value `1`. Lean checks
+the finite `Finset.range` computation, and the query verifier attaches evidence only when
+that exact result matches the SymPy result.
+
 The verified calculus subset also supports `D[ArcTan[2x], x]` and the
 `Integrate[1/(1+x^2), x]` and `Integrate[ArcTan[x], x]` cases. Results are returned only
 after Lean checks the derivative; generated conditions such as `x^2 + 1 ≠ 0` are

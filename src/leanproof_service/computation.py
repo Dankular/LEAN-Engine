@@ -53,6 +53,11 @@ _REAL_LINEAR_SYSTEM_SOLVE = re.compile(
     r"(?is)\s*Solve\s*\[\s*\{(?P<equations>.*?)\}\s*,\s*"
     r"\{(?P<variables>.*?)\}\s*,\s*Reals\s*\]\s*"
 )
+_FINITE_SUM_PRODUCT = re.compile(
+    r"(?is)\s*(?P<operation>Sum|Product)\s*\[\s*(?P<expression>.+?)\s*,\s*"
+    r"\{\s*(?P<variable>[a-z][a-z0-9_]{0,31})\s*,\s*"
+    r"(?P<lower>[^,{}]+?)\s*,\s*(?P<upper>[^,{}]+?)\s*\}\s*\]\s*"
+)
 
 
 def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computation | None:
@@ -78,6 +83,17 @@ theorem wolfram_language_compute (x : ℝ) :
 #print axioms wolfram_language_compute
 """
         return Computation("2*Cos[x]*Sin[x]", source)
+
+    finite_sum_product = _FINITE_SUM_PRODUCT.fullmatch(code)
+    if finite_sum_product is not None:
+        return _prepare_finite_sum_product(
+            finite_sum_product.group("operation").lower(),
+            finite_sum_product.group("expression"),
+            finite_sum_product.group("variable"),
+            finite_sum_product.group("lower"),
+            finite_sum_product.group("upper"),
+            time_limit_seconds,
+        )
 
     definite_integral = re.fullmatch(
         r"(?is)\s*Integrate\s*\[\s*(?P<expression>.+?)\s*,\s*"
@@ -146,6 +162,113 @@ theorem wolfram_language_compute (x : ℝ) :
         )
 
     return _prepare_polynomial_computation(code, time_limit_seconds)
+
+
+def _prepare_finite_sum_product(
+    operation: str,
+    expression_source: str,
+    variable: str,
+    lower_source: str,
+    upper_source: str,
+    time_limit_seconds: float,
+) -> Computation | None:
+    exact_source = _normalize_decimal_literals(
+        _normalize_wolfram_real_functions(expression_source)
+    )
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        expression_tree = ast.parse(parsed.expression, mode="eval")
+        _, expression_symbols = _render_polynomial_lean(parsed.expression)
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    lower = _parse_exact_rational(lower_source)
+    upper = _parse_exact_rational(upper_source)
+    if (
+        lower is None
+        or upper is None
+        or lower.denominator != 1
+        or upper.denominator != 1
+        or abs(lower.numerator).bit_length() > 256
+        or abs(upper.numerator).bit_length() > 256
+    ):
+        return None
+
+    lower_integer = lower.numerator
+    upper_integer = upper.numerator
+    term_count = max(0, upper_integer - lower_integer + 1)
+    if term_count > 128:
+        return None
+
+    symbolic = run_symbolic(SymbolicRequest(
+        operation=operation,
+        expression=parsed.expression,
+        variable=variable,
+        lower=str(lower_integer),
+        upper=str(upper_integer),
+        time_limit_seconds=max(0.001, min(time_limit_seconds, 60.0)),
+    ))
+    if symbolic.get("timed_out"):
+        return Computation("", "", timed_out=True)
+    if symbolic.get("error") or not isinstance(symbolic.get("result"), str):
+        diagnostic = symbolic.get("diagnostics") or symbolic.get("error") or (
+            "Symbolic worker returned no finite sum or product"
+        )
+        return Computation("", "", backend_error=str(diagnostic)[:1000])
+
+    result = symbolic["result"]
+    result_lean, result_symbols = _render_polynomial_lean(result)
+    if result_lean is None:
+        return None
+
+    used_names = set(expression_symbols) | set(result_symbols)
+    index_variable = _fresh_identifier(
+        f"{operation}_index", used_names
+    )
+    substituted_body = _render_polynomial_node(
+        expression_tree.body,
+        set(),
+        {"nodes": 0},
+        0,
+        substitutions={
+            variable: (
+                f"(({_lean_real_integer(lower_integer)}) + "
+                f"({index_variable} : ℝ))"
+            )
+        },
+    )
+    if substituted_body is None:
+        return None
+
+    theorem_symbols = sorted(
+        (expression_symbols | result_symbols) - {variable, index_variable}
+    )
+    binders = " ".join(f"({name} : ℝ)" for name in theorem_symbols)
+    theorem_binders = f" {binders}" if binders else ""
+    if operation == "sum":
+        big_operator = f"(∑ {index_variable} ∈ Finset.range {term_count}, {substituted_body})"
+        reduction_lemma = "Finset.sum_range_succ"
+    else:
+        big_operator = f"(∏ {index_variable} ∈ Finset.range {term_count}, {substituted_body})"
+        reduction_lemma = "Finset.prod_range_succ"
+
+    source = f"""import Mathlib.Basic.Real.Basic
+import Mathlib.Algebra.BigOperators.Ring.Finset
+import Mathlib.Tactic.Ring
+
+theorem wolfram_language_compute{theorem_binders} :
+    {big_operator} = {result_lean} := by
+  simp [{reduction_lemma}] <;> ring
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(result.replace("**", "^"), source)
+
+
+def _lean_real_integer(value: int) -> str:
+    return f"({value} : ℝ)"
 
 
 def _prepare_definite_real_integral(

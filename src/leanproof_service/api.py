@@ -280,8 +280,9 @@ def capabilities() -> dict[str, object]:
                     "parser": "deterministic allowlisted templates; no model ranking",
                     "symbolic_backend": "SymPy",
                     "sum_product_bounds": "integer literals only",
+                    "sum_product_proof_bounds": "Lean proofs support rational-polynomial finite sums/products over inclusive integer ranges of up to 128 terms",
                     "ambiguous_function_scope": "requires explicit parentheses",
-                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial and real-calculus computations; unsupported operations remain unverified",
+                    "proofs": "verify=true attaches Lean-checked evidence for supported polynomial, real-calculus, and finite polynomial Sum/Product computations over up to 128 integer terms; unsupported operations remain unverified",
                 },
                 "location_parameters": ["location", "latlong"],
                 "supported_weather_parameters": ["location", "latlong", "units"],
@@ -292,7 +293,7 @@ def capabilities() -> dict[str, object]:
                     "ignorecase": True,
                     "reinterpret": False,
                     "translation": False,
-                    "verify": "optional Lean check for supported exact polynomial and real-calculus computations",
+                    "verify": "optional Lean check for supported exact polynomial, real-calculus, and finite polynomial Sum/Product computations",
                 },
                 "formal_verification": {
                     "query_parameter": "verify=true",
@@ -306,6 +307,7 @@ def capabilities() -> dict[str, object]:
                         "polynomial identities expressed as a difference",
                         "indefinite polynomial antiderivatives",
                         "definite integrals of supported expressions with exact rational bounds",
+                        "finite sums and products of rational-coefficient polynomials over inclusive integer ranges of up to 128 terms",
                     ],
                     "assumption_policy": "proves only the selected interpretation already returned by the query planner; assumptions are preserved in the response",
                     "retrieved_data": "provider values are not Lean-verified",
@@ -380,8 +382,19 @@ def capabilities() -> dict[str, object]:
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
+                    "Sum and Product for rational-polynomial integrands over at most 128 integer terms",
                     "Solve for univariate degree-at-most-two polynomial equations over Reals with rational roots",
                 ],
+                "finite_sum_product": {
+                    "syntax": (
+                        "Sum[expression, {variable, lower, upper}] or "
+                        "Product[expression, {variable, lower, upper}]"
+                    ),
+                    "bounds": "inclusive exact integer bounds; negative and reversed ranges are supported",
+                    "proof": "Lean checks the explicit Finset.range computation and audits axioms",
+                    "maximum_terms": 128,
+                    "expression_domain": "rational-coefficient polynomials with real parameters",
+                },
                 "polynomial_limits": {
                     "operators": ["+", "-", "*", "/ by a nonzero rational constant", "^"],
                     "maximum_nodes": 256,
@@ -958,7 +971,8 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "A bounded arithmetic, real-calculus, and special-case subset is computed and "
+        "A bounded arithmetic, real-calculus, finite polynomial Sum/Product, "
+        "and special-case subset is computed and "
         "compiled into Lean proofs."
     ),
     openapi_extra={

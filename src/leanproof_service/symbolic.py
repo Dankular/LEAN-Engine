@@ -277,7 +277,12 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
             raise SymbolicInputError(
                 f"{request.operation} bounds must be known integers; declare symbolic bounds as integer"
             )
-        if request.operation == "sum":
+        reversed_finite_range = (upper - lower).is_negative is True
+        if reversed_finite_range and request.operation == "sum":
+            result = sp.Integer(0)
+        elif reversed_finite_range and request.operation == "product":
+            result = sp.Integer(1)
+        elif request.operation == "sum":
             result = sp.summation(expression, (variable, lower, upper))
         else:
             result = sp.product(expression, (variable, lower, upper))

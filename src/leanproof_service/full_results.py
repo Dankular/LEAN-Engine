@@ -739,6 +739,18 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
             f"{{{request.variable}, {request.lower}, {request.upper}}}]"
         )
     if (
+        request.operation in {"sum", "product"}
+        and request.expression is not None
+        and request.variable is not None
+        and request.lower is not None
+        and request.upper is not None
+    ):
+        operation = "Sum" if request.operation == "sum" else "Product"
+        return (
+            f"{operation}[{request.expression}, "
+            f"{{{request.variable}, {request.lower}, {request.upper}}}]"
+        )
+    if (
         request.operation == "integrate"
         and request.expression is not None
         and request.variable is not None
@@ -752,6 +764,10 @@ def _query_computation_code(request: SymbolicRequest) -> str | None:
 def _query_claim_type(request: SymbolicRequest, code: str) -> str:
     if request.operation == "solve":
         return "real_solution_set_equivalence"
+    if request.operation == "sum":
+        return "finite_sum_equality"
+    if request.operation == "product":
+        return "finite_product_equality"
     if request.operation == "differentiate":
         return "HasDerivAt"
     if (
