@@ -1193,7 +1193,7 @@ def _build_exact_radical_interval(
         ):
             return None
         base = _build_exact_radical_interval(node.left, scale, proof_lines, state)
-        if base is None or base[0] < 0:
+        if base is None:
             return None
         base_lower, base_upper, base_expression, base_name = base
         power = exponent.numerator
@@ -1204,6 +1204,43 @@ def _build_exact_radical_interval(
             proof_lines.append(
                 f"have {name} : {_lean_rational(lower)} ≤ {expression} ∧ "
                 f"{expression} ≤ {_lean_rational(upper)} := by norm_num"
+            )
+            return lower, upper, expression, name
+        if base_lower < 0:
+            if base_upper > 0:
+                return None
+            positive_power_node = ast.BinOp(
+                left=ast.UnaryOp(op=ast.USub(), operand=node.left),
+                op=ast.Pow(),
+                right=node.right,
+            )
+            positive_power = _build_exact_radical_interval(
+                positive_power_node,
+                scale,
+                proof_lines,
+                state,
+            )
+            if positive_power is None:
+                return None
+            positive_lower, positive_upper, positive_expression, positive_name = positive_power
+            if power % 2 == 0:
+                lower, upper = positive_lower, positive_upper
+                equality = f"{expression} = {positive_expression}"
+                result_proof = f"exact {positive_name}"
+            else:
+                lower, upper = -positive_upper, -positive_lower
+                equality = f"{expression} = -({positive_expression})"
+                result_proof = (
+                    f"constructor <;> linarith [{positive_name}.1, {positive_name}.2]"
+                )
+            proof_lines.extend(
+                [
+                    f"have {name}_eq : {equality} := by ring",
+                    f"have {name} : {_lean_rational(lower)} \u2264 {expression} \u2227 "
+                    f"{expression} \u2264 {_lean_rational(upper)} := by",
+                    f"  rw [{name}_eq]",
+                    f"  {result_proof}",
+                ]
             )
             return lower, upper, expression, name
         lower, upper = _quantize_rational_interval(
