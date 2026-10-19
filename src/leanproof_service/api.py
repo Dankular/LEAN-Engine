@@ -1401,7 +1401,8 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
         "finite polynomial Sum/Product, certified rational and square-root, supported radical-valued exact-trigonometric and bounded Pi N approximations, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof. Provider-backed FreeformPrompt results are "
-        "source-backed rather than proofs; the bounded local Graphics renderer returns SVG."
+        "source-backed rather than proofs; the bounded local Graphics renderer supports "
+        "circles, disks, rectangles, lines, polygons, and points as SVG, not as proofs."
     ),
     openapi_extra={
         "requestBody": {
@@ -1472,7 +1473,7 @@ async def wolfram_language_compute(request: Request) -> JSONResponse:
                     "verified": False,
                     "media_type": "image/svg+xml",
                     "image_url": image_url,
-                    "scope": "Graphics[{Red|Blue|Green|Black, Circle[]}]",
+                    "scope": "bounded 2D Circle, Disk, Rectangle, Line, Polygon, and Point graphics with curated styles and options",
                 },
             },
         )
