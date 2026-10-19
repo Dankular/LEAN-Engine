@@ -72,13 +72,21 @@ After choosing a DBnomics dataset, discover matching series with input such as `
 
 ### Assumption overrides
 
-`/v2/query` returns candidate assumptions and applies service defaults unless the caller selects an alternative. A query-wide ID applies to every matching ambiguous call; `@N` selects one-based occurrence `N` for angle, parenthesized-log, or unparenthesized `Function` log calls. For example, this selects degrees for the first trig call while leaving later calls at the default:
+`/v2/query` returns candidate assumptions and applies service defaults unless the caller selects an alternative. A query-wide ID applies to every matching ambiguous call; `@N` selects one-based occurrence `N` for angle, log, function, or ambiguous `m` unit interpretations. For example, this selects degrees for the first trig call while leaving later calls at the default:
 
 ```text
 GET /v2/query?input=sin%2830%29%2Bcos%2860%29&assumption=angle%3Adegrees%401&output=json
 ```
 
 Per-occurrence overrides are also available through repeated `assumption` parameters. For one assumption type, do not combine a query-wide choice with per-occurrence choices. A `Function` override changes `log 20` style calls; `LogBase` changes `log(20)` calls.
+
+Numeric `m` tokens can also be disambiguated inside formulas. This selects minutes for the second occurrence in `10 m * 5 m`:
+
+```text
+GET /v2/query?input=10%20m%2A5%20m&assumption=unit%3Am-minutes%402&output=json
+```
+
+The service checks unit dimensions after applying the choices; incompatible units in an addition are rejected.
 
 Computation routes require the bearer token. `/healthz`, `/readyz`, and `/docs` are public. GeoNames lookups also require `GEONAMES_USERNAME`.
 

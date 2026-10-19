@@ -33,6 +33,10 @@ _UNIT_LITERAL = re.compile(
     rf"^\s*(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>{_UNIT_LITERAL_NAMES})\s*$",
     re.IGNORECASE,
 )
+_UNIT_M_IN_EXPRESSION = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<number>{_NUMBER_PATTERN})\s*(?:\*\s*)?m(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
 )
@@ -222,7 +226,7 @@ def query_with_interpretations(
             parse_timing=perf_counter() - parsing_started,
         )
     try:
-        parsed_input = parse_math_input(query)
+        parsed_input = parse_math_input(_normalize_ambiguous_unit_spacing(query))
     except MathInputError as exc:
         raise InterpretationError(str(exc)) from exc
     query = parsed_input.expression
@@ -1572,17 +1576,21 @@ def _compound_interpretation(
     registry: dict[str, Any],
     by_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Resolve supported numeric trig and bare-log ambiguities inside expressions."""
+    """Resolve supported trig, bare-log, and ambiguous-unit inputs in expressions."""
     trig_matches = list(_TRIG_IN_EXPRESSION.finditer(query))
     log_matches = list(_LOG_IN_EXPRESSION.finditer(query))
-    if not trig_matches and not log_matches:
+    unit_matches = list(_UNIT_M_IN_EXPRESSION.finditer(query))
+    if not trig_matches and not log_matches and not unit_matches:
         return None
 
     candidates_by_type = {
         "AngleUnit": [item for item in registry["assumptions"] if item["type"] == "AngleUnit"],
         "LogBase": [item for item in registry["assumptions"] if item["type"] == "LogBase"],
+        "Unit": [item for item in registry["assumptions"] if item["type"] == "Unit"],
     }
-    grouped_matches: dict[str, list[re.Match[str]]] = {"AngleUnit": [], "LogBase": []}
+    grouped_matches: dict[str, list[re.Match[str]]] = {
+        "AngleUnit": [], "LogBase": [], "Unit": unit_matches,
+    }
     replacements: list[tuple[int, int, str]] = []
     resolved_calls: list[dict[str, Any]] = []
 
@@ -1658,7 +1666,7 @@ def _compound_interpretation(
 
     assumption_payload: list[dict[str, Any]] = []
     ambiguity_rankings: list[dict[str, Any]] = []
-    for kind in ("AngleUnit", "LogBase"):
+    for kind in ("AngleUnit", "LogBase", "Unit"):
         matches = grouped_matches[kind]
         if not matches:
             continue
@@ -1673,10 +1681,10 @@ def _compound_interpretation(
             selection_source = "per_occurrence_override"
         else:
             selection_source = "service_default"
-        occurrence_values = [
-            {
+        occurrence_values = []
+        for index, match in enumerate(matches, 1):
+            occurrence = {
                 "id": f"{kind}:{index}",
-                "function": match.group("function").lower() if kind == "AngleUnit" else "log",
                 "argument": match.group("number"),
                 "selected": (
                     global_choice or per_occurrence_choices.get(index) or default_choice
@@ -1689,8 +1697,13 @@ def _compound_interpretation(
                     else "service_default"
                 ),
             }
-            for index, match in enumerate(matches, 1)
-        ]
+            if kind == "AngleUnit":
+                occurrence["function"] = match.group("function").lower()
+            elif kind == "LogBase":
+                occurrence["function"] = "log"
+            else:
+                occurrence["unit_abbreviation"] = "m"
+            occurrence_values.append(occurrence)
         ambiguity_rankings.append({
             "type": kind,
             "occurrences": occurrence_values,
@@ -1731,7 +1744,7 @@ def _compound_interpretation(
                     "selection_source": occurrence_values[index - 1]["selection_source"],
                     "occurrence_id": occurrence_id,
                 })
-            else:
+            elif kind == "LogBase":
                 number = match.group("number")
                 base = chosen["argument_base"]
                 replacement = f"log({number}, 10)" if base == "10" else f"log({number})"
@@ -1739,6 +1752,17 @@ def _compound_interpretation(
                     "function": "log",
                     "argument": {"kind": "number", "value": number},
                     "base": base,
+                    "selection_source": occurrence_values[index - 1]["selection_source"],
+                    "occurrence_id": occurrence_id,
+                })
+            else:
+                number = match.group("number")
+                replacement = f"{number}*{chosen['symbolic_unit']}"
+                resolved_calls.append({
+                    "function": "quantity",
+                    "argument": {"kind": "number", "value": number},
+                    "unit": chosen["argument_unit"],
+                    "unit_symbol": chosen["symbolic_unit"],
                     "selection_source": occurrence_values[index - 1]["selection_source"],
                     "occurrence_id": occurrence_id,
                 })
@@ -1771,6 +1795,17 @@ def _compound_interpretation(
             "source": query,
             "resolved_expression": expression,
             "resolved_calls": resolved_calls,
+            **({
+                "unit_bindings": {
+                    call["unit_symbol"]: next(
+                        item["symbolic_unit_type"]
+                        for item in candidates_by_type["Unit"]
+                        if item["symbolic_unit"] == call["unit_symbol"]
+                    )
+                    for call in resolved_calls
+                    if call.get("function") == "quantity"
+                }
+            } if any(call.get("function") == "quantity" for call in resolved_calls) else {}),
         },
         "classifier": classifier,
         "assumptions": assumption_payload,
@@ -1784,10 +1819,21 @@ def _normalize_unit(value: str | None) -> str | None:
     return "degrees" if normalized in {"degree", "degrees", "deg"} else "radians"
 
 
+def _normalize_ambiguous_unit_spacing(source: str) -> str:
+    """Make numeric ``m`` unit tokens parseable while preserving other identifiers."""
+    if source.lstrip().startswith("<"):
+        return source
+    return _UNIT_M_IN_EXPRESSION.sub(lambda match: f"{match.group('number')}*m", source)
+
+
 def _named_unit_bindings(typed_ast: dict[str, Any]) -> dict[str, str]:
-    if typed_ast.get("node") != "quantity":
-        return {}
-    return {str(typed_ast["unit_symbol"]): str(typed_ast["unit_type"])}
+    if typed_ast.get("node") == "quantity":
+        return {str(typed_ast["unit_symbol"]): str(typed_ast["unit_type"])}
+    if typed_ast.get("node") == "symbolic_expression":
+        bindings = typed_ast.get("unit_bindings", {})
+        if isinstance(bindings, dict):
+            return {str(symbol): str(unit_type) for symbol, unit_type in bindings.items()}
+    return {}
 
 
 def _quantity_mathml(typed_ast: dict[str, Any]) -> str:

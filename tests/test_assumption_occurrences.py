@@ -167,6 +167,94 @@ class AssumptionOccurrenceApiTests(unittest.TestCase):
         )
         self.assertEqual(function["values"][0]["input"], "function:log-base-10")
 
+    def test_compound_unit_assumption_defaults_and_query_wide_override(self) -> None:
+        default_response = self.client.get(
+            "/v1/interpret",
+            params={"input": "10 m + 5m"},
+            headers=self.headers,
+        )
+        self.assertEqual(default_response.status_code, 200, default_response.text)
+        default_payload = default_response.json()
+        unit = next(item for item in default_payload["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(unit["selected"], "unit:m-meters")
+        self.assertEqual(
+            [item["selected"] for item in unit["occurrences"]],
+            ["unit:m-meters", "unit:m-meters"],
+        )
+        self.assertEqual(
+            default_payload["interpretation"]["typed_ast"]["unit_bindings"],
+            {"unit_meter": "meter"},
+        )
+
+        override_response = self.client.get(
+            "/v1/interpret",
+            params=[("input", "10 m + 5m"), ("assumption", "unit:m-minutes")],
+            headers=self.headers,
+        )
+        self.assertEqual(override_response.status_code, 200, override_response.text)
+        override_payload = override_response.json()
+        unit = next(item for item in override_payload["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(unit["selected"], "unit:m-minutes")
+        self.assertEqual(override_payload["result"], "15*minute")
+
+    def test_compound_unit_assumption_can_select_one_occurrence(self) -> None:
+        response = self.client.get(
+            "/v1/interpret",
+            params=[
+                ("input", "10 m * 5m"),
+                ("assumption", "unit:m-minutes@2"),
+            ],
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        unit = next(item for item in payload["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(
+            [item["selected"] for item in unit["occurrences"]],
+            ["unit:m-meters", "unit:m-minutes"],
+        )
+        self.assertEqual(
+            [item["selection_source"] for item in unit["occurrences"]],
+            ["service_default", "per_occurrence_override"],
+        )
+        self.assertEqual(
+            payload["interpretation"]["typed_ast"]["unit_bindings"],
+            {"unit_meter": "meter", "unit_minute": "minute"},
+        )
+
+    def test_full_results_route_exposes_compound_unit_occurrences(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params=[
+                ("input", "10 m * 5 m"),
+                ("output", "json"),
+                ("assumption", "unit:m-minutes@2"),
+            ],
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        unit = next(item for item in queryresult["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(
+            [item["selected"] for item in unit["occurrences"]],
+            ["unit:m-meters", "unit:m-minutes"],
+        )
+        self.assertTrue(any(pod["id"] == "Result" for pod in queryresult["pods"]))
+
+    def test_incompatible_per_occurrence_units_are_rejected_in_addition(self) -> None:
+        response = self.client.get(
+            "/v1/interpret",
+            params=[
+                ("input", "10m + 5m"),
+                ("assumption", "unit:m-minutes@2"),
+            ],
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()
