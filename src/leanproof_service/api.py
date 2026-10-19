@@ -407,9 +407,9 @@ def capabilities() -> dict[str, object]:
                 },
                 "solve": {
                     "syntax": "Solve[lhs == rhs, variable, Reals]",
-                    "domain": "univariate rational-coefficient polynomials of degree at most two with exact rational roots, plus nonzero constant equations",
+                    "domain": "univariate rational-coefficient polynomials of degree at most two, including exact real quadratic-radical roots and quadratics with no real roots, plus nonzero constant equations",
                     "proof": "Lean proves the returned solution set is equivalent to the submitted equation over the reals and audits axioms",
-                    "unsupported": ["complex-domain solving", "systems", "degree above two", "irrational or complex roots"],
+                    "unsupported": ["complex-domain solving", "systems", "degree above two"],
                 },
                 "definite_integral": {
                     "syntax": "Integrate[expression, {variable, lower, upper}]",

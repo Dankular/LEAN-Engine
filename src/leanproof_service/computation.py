@@ -32,6 +32,12 @@ class Computation:
     domain_conditions: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _RealPolynomialRoot:
+    lean_expression: str
+    wolfram_expression: str
+
+
 _DECIMAL_LITERAL = re.compile(
     r"(?<![A-Za-z0-9_])(?:(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 )
@@ -1194,38 +1200,106 @@ def _prepare_real_polynomial_solve(
         ):
             return None
 
-    roots: list[Fraction] = []
+    roots: list[_RealPolynomialRoot] = []
+    quadratic_coefficients: tuple[Fraction, Fraction, Fraction] | None = None
+    discriminant: Fraction | None = None
     if polynomial.degree() > 0:
         roots_with_multiplicity = _sympy.roots(polynomial.as_expr(), symbol)
-        if (
-            sum(roots_with_multiplicity.values()) != polynomial.degree()
-            or any(not root.is_Rational for root in roots_with_multiplicity)
-        ):
-            return None
-        for root in roots_with_multiplicity:
-            root_fraction = Fraction(int(root.p), int(root.q))
+        rational_roots_complete = (
+            sum(roots_with_multiplicity.values()) == polynomial.degree()
+            and all(root.is_Rational for root in roots_with_multiplicity)
+        )
+        if rational_roots_complete:
+            rational_values = []
+            for root in roots_with_multiplicity:
+                root_fraction = Fraction(int(root.p), int(root.q))
+                if (
+                    abs(root_fraction.numerator).bit_length() > 256
+                    or root_fraction.denominator.bit_length() > 256
+                ):
+                    return None
+                rational_values.append(root_fraction)
+            roots = [
+                _RealPolynomialRoot(
+                    _lean_rational(root),
+                    _fraction_text(root),
+                )
+                for root in sorted(set(rational_values))
+            ]
+        elif polynomial.degree() == 2:
+            coefficients = [
+                Fraction(int(coefficient.p), int(coefficient.q))
+                for coefficient in polynomial.all_coeffs()
+            ]
+            leading, linear, constant = coefficients
+            if leading == 0:
+                return None
+            discriminant = linear**2 - 4 * leading * constant
             if (
-                abs(root_fraction.numerator).bit_length() > 256
-                or root_fraction.denominator.bit_length() > 256
+                abs(discriminant.numerator).bit_length() > 256
+                or discriminant.denominator.bit_length() > 256
             ):
                 return None
-            roots.append(root_fraction)
-        roots = sorted(set(roots))
+            if discriminant == 0:
+                return None
+            if discriminant > 0:
+                quadratic_coefficients = (leading, linear, constant)
+                b_lean = _lean_rational(linear)
+                denominator_lean = _lean_rational(2 * leading)
+                discriminant_lean = _lean_rational(discriminant)
+                sqrt_discriminant_lean = f"Real.sqrt ({discriminant_lean})"
+                sqrt_discriminant_sympy = _sympy.sqrt(
+                    _sympy.Rational(
+                        discriminant.numerator,
+                        discriminant.denominator,
+                    )
+                )
+                radical_signs = (-1, 1) if leading > 0 else (1, -1)
+                roots = []
+                for radical_sign in radical_signs:
+                    operator = "+" if radical_sign > 0 else "-"
+                    simplified_root = _sympy.simplify(
+                        (-linear + radical_sign * sqrt_discriminant_sympy)
+                        / (2 * leading)
+                    )
+                    roots.append(
+                        _RealPolynomialRoot(
+                            f"((-({b_lean}) {operator} {sqrt_discriminant_lean}) / "
+                            f"({denominator_lean}))",
+                            _sympy_real_root_to_wolfram(simplified_root, _sympy),
+                        )
+                    )
+            else:
+                quadratic_coefficients = (leading, linear, constant)
+        else:
+            return None
 
     polynomial_lean = f"({lhs_lean}) - ({rhs_lean})"
     proof_source = _real_polynomial_solve_proof_source(
         polynomial_lean,
         variable,
         roots,
+        quadratic_coefficients,
+        discriminant,
     )
     if roots:
         solution_values = ", ".join(
-            f"{{{variable} -> {_fraction_text(root)}}}" for root in roots
+            f"{{{variable} -> {root.wolfram_expression}}}" for root in roots
         )
         display_result = "{" + solution_values + "}"
     else:
         display_result = "{}"
     return Computation(display_result, proof_source)
+
+
+def _sympy_real_root_to_wolfram(expression: object, sympy: object) -> str:
+    rendered = sympy.sstr(expression)
+    rendered = re.sub(
+        r"\bsqrt\(([^()]*)\)",
+        lambda match: f"Sqrt[{match.group(1)}]",
+        rendered,
+    )
+    return rendered.replace("**", "^")
 
 
 def _bounded_polynomial_degree(node: ast.AST, variable: str) -> int | None:
@@ -1260,18 +1334,33 @@ def _bounded_polynomial_degree(node: ast.AST, variable: str) -> int | None:
 def _real_polynomial_solve_proof_source(
     polynomial: str,
     variable: str,
-    roots: list[Fraction],
+    roots: list[_RealPolynomialRoot],
+    quadratic_coefficients: tuple[Fraction, Fraction, Fraction] | None,
+    discriminant: Fraction | None,
 ) -> str:
-    rendered_roots = [_lean_rational(root) for root in roots]
-    if not rendered_roots:
+    if not roots and quadratic_coefficients is not None and discriminant is not None:
+        leading, linear, _constant = quadratic_coefficients
+        leading_lean = _lean_rational(leading)
+        linear_lean = _lean_rational(linear)
+        discriminant_lean = _lean_rational(discriminant)
+        result_proposition = "False"
+        proof = f"""  have hdiscriminant : {discriminant_lean} < 0 := by norm_num
+  constructor
+  · intro hzero
+    have hcompleted : (2 * ({leading_lean}) * {variable} + ({linear_lean})) ^ 2 = {discriminant_lean} := by
+      nlinarith [hzero]
+    nlinarith [hcompleted, sq_nonneg (2 * ({leading_lean}) * {variable} + ({linear_lean}))]
+  · intro hfalse
+    exact False.elim hfalse"""
+    elif not roots:
         result_proposition = "False"
         proof = """  constructor
   · intro hzero
     norm_num at hzero
   · intro hfalse
     exact False.elim hfalse"""
-    elif len(rendered_roots) == 1:
-        result_proposition = f"{variable} = {rendered_roots[0]}"
+    elif len(roots) == 1:
+        result_proposition = f"{variable} = {roots[0].lean_expression}"
         proof = f"""  constructor
   · intro hzero
     nlinarith [hzero]
@@ -1280,14 +1369,22 @@ def _real_polynomial_solve_proof_source(
     norm_num"""
     else:
         result_proposition = " ∨ ".join(
-            f"{variable} = {root}" for root in rendered_roots
+            f"{variable} = {root.lean_expression}" for root in roots
         )
-        factors = " * ".join(
-            f"({variable} - {root})" for root in rendered_roots
-        )
-        proof = f"""  constructor
+        factors = " * ".join(f"({variable} - {root.lean_expression})" for root in roots)
+        factor_hypotheses = "[hzero]"
+        branch_hypotheses = ""
+        if discriminant is not None and discriminant > 0:
+            discriminant_lean = _lean_rational(discriminant)
+            factor_hypotheses = "[hzero, hsqrt]"
+            branch_hypotheses = f"""  have hdiscriminant : 0 < {discriminant_lean} := by norm_num
+  have hsqrt : (Real.sqrt ({discriminant_lean})) ^ 2 = {discriminant_lean} :=
+    Real.sq_sqrt (le_of_lt hdiscriminant)
+"""
+        solution_tactic = "nlinarith [hsqrt]" if branch_hypotheses else "norm_num"
+        proof = f"""{branch_hypotheses}  constructor
   · intro hzero
-    have hfactor : {factors} = 0 := by nlinarith [hzero]
+    have hfactor : {factors} = 0 := by nlinarith {factor_hypotheses}
     rcases mul_eq_zero.mp hfactor with hleft | hright
     · left
       nlinarith [hleft]
@@ -1295,10 +1392,11 @@ def _real_polynomial_solve_proof_source(
       nlinarith [hright]
   · rintro (hsolution | hsolution)
     · subst {variable}
-      norm_num
+      {solution_tactic}
     · subst {variable}
-      norm_num"""
+      {solution_tactic}"""
     return f"""import Mathlib.Data.Real.Basic
+import Mathlib.Analysis.SpecialFunctions.Sqrt
 import Mathlib.Tactic.Linarith
 import Mathlib.Tactic.NormNum
 
