@@ -8,6 +8,9 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
         cases = {
             "Sin[Pi]": "0",
             "Sin[-Pi]": "0",
+            "Sin[2Pi]": "0",
+            "Cos[2Pi]": "1",
+            "Tan[2Pi]": "0",
             "Sin[Pi/2]": "1",
             "Sin[-Pi/2]": "-1",
             "Sin[Pi/3]": "sqrt(3)/2",
@@ -28,6 +31,13 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
             "Tan[Pi/3]": "sqrt(3)",
             "Tan[Pi/4]": "1",
             "Tan[Pi/6]": "1/sqrt(3)",
+            "Sin[2Pi/3]": "sqrt(3)/2",
+            "Cos[2 Pi/3]": "-1/2",
+            "Tan[2*Pi/3]": "-sqrt(3)",
+            "Sin[5Pi/6]": "1/2",
+            "Cos[5Pi/6]": "-sqrt(3)/2",
+            "Tan[5Pi/6]": "-1/sqrt(3)",
+            "Sin[-2Pi/3]": "-sqrt(3)/2",
             "Sin[-Pi/6]": "-1/2",
             "Cos[-Pi/3]": "1/2",
             "Tan[-Pi/4]": "-1",
@@ -42,6 +52,10 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
     def test_representative_values_are_checked_by_lean(self) -> None:
         cases = (
             "Sin[Pi/6]",
+            "Sin[2Pi/3]",
+            "Cos[2Pi/3]",
+            "Tan[2Pi/3]",
+            "Sin[2Pi]",
             "Sin[-Pi]",
             "Cos[Pi/8]",
             "Cos[-Pi/3]",
@@ -58,6 +72,7 @@ class ExactPiTrigonometricConstantTests(unittest.TestCase):
 
     def test_unlisted_angles_and_tangent_poles_remain_unsupported(self) -> None:
         self.assertIsNone(prepare_computation("Sin[Pi/5]", 10))
+        self.assertIsNone(prepare_computation("Sin[3Pi/8]", 10))
         self.assertIsNone(prepare_computation("Cos[Pi/64]", 10))
         self.assertIsNone(prepare_computation("Tan[Pi/2]", 10))
         self.assertIsNone(prepare_computation("Sin[pi/6]", 10))

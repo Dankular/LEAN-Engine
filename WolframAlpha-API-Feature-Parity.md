@@ -41,11 +41,13 @@ HTTP 200 response with `success=true` and a Wolfram `Failure` expression contain
 documented `MessageTemplate` and `MessageParameters` fields. Authentication accepts the
 configured key directly or as a bearer token.
 
-The CAG route also evaluates exact Sin, Cos, and selected Tan values at standard
-Pi fractions. Sin and Cos accept signed Pi fractions with denominators 1, 2, 3, 4,
-6, 8, 16, and 32; Tan accepts denominators 1, 3, 4, and 6. Each value is checked
-against a Mathlib trigonometric identity. Tangent poles and other angles remain
-unsupported.
+The CAG route also evaluates exact Sin, Cos, and selected Tan values for bounded
+rational multiples of Pi. It reduces the coefficient by integer periods and reflection,
+then accepts a base angle of zero or Pi/d. Sin and Cos support d = 2, 3, 4, 6, 8, 16,
+and 32; Tan supports d = 3, 4, and 6, with poles rejected. The rational numerator and
+denominator are limited to 256 bits. Lean checks both the reduction identity and the
+Mathlib base value. For example, Sin[2 Pi/3] reduces to Sin[Pi - Pi/3]. Other reduced
+angles and arbitrary numeric angles remain unsupported.
 
 The CAG endpoint and `/v2/query?verify=true` also support finite `Sum` and `Product`
 over inclusive integer bounds when the integrand and result fit the rational-polynomial

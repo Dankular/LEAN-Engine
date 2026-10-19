@@ -244,39 +244,86 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
 def _prepare_exact_pi_trigonometric_constant(code: str) -> Computation | None:
     match = re.fullmatch(
         r"(?is)\s*(?P<function>Sin|Cos|Tan)\s*\[\s*"
-        r"(?P<sign>[+-]?)\s*Pi(?:\s*/\s*(?P<denominator>\d+))?\s*\]\s*",
+        r"(?P<sign>[+-]?)\s*(?:(?P<numerator>\d+)\s*\*?\s*)?Pi"
+        r"(?:\s*/\s*(?P<denominator>\d+))?\s*\]\s*",
         code,
     )
     if match is None:
         return None
 
     function = match.group("function").lower()
-    denominator = int(match.group("denominator") or "1")
-    value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(denominator)
-    if value is None:
+    try:
+        numerator = int(match.group("numerator") or "1")
+        denominator = int(match.group("denominator") or "1")
+    except ValueError:
         return None
+    if (
+        denominator <= 0
+        or abs(numerator).bit_length() > 256
+        or denominator.bit_length() > 256
+    ):
+        return None
+    if match.group("sign") == "-":
+        numerator = -numerator
+    pi_multiple = Fraction(numerator, denominator)
 
-    display_result, lean_result, lemma = value
-    negative = match.group("sign") == "-"
-    if negative and function in {"sin", "tan"} and display_result != "0":
+    integer_shift = (
+        2 * pi_multiple.numerator + pi_multiple.denominator
+    ) // (2 * pi_multiple.denominator)
+    angle_remainder = pi_multiple - integer_shift
+    subtract_base = angle_remainder < 0
+    base_angle = abs(angle_remainder)
+    if base_angle == 0:
+        value = {
+            "sin": ("0", "0", "Real.sin_zero"),
+            "cos": ("1", "1", "Real.cos_zero"),
+            "tan": ("0", "0", "Real.tan_zero"),
+        }[function]
+        base_expression = "0"
+    else:
+        reciprocal = 1 / base_angle
+        if reciprocal.denominator != 1:
+            return None
+        base_denominator = reciprocal.numerator
+        value = _EXACT_PI_TRIG_VALUES.get(function, {}).get(base_denominator)
+        if value is None:
+            return None
+        base_expression = f"(Real.pi / {base_denominator})"
+
+    display_result, lean_result, base_lemma = value
+    parity_sign = -1 if integer_shift % 2 else 1
+    if function == "sin":
+        result_sign = -parity_sign if subtract_base else parity_sign
+    elif function == "cos":
+        result_sign = parity_sign
+    else:
+        result_sign = -1 if subtract_base else 1
+    if result_sign < 0 and display_result != "0":
         display_result = f"-{display_result}"
         lean_result = f"-({lean_result})"
 
-    angle = "Real.pi" if denominator == 1 else f"(Real.pi / {denominator})"
-    if negative:
-        angle = f"(-{angle})"
-    lean_function = f"Real.{function}"
-    proof = (
-        f"by\n  rw [Real.{function}_neg, {lemma}]"
-        if negative
-        else f"by\n  rw [{lemma}]"
+    integer_term = f"({integer_shift} : ℤ) * Real.pi"
+    angle_decomposition = (
+        f"{integer_term} - {base_expression}"
+        if subtract_base
+        else f"{base_expression} + {integer_term}"
     )
-    if negative and function in {"sin", "tan"} and display_result == "0":
-        proof += "\n  norm_num"
+    identity = (
+        f"Real.{function}_int_mul_pi_sub"
+        if subtract_base
+        else f"Real.{function}_add_int_mul_pi"
+    )
+    lean_multiple = _lean_rational(pi_multiple)
+    proof = f"""by
+  have hangle : {lean_multiple} * Real.pi = {angle_decomposition} := by
+    norm_num <;> ring
+  rw [hangle, {identity}]
+  rw [{base_lemma}] <;> norm_num
+"""
     source = f"""import Mathlib.Analysis.SpecialFunctions.Trigonometric.Basic
 
 theorem wolfram_language_compute :
-    {lean_function} {angle} = {lean_result} := {proof}
+    Real.{function} ({lean_multiple} * Real.pi) = {lean_result} := {proof}
 
 #print axioms wolfram_language_compute
 """

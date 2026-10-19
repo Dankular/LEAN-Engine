@@ -431,7 +431,7 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
-                    "Exact Sin, Cos, and selected Tan values at standard Pi fractions, checked by Lean",
+                    "Exact Sin/Cos/Tan values for bounded rational Pi multiples reducible to supported angles, checked by Lean",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
                     "Selected rational-frequency definite Sin/Cos integrals with exact Pi-multiple bounds",
@@ -1302,7 +1302,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     summary="Compute a supported Wolfram Language expression",
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
-        "Supported operations include bounded arithmetic, exact standard Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
+        "Supported operations include bounded arithmetic, exact reducible rational-Pi Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
         "finite polynomial Sum/Product, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof."
