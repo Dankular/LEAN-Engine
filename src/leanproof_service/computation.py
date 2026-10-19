@@ -1283,14 +1283,48 @@ def _build_exact_radical_interval(
                     proof_lines,
                     state,
                 )
-                if (
-                    numerator_interval is None
-                    or denominator_interval is None
-                    or denominator_interval[0] <= 0
-                ):
+                if numerator_interval is None or denominator_interval is None:
                     return None
                 numerator_lower, numerator_upper, numerator_expression, numerator_name = numerator_interval
                 denominator_lower, denominator_upper, denominator_expression, denominator_name = denominator_interval
+                if denominator_upper < 0:
+                    positive_denominator_node = ast.UnaryOp(
+                        op=ast.USub(),
+                        operand=node.right,
+                    )
+                    positive_quotient_node = ast.BinOp(
+                        left=node.left,
+                        op=ast.Div(),
+                        right=positive_denominator_node,
+                    )
+                    positive_quotient = _build_exact_radical_interval(
+                        positive_quotient_node,
+                        scale,
+                        proof_lines,
+                        state,
+                    )
+                    if positive_quotient is None:
+                        return None
+                    positive_lower, positive_upper, positive_expression, positive_name = positive_quotient
+                    lower, upper = -positive_upper, -positive_lower
+                    expression = (
+                        f"(({numerator_expression}) / ({denominator_expression}))"
+                    )
+                    name = _next_numeric_interval_name(state)
+                    proof_lines.extend(
+                        [
+                            f"have {name}_eq : {expression} = -({positive_expression}) := by",
+                            f"  simpa only [neg_neg] using (div_neg_eq_neg_div "
+                            f"(-({denominator_expression})) ({numerator_expression}))",
+                            f"have {name} : {_lean_rational(lower)} \u2264 {expression} \u2227 "
+                            f"{expression} \u2264 {_lean_rational(upper)} := by",
+                            f"  rw [{name}_eq]",
+                            f"  constructor <;> linarith [{positive_name}.1, {positive_name}.2]",
+                        ]
+                    )
+                    return lower, upper, expression, name
+                if denominator_lower <= 0:
+                    return None
                 endpoints = tuple(
                     numerator_endpoint / denominator_endpoint
                     for numerator_endpoint in (numerator_lower, numerator_upper)

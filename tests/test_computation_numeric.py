@@ -163,6 +163,29 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
                 self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
                 self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
 
+    def test_sign_definite_denominator_interval_quotients_are_lean_checked(self) -> None:
+        cases = {
+            "N[Sqrt[2]/(Pi-3), 12]": ("9.98790210169", False),
+            "N[Sqrt[2]/(Pi-4), 12]": ("-1.64748539058", True),
+            "N[-Sqrt[2]/(Pi-4), 12]": ("1.64748539058", True),
+        }
+        for code, (expected_value, negative_denominator) in cases.items():
+            with self.subTest(code=code):
+                response = self.client.post(
+                    "/api/cag/v1/WolframLanguageCompute",
+                    json={"code": code, "timeConstraint": 60},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                evidence = response.json()["evidence"]
+                self.assertEqual(
+                    evidence["numeric_approximation"]["value"], expected_value
+                )
+                self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+                if negative_denominator:
+                    self.assertIn("div_neg_eq_neg_div", evidence["lean_source"])
+
     def test_exact_trigonometric_numeric_result_composes_lean_proofs(self) -> None:
         cases = {
             "N[Sin[Pi/6], 20]": ("0.5", 20),
@@ -286,6 +309,7 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[Pi^2, 20]",
             "N[(Pi - 628318530717958647693/200000000000000000000)*Sqrt[2], 3]",
             "N[(Pi - 628318530717958647693/200000000000000000000)^2, 3]",
+            "N[Sqrt[2]/(Pi - 628318530717958647693/200000000000000000000), 3]",
             "N[Sqrt[-2]]",
             "N[Sqrt[x]]",
             "N[1/3, 0]",

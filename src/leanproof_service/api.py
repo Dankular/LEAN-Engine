@@ -460,7 +460,7 @@ def capabilities() -> dict[str, object]:
                 ],
                 "numeric_approximation": {
                     "syntax": ["N[expression]", "N[expression, precision]"],
-                    "scope": "exact rationals, square roots of nonnegative rationals, exact Pi-trigonometric expressions reducible to rational linear combinations or positive-denominator quotients of supported nested square roots, and bounded expressions involving Pi with supported rational arithmetic, sign-definite interval products, nonnegative integer powers through 16 over sign-definite base intervals, square roots, and positive-denominator quotients",
+                    "scope": "exact rationals, square roots of nonnegative rationals, exact Pi-trigonometric expressions reducible to rational linear combinations or positive-denominator quotients of supported nested square roots, and bounded expressions involving Pi with supported rational arithmetic, sign-definite interval products, nonnegative integer powers through 16 over sign-definite base intervals, square roots, and quotients with sign-definite denominator intervals",
                     "precision_significant_digits": {
                         "default": 16,
                         "exact_rational_trigonometric_and_sqrt_range": [1, 500],
