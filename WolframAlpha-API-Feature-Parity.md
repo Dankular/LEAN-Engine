@@ -226,7 +226,7 @@ The documented parameter groups are:
 | Classification | Clash assumptions and `datatypes`; pod `scanner` helps identify result subject | Candidate ranking covers angle units and logarithm bases; ambiguous `m`, lowercase `i`, and AM/PM clock candidates use neutral ties; deterministic templates route supported symbolic instructions, while a deterministic router handles selected weather, constant, Wikidata population/capital, entity, place, and series patterns; no general query classifier | P1/P3 |
 | Informational elements | `assumptions`, `sources`, `warnings`, `infos`, `generalization`, `didyoumeans`, `tips`, `spellcheck`, `translation`, `reinterpret`, `examplepage`, `futuretopic`, `languagemsg`, and errors | Query results include assumptions, provider sources, warnings, tips, and errors; other informational element families remain absent | P1 |
 | Error semantics | Distinguishes invalid requests/internal errors (`error=true`) from unrecognized queries (`success=false`); pod errors can be local | `/v2/query` returns queryresult-compatible invalid-request/backend error details with `error=true`, and unrecognized queries with `success=false`, `error=false`, and tips; provider/backend failures use HTTP 5xx | P0 |
-| Forward compatibility | Clients should tolerate new result elements and attributes | No generic pod schema/parser yet | P1 |
+| Forward compatibility | Clients should tolerate new result elements and attributes | JSON preserves additive fields; XML keeps additive scalar query/pod fields as attributes and serializes complex fields at the query, pod, subpod, assumption, source, warning, state, and evidence levels as JSON-encoded extension elements. Invalid XML field names are retained through a `<field name="…" encoding="json">` element. The mapping is covered by focused serializer contract tests; exhaustive parameter and result-family fixtures remain open | P1 |
 
 `verify=true` also covers bounded sums, products, and rational scaling over supported `sin`, `cos`, and `tan` calls at rational multiples of pi. The verifier composes the CAG trigonometric theorems in Lean and displays the exact expression proved in the Result pod. Division is limited to nonzero rational denominators and powers to nonnegative integer exponents through 16. This remains an explicit formula slice; general trigonometric identities and natural-language fidelity are not implied.
 
@@ -301,7 +301,7 @@ The CAG endpoint accepts Wolfram-style `N[expression]` and `N[expression, precis
 
 - The `/v2/query` route has a stable, documented request contract and does not confuse our credentials with Wolfram credentials.
 - `GET /v2/validatequery` can report parse/interpretation candidates independently of result computation.
-- JSON and XML encode the same query result and preserve unknown additive fields safely.
+- JSON and XML preserve additive query fields; XML uses JSON-encoded extension elements when an unknown field has no documented element mapping. Focused tests cover query, pod, subpod, and assumption extensions; result-family and parameter coverage remains to be expanded.
 - Pod IDs are stable within a query contract; filtering supports repeatable include/exclude and wildcard title options.
 - Assumption proposals list typed, versioned service IDs; query-wide and per-occurrence caller overrides are validated before backend routing and never chosen from proof outcomes.
 - Decimal approximation state inputs are returned with the pod, can be resubmitted through `podstate`, and produce the requested precision within the documented cap.

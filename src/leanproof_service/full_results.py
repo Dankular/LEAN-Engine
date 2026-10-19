@@ -59,6 +59,7 @@ _SUPPORTED_FORMATS = {"plaintext", "minput", "moutput", "mathml", "cell"}
 _KNOWN_FORMATS = {
     "image", "imagemap", "plaintext", "minput", "moutput", "cell", "mathml", "sound", "wav"
 }
+_XML_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 _DECIMAL_APPROXIMATION_PRECISIONS = (50, 100, 200, 400, 500)
 _DECIMAL_MORE_STATE = "DecimalApproximation__More digits"
 _DECIMAL_FEWER_STATE = "DecimalApproximation__Fewer digits"
@@ -3947,10 +3948,18 @@ def _payload_to_xml(payload: dict[str, Any]) -> str:
         "interpretation", "classification", "qualification", "sources", "data", "retrieved_at",
     }
     for key, value in data.items():
-        if key in special or value is None:
+        if key in special:
             continue
-        if isinstance(value, (str, int, float, bool)):
-            root.set(key, _xml_value(value))
+        if isinstance(key, str) and _XML_NAME.fullmatch(key) and isinstance(
+            value, (str, int, float, bool)
+        ):
+            serialized = _xml_value(value)
+            if _xml_safe_text(serialized) == serialized:
+                root.set(key, serialized)
+            else:
+                _append_xml_extension(root, key, value)
+        else:
+            _append_xml_extension(root, key, value)
     if "pods" in data:
         for pod in data["pods"]:
             _append_pod(root, pod)
@@ -3963,36 +3972,62 @@ def _payload_to_xml(payload: dict[str, Any]) -> str:
         element.text = json.dumps(data["data"], ensure_ascii=False, separators=(",", ":"))
     if data.get("retrieved_at") is not None:
         element = ET.SubElement(root, "retrieved_at")
-        element.text = str(data["retrieved_at"])
+        element.text = _xml_safe_text(str(data["retrieved_at"]))
     _append_text_items(root, "warnings", data.get("warnings"))
     _append_text_items(root, "tips", data.get("tips"))
     if data.get("error_detail"):
         error = ET.SubElement(root, "error")
         for key, value in data["error_detail"].items():
-            child = ET.SubElement(error, key)
-            child.text = str(value)
+            if key in {"code", "msg"}:
+                _append_xml_text_element(error, key, value)
+            else:
+                _append_xml_field(error, key, value)
     for name in ("interpretation", "classification", "evidence"):
         if data.get(name) is not None:
             child = ET.SubElement(root, name)
             for key, value in data[name].items():
-                if isinstance(value, (str, int, float, bool)):
+                if (
+                    isinstance(key, str)
+                    and _XML_NAME.fullmatch(key)
+                    and isinstance(value, (str, int, float, bool))
+                    and _xml_safe_text(_xml_value(value)) == _xml_value(value)
+                ):
                     child.set(key, _xml_value(value))
                 else:
-                    nested = ET.SubElement(child, key)
-                    nested.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                    _append_xml_extension(child, key, value)
     if data.get("qualification"):
         child = ET.SubElement(root, "qualification")
-        child.text = str(data["qualification"])
+        child.text = _xml_safe_text(str(data["qualification"]))
     return ET.tostring(root, encoding="unicode", short_empty_elements=True)
 
 
 def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
-    attributes = {
-        key: value for key, value in pod.items() if key not in {"subpods", "states", "evidence"}
-    }
-    element = ET.SubElement(root, "pod", {key: _xml_value(value) for key, value in attributes.items()})
+    attributes: dict[str, str] = {}
+    extensions: list[tuple[object, Any]] = []
+    for key, value in pod.items():
+        if key in {"subpods", "states", "evidence"}:
+            continue
+        if (
+            isinstance(key, str)
+            and _XML_NAME.fullmatch(key)
+            and isinstance(value, (str, int, float, bool))
+        ):
+            serialized = _xml_value(value)
+            if _xml_safe_text(serialized) == serialized:
+                attributes[key] = serialized
+            else:
+                extensions.append((key, value))
+        else:
+            extensions.append((key, value))
+    element = ET.SubElement(root, "pod", attributes)
+    for key, value in extensions:
+        _append_xml_extension(element, key, value)
     for subpod in pod.get("subpods", []):
-        subpod_element = ET.SubElement(element, "subpod", {"title": str(subpod.get("title", ""))})
+        subpod_element = ET.SubElement(
+            element,
+            "subpod",
+            {"title": _xml_safe_text(str(subpod.get("title", "")))},
+        )
         for key, value in subpod.items():
             if key == "title":
                 continue
@@ -4001,7 +4036,7 @@ def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
                     subpod_element.append(ET.fromstring(str(value)))
                 except ET.ParseError:
                     mathml = ET.SubElement(subpod_element, "mathml")
-                    mathml.text = str(value)
+                    mathml.text = _xml_safe_text(str(value))
             elif key == "data":
                 child = ET.SubElement(subpod_element, "data", {"encoding": "json"})
                 child.text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -4009,14 +4044,15 @@ def _append_pod(root: ET.Element, pod: dict[str, Any]) -> None:
                 _append_states(subpod_element, value)
             elif key == "img" and isinstance(value, dict):
                 attributes = {
-                    name: _xml_value(value[name])
+                    name: _xml_safe_text(_xml_value(value[name]))
                     for name in ("src", "alt", "title", "width", "height")
                     if name in value
                 }
                 ET.SubElement(subpod_element, "img", attributes)
+            elif key in {"plaintext", "minput", "moutput", "cell"}:
+                _append_xml_text_element(subpod_element, key, value)
             else:
-                child = ET.SubElement(subpod_element, key)
-                child.text = str(value)
+                _append_xml_field(subpod_element, key, value)
     _append_states(element, pod.get("states", []))
 
 
@@ -4026,47 +4062,73 @@ def _append_states(parent: ET.Element, states: list[dict[str, str]]) -> None:
     state_container = ET.SubElement(parent, "states", {"count": str(len(states))})
     for state in states:
         attributes = {
-            key: str(value) for key, value in state.items() if key in {"name", "input"}
+            key: _xml_safe_text(str(value))
+            for key, value in state.items()
+            if key in {"name", "input"}
         }
-        ET.SubElement(state_container, "state", attributes)
+        element = ET.SubElement(state_container, "state", attributes)
+        for key, value in state.items():
+            if key not in {"name", "input"}:
+                _append_xml_field(element, key, value)
 
 
 def _append_assumptions(root: ET.Element, assumptions: list[dict[str, Any]]) -> None:
     parent = ET.SubElement(root, "assumptions", {"count": str(len(assumptions))})
     for assumption in assumptions:
         attributes = {
-            key: _xml_value(value)
+            key: _xml_safe_text(_xml_value(value))
             for key, value in assumption.items()
-            if key != "values" and isinstance(value, (str, int, float, bool))
+            if key not in {"values", "occurrences"}
+            and isinstance(key, str)
+            and _XML_NAME.fullmatch(key)
+            and isinstance(value, (str, int, float, bool))
         }
         item = ET.SubElement(parent, "assumption", attributes)
+        for key, content in assumption.items():
+            if key not in {"values", "occurrences"} and key not in attributes:
+                _append_xml_field(item, key, content)
         for value in assumption.get("values", []):
             value_attributes = {
-                key: _xml_value(content)
+                key: _xml_safe_text(_xml_value(content))
                 for key, content in value.items()
-                if isinstance(content, (str, int, float, bool))
+                if isinstance(key, str)
+                and _XML_NAME.fullmatch(key)
+                and isinstance(content, (str, int, float, bool))
             }
-            ET.SubElement(item, "value", value_attributes)
+            value_element = ET.SubElement(item, "value", value_attributes)
+            for key, content in value.items():
+                if key not in value_attributes:
+                    _append_xml_field(value_element, key, content)
         for occurrence in assumption.get("occurrences", []):
             if not isinstance(occurrence, dict):
                 continue
             occurrence_attributes = {
-                key: _xml_value(content)
+                key: _xml_safe_text(_xml_value(content))
                 for key, content in occurrence.items()
-                if isinstance(content, (str, int, float, bool))
+                if isinstance(key, str)
+                and _XML_NAME.fullmatch(key)
+                and isinstance(content, (str, int, float, bool))
             }
-            ET.SubElement(item, "occurrence", occurrence_attributes)
+            occurrence_element = ET.SubElement(item, "occurrence", occurrence_attributes)
+            for key, content in occurrence.items():
+                if key not in occurrence_attributes:
+                    _append_xml_field(occurrence_element, key, content)
 
 
 def _append_sources(root: ET.Element, sources: list[dict[str, Any]]) -> None:
     parent = ET.SubElement(root, "sources", {"count": str(len(sources))})
     for source in sources:
         attributes = {
-            key: str(value)
+            key: _xml_safe_text(str(value))
             for key, value in source.items()
-            if isinstance(value, (str, int, float, bool))
+            if isinstance(key, str)
+            and _XML_NAME.fullmatch(key)
+            and isinstance(value, (str, int, float, bool))
         }
-        ET.SubElement(parent, "source", attributes)
+        element = ET.SubElement(parent, "source", attributes)
+        for key, value in source.items():
+            if key not in attributes:
+                _append_xml_field(element, key, value)
 
 
 def _append_text_items(root: ET.Element, name: str, items: list[dict[str, str]] | None) -> None:
@@ -4074,9 +4136,51 @@ def _append_text_items(root: ET.Element, name: str, items: list[dict[str, str]] 
         return
     parent = ET.SubElement(root, name, {"count": str(len(items))})
     for item in items:
-        ET.SubElement(parent, name[:-1] if name.endswith("s") else name, {
-            key: str(value) for key, value in item.items()
-        })
+        element_name = name[:-1] if name.endswith("s") else name
+        attributes = {
+            key: _xml_safe_text(str(value))
+            for key, value in item.items()
+            if isinstance(key, str)
+            and _XML_NAME.fullmatch(key)
+            and isinstance(value, (str, int, float, bool))
+        }
+        element = ET.SubElement(parent, element_name, attributes)
+        for key, value in item.items():
+            if key not in attributes:
+                _append_xml_field(element, key, value)
+
+
+def _append_xml_field(parent: ET.Element, name: object, value: Any) -> None:
+    _append_xml_extension(parent, name, value)
+
+
+def _append_xml_text_element(parent: ET.Element, name: object, value: Any) -> None:
+    if isinstance(name, str) and _XML_NAME.fullmatch(name) and isinstance(
+        value, (str, int, float, bool)
+    ):
+        serialized = _xml_value(value)
+        if _xml_safe_text(serialized) != serialized:
+            _append_xml_extension(parent, name, value)
+            return
+        child = ET.SubElement(parent, name)
+        child.text = serialized
+        return
+    _append_xml_extension(parent, name, value)
+
+
+def _append_xml_extension(parent: ET.Element, name: object, value: Any) -> None:
+    original_name = _xml_safe_text(str(name))
+    valid_name = bool(_XML_NAME.fullmatch(original_name)) and not original_name.lower().startswith("xml")
+    tag = original_name if valid_name else "field"
+    attributes = {"encoding": "json"}
+    if not valid_name:
+        attributes["name"] = original_name
+    element = ET.SubElement(parent, tag, attributes)
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        encoded = json.dumps(str(value), ensure_ascii=False, separators=(",", ":"))
+    element.text = _xml_safe_text(encoded)
 
 
 def _xml_value(value: Any) -> str:
