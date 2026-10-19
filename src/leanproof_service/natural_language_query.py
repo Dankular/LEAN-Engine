@@ -31,6 +31,8 @@ class NaturalLanguageOperation:
     operation: str
     expression: str
     rule_id: str
+    components: tuple[str, ...] | None = None
+    coordinate_system: str | None = None
     rhs: str | None = None
     variable: str | None = None
     variable_source: str | None = None
@@ -54,6 +56,48 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     query = source.strip().rstrip("?.! ").strip()
     if not query or len(query) > 4000:
         return None
+
+    coordinate = re.fullmatch(
+        r"(?:(?:please\s+)?(?:(?:find|compute|calculate|determine)\s+)?|what\s+is\s+)"
+        r"(?:the\s+)?(?P<operator>gradient|grad|divergence|div|curl)\s+"
+        r"(?:(?:of|for)\s+)?(?P<body>.+)",
+        query,
+        re.IGNORECASE,
+    )
+    if coordinate:
+        operator = coordinate.group("operator").lower()
+        body, coordinate_system = _split_coordinate_chart(coordinate.group("body"))
+        if operator in {"gradient", "grad"}:
+            expression = _math_phrase(_strip_coordinate_field_prefix(body))
+            if not expression:
+                raise NaturalLanguageClarification(
+                    "Give the scalar field for the gradient, for example "
+                    "'find the gradient of x^2 + y^2'."
+                )
+            return NaturalLanguageOperation(
+                operation="coordinate_gradient",
+                expression=expression,
+                coordinate_system=coordinate_system,
+                rule_id="coordinate_gradient_field",
+            )
+
+        components = _split_coordinate_components(body)
+        normalized_components = tuple(_math_phrase(item) for item in components)
+        if operator in {"divergence", "div"}:
+            return NaturalLanguageOperation(
+                operation="coordinate_divergence",
+                expression=", ".join(normalized_components),
+                components=normalized_components,
+                coordinate_system=coordinate_system,
+                rule_id="coordinate_divergence_components",
+            )
+        return NaturalLanguageOperation(
+            operation="coordinate_curl",
+            expression=", ".join(normalized_components),
+            components=normalized_components,
+            coordinate_system=coordinate_system,
+            rule_id="coordinate_curl_components",
+        )
 
     match = re.fullmatch(
         r"(?:please\s+)?(simplify|factor|expand)\s+"
@@ -240,6 +284,91 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
         )
 
     return None
+
+
+def _split_coordinate_chart(source: str) -> tuple[str, str | None]:
+    match = re.search(
+        r"\s+(?:in|using)\s+(?P<chart>[A-Za-z][A-Za-z-]*)(?:\s+coordinates?)?$",
+        source,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return source.strip(), None
+    charts = {
+        "cartesian": "Cartesian3D",
+        "rectangular": "Cartesian3D",
+        "cylindrical": "Cylindrical3D",
+        "spherical": "Spherical3D",
+    }
+    chart_name = match.group("chart").lower()
+    if chart_name not in charts:
+        raise NaturalLanguageClarification(
+            f"The {chart_name} chart is unsupported here; choose Cartesian, cylindrical, "
+            "or spherical coordinates."
+        )
+    return source[: match.start()].strip(), charts[chart_name]
+
+
+def _strip_coordinate_field_prefix(source: str) -> str:
+    value = source.strip()
+    value = re.sub(
+        r"^(?:(?:the\s+)?(?:scalar\s+)?field\s+|with\s+respect\s+to\s+the\s+field\s+)",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value.strip().strip("`").strip()
+
+
+def _split_coordinate_components(source: str) -> tuple[str, str, str]:
+    value = source.strip()
+    value = re.sub(
+        r"^(?:(?:the\s+)?(?:vector\s+)?field\s+(?:with\s+components\s+)?|"
+        r"with\s+components\s+)",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
+    value = re.sub(r"^[A-Za-z][A-Za-z0-9_]{0,31}\s*=\s*", "", value)
+    if value.startswith("(") and value.endswith(")"):
+        depth = 0
+        wraps_entire_value = True
+        for index, character in enumerate(value):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0 and index != len(value) - 1:
+                    wraps_entire_value = False
+                    break
+                if depth < 0:
+                    wraps_entire_value = False
+                    break
+        if wraps_entire_value and depth == 0:
+            value = value[1:-1].strip()
+
+    parts: list[str] = []
+    start = 0
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    for index, character in enumerate(value):
+        if character in depths:
+            depths[character] += 1
+        elif character in closing:
+            opening = closing[character]
+            depths[opening] -= 1
+            if depths[opening] < 0:
+                break
+        elif character == "," and not any(depths.values()):
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    if any(depths.values()) or len(parts) != 3 or any(not item for item in parts):
+        raise NaturalLanguageClarification(
+            "Give exactly three vector components, for example "
+            "'find the divergence of (x, y, z)'."
+        )
+    return parts[0], parts[1], parts[2]
 
 
 def _split_variable_clause(

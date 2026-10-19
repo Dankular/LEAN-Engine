@@ -2946,7 +2946,12 @@ def _prepare_query(
         operation_request = _parse_operation_call(input_text)
         if operation_request is None:
             natural_language_plan = plan_natural_language_operation(input_text)
-            if natural_language_plan is not None and natural_language_plan.operation != "evaluate":
+            if natural_language_plan is not None and natural_language_plan.operation not in {
+                "evaluate",
+                "coordinate_gradient",
+                "coordinate_divergence",
+                "coordinate_curl",
+            }:
                 operation_request = _request_from_natural_language_plan(natural_language_plan)
     except NaturalLanguageClarification as exc:
         raise InterpretationError(str(exc)) from exc
@@ -2986,9 +2991,44 @@ def _prepare_query(
                 numeric_precision=numeric_precision,
             )
             return interpreted, symbolic_request
+        interpretation_input = input_text
+        interpretation_assumptions = assumptions
+        is_natural_language_coordinate = (
+            natural_language_plan is not None
+            and natural_language_plan.operation in {
+                "coordinate_gradient",
+                "coordinate_divergence",
+                "coordinate_curl",
+            }
+        )
+        if is_natural_language_coordinate:
+            assert natural_language_plan is not None
+            interpretation_input = _coordinate_query_from_natural_language_plan(
+                natural_language_plan
+            )
+            interpretation_assumptions = list(assumptions)
+            if natural_language_plan.coordinate_system is not None:
+                coordinate_id = {
+                    "Cartesian3D": "coordinate:cartesian-3d",
+                    "Cylindrical3D": "coordinate:cylindrical-3d",
+                    "Spherical3D": "coordinate:spherical-3d",
+                }[natural_language_plan.coordinate_system]
+                existing_coordinate_ids = {
+                    selection.rsplit("@", 1)[0]
+                    for selection in interpretation_assumptions
+                    if selection.startswith("coordinate:")
+                }
+                if existing_coordinate_ids and existing_coordinate_ids != {coordinate_id}:
+                    raise InterpretationError(
+                        "the coordinate chart in the natural-language request conflicts "
+                        "with the assumption override"
+                    )
+                if not existing_coordinate_ids:
+                    interpretation_assumptions.append(coordinate_id)
+
         interpreted = query_with_interpretations(
-            input_text,
-            assumptions,
+            interpretation_input,
+            interpretation_assumptions,
             compute=not validate_only,
             numeric_precision=numeric_precision,
             time_limit_seconds=time_limit_seconds,
@@ -2996,20 +3036,55 @@ def _prepare_query(
             pod_timeout_seconds=pod_timeout_seconds,
             deadline=deadline,
         )
+        if is_natural_language_coordinate:
+            assert natural_language_plan is not None
+            interpreted["input"] = input_text
+            typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
+            typed_ast["display_expression"] = input_text
+            selected_candidate: dict[str, Any] = {
+                "operation": natural_language_plan.operation.removeprefix("coordinate_"),
+                "coordinate_system": typed_ast.get("coordinate_system"),
+                "assumption_id": typed_ast.get("assumption_id"),
+                "coordinate_system_selection": typed_ast.get("selection_source"),
+            }
+            if natural_language_plan.components is not None:
+                selected_candidate["components"] = list(natural_language_plan.components)
+            else:
+                selected_candidate["expression"] = natural_language_plan.expression
+            interpreted["interpretation"]["natural_language_plan"] = {
+                "rule_id": natural_language_plan.rule_id,
+                "candidate_count": 1,
+                "selected_candidate": selected_candidate,
+                "selection_source": "deterministic_template",
+                "semantic_fidelity": "english_to_formula_correspondence_unverified",
+            }
+            interpreted["classification"]["query_intent"] = {
+                "operation": selected_candidate["operation"],
+                "rule_id": natural_language_plan.rule_id,
+                "method": "deterministic_template_match",
+                "model_ranked": False,
+                "semantic_alignment_verified": False,
+            }
         typed_ast = interpreted.get("interpretation", {}).get("typed_ast", {})
         if typed_ast.get("node") == "vector_calculus_operation":
-            if typed_ast.get("operation") == "gradient":
+            coordinate_operation = typed_ast.get("operation")
+            symbolic_operation = {
+                "divergence": "coordinate_divergence",
+                "gradient": "coordinate_gradient",
+                "curl": "coordinate_curl",
+            }.get(coordinate_operation)
+            if symbolic_operation == "coordinate_gradient":
                 symbolic_request = SymbolicRequest(
-                    operation="coordinate_gradient",
+                    operation=symbolic_operation,
                     expression=str(typed_ast.get("expression", "")),
                     coordinate_system=str(typed_ast.get("coordinate_system", "")),
                     time_limit_seconds=time_limit_seconds,
                     numeric_precision=numeric_precision,
                 )
                 return interpreted, symbolic_request
-            if typed_ast.get("operation") == "curl":
+            if symbolic_operation in {"coordinate_divergence", "coordinate_curl"}:
                 symbolic_request = SymbolicRequest(
-                    operation="coordinate_curl",
+                    operation=symbolic_operation,
                     components=typed_ast.get("components", []),
                     coordinate_system=str(typed_ast.get("coordinate_system", "")),
                     time_limit_seconds=time_limit_seconds,
@@ -3184,6 +3259,24 @@ def _request_from_natural_language_plan(
     if request is None:
         raise InterpretationError("natural-language operation did not produce a supported query")
     return request
+
+
+def _coordinate_query_from_natural_language_plan(
+    plan: NaturalLanguageOperation,
+) -> str:
+    if plan.operation == "coordinate_gradient":
+        if not plan.expression:
+            raise InterpretationError("gradient requires a scalar field")
+        return f"grad({plan.expression})"
+    function_name = {
+        "coordinate_divergence": "div",
+        "coordinate_curl": "curl",
+    }.get(plan.operation)
+    if function_name is None or plan.components is None or len(plan.components) != 3:
+        raise InterpretationError(
+            "divergence and curl require exactly three vector components"
+        )
+    return f"{function_name}({', '.join(plan.components)})"
 
 
 def _parse_operation_call(query: str) -> SymbolicRequest | None:
