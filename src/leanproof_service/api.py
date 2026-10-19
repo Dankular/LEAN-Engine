@@ -448,7 +448,7 @@ def capabilities() -> dict[str, object]:
                 "status": "allowlisted_subset",
                 "operations": [
                     "exact rational arithmetic", "Simplify", "Expand", "Factor",
-                    "N for exact rational expressions, with a Lean-checked absolute error bound",
+                    "N for exact rational and affine rational-Pi expressions, with a Lean-checked absolute error bound",
                     "Exact Sin/Cos/Tan values for bounded rational Pi multiples reducible to supported angles, checked by Lean",
                     "D for bounded polynomial or supported real-function differentiation",
                     "Integrate for indefinite supported antiderivatives and definite integrals with supported antiderivatives",
@@ -460,11 +460,15 @@ def capabilities() -> dict[str, object]:
                 ],
                 "numeric_approximation": {
                     "syntax": ["N[expression]", "N[expression, precision]"],
-                    "scope": "exact rational expressions",
-                    "precision_significant_digits": {"default": 16, "range": [1, 500]},
-                    "proof": "Lean checks an exact rational absolute-error bound for the returned decimal value",
+                    "scope": "exact rationals and affine expressions in Pi with rational coefficients",
+                    "precision_significant_digits": {
+                        "default": 16,
+                        "exact_rational_range": [1, 500],
+                        "affine_pi_range": [1, 20],
+                    },
+                    "proof": "Lean checks a rational absolute-error bound connecting the evaluated expression to the returned decimal value",
                     "evidence_fields": ["value", "precision_significant_digits", "absolute_error_bound"],
-                    "unsupported": "irrational and transcendental expressions",
+                    "unsupported": "irrational expressions other than affine rational-Pi forms; affine-Pi requests are rejected when the available interval cannot prove the requested precision",
                 },
                 "explicit_base_log": {
                     "syntax": "Log[base, argument]",
@@ -1392,7 +1396,7 @@ def knowledge_query(request: KnowledgeRequest) -> dict[str, object]:
     description=(
         "Authorization accepts the configured API key directly or as a bearer token. "
         "Supported operations include bounded arithmetic, exact reducible rational-Pi Sin/Cos/Tan values, and real calculus, Lean-checked TrigExpand, "
-        "finite polynomial Sum/Product, certified rational N approximations, rational-function limits, selected exact Pi-bound "
+        "finite polynomial Sum/Product, certified rational and affine-Pi N approximations, rational-function limits, selected exact Pi-bound "
         "trigonometric integrals, and bounded real polynomial Solve. Each supported result is "
         "checked through a generated Lean proof."
     ),

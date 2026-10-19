@@ -33,6 +33,12 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
             "N[-1/3, 3]": ("-0.333", 3, "1/2000"),
             "N[12345, 3]": ("12300", 3, "50"),
             "N[0, 500]": ("0", 500, "0"),
+            "N[Pi]": ("3.141592653589793", 16, "1/2000000000000000"),
+            "N[Pi, 20]": ("3.1415926535897932385", 20, "1/20000000000000000000"),
+            "N[Pi/2, 20]": ("1.5707963267948966192", 20, "1/20000000000000000000"),
+            "N[1 + Pi, 20]": ("4.1415926535897932385", 20, "1/20000000000000000000"),
+            "N[-Pi, 20]": ("-3.1415926535897932385", 20, "1/20000000000000000000"),
+            "N[Pi - 3, 19]": ("0.1415926535897932385", 19, "1/20000000000000000000"),
         }
         for code, expected in cases.items():
             with self.subTest(code=code):
@@ -94,9 +100,42 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         self.assertEqual(body["evidence"]["numeric_approximation"]["absolute_error_bound"], "1/20")
         self.assertEqual(body["evidence"]["axiom_audit"]["status"], "passed")
 
+    def test_pi_approximation_uses_mathlib_bounds_and_axiom_audit(self) -> None:
+        response = self.client.post(
+            "/api/cag/v1/WolframLanguageCompute",
+            json={"code": "N[Pi, 20]", "timeConstraint": 60},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        evidence = response.json()["evidence"]
+        self.assertEqual(evidence["numeric_approximation"]["value"], "3.1415926535897932385")
+        self.assertEqual(evidence["numeric_approximation"]["precision_significant_digits"], 20)
+        self.assertEqual(evidence["numeric_approximation"]["absolute_error_bound"], "1/20000000000000000000")
+        self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+        self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
+        self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
+
+    def test_negative_pi_multiple_is_checked(self) -> None:
+        response = self.client.post(
+            "/api/cag/v1/WolframLanguageCompute",
+            json={"code": "N[-Pi, 20]", "timeConstraint": 60},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        evidence = response.json()["evidence"]
+        self.assertEqual(
+            evidence["numeric_approximation"]["value"],
+            "-3.1415926535897932385",
+        )
+        self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+
     def test_irrational_and_invalid_precision_inputs_are_not_claimed(self) -> None:
         for code in (
-            "N[Pi]",
+            "N[Sqrt[2]]",
+            "N[Pi, 21]",
+            "N[Pi - 3, 20]",
             "N[Sqrt[2], 20]",
             "N[1/3, 0]",
             "N[1/3, 501]",

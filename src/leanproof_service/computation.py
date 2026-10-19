@@ -368,7 +368,10 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
             precision = int(arguments[1])
             if not 1 <= precision <= 500:
                 return None
-        return _prepare_rational_numeric_approximation(arguments[0], precision)
+        exact_value = _parse_exact_rational(arguments[0])
+        if exact_value is not None:
+            return _prepare_rational_numeric_approximation(arguments[0], precision)
+        return _prepare_affine_pi_numeric_approximation(arguments[0], precision)
 
     exact_trig_constant = _prepare_exact_pi_trigonometric_constant(code)
     if exact_trig_constant is not None:
@@ -534,10 +537,101 @@ theorem wolfram_language_compute :
     )
 
 
+def _prepare_affine_pi_numeric_approximation(
+    expression_source: str,
+    precision: int,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    affine = _rational_pi_form(tree.body)
+    if affine is None:
+        return None
+    pi_coefficient, rational_offset = affine
+    if (
+        abs(pi_coefficient.numerator).bit_length() > 256
+        or pi_coefficient.denominator.bit_length() > 256
+        or abs(rational_offset.numerator).bit_length() > 256
+        or rational_offset.denominator.bit_length() > 256
+    ):
+        return None
+    if pi_coefficient == 0:
+        return _prepare_rational_numeric_approximation(
+            _fraction_text(rational_offset),
+            precision,
+        )
+
+    pi_lower = Fraction(314159265358979323846, 10**20)
+    pi_upper = Fraction(314159265358979323847, 10**20)
+    if pi_coefficient > 0:
+        lower = pi_coefficient * pi_lower + rational_offset
+        upper = pi_coefficient * pi_upper + rational_offset
+    else:
+        lower = pi_coefficient * pi_upper + rational_offset
+        upper = pi_coefficient * pi_lower + rational_offset
+
+    if lower > 0 and upper > 0:
+        lower_exponent = _decimal_exponent(lower)
+        upper_exponent = _decimal_exponent(upper)
+    elif lower < 0 and upper < 0:
+        lower_exponent = _decimal_exponent(abs(lower))
+        upper_exponent = _decimal_exponent(abs(upper))
+    else:
+        return None
+    if lower_exponent != upper_exponent:
+        return None
+
+    midpoint = (lower + upper) / 2
+    try:
+        with localcontext() as context:
+            context.prec = precision
+            context.rounding = ROUND_HALF_EVEN
+            decimal_value = Decimal(midpoint.numerator) / Decimal(midpoint.denominator)
+    except (InvalidOperation, OverflowError, ValueError):
+        return None
+    approximation = Fraction(decimal_value)
+    error_bound = _rounding_error_bound_at_exponent(lower_exponent, precision)
+    if max(abs(lower - approximation), abs(upper - approximation)) > error_bound:
+        return None
+
+    pi_expression = (
+        f"({_lean_rational(pi_coefficient)} * Real.pi + "
+        f"{_lean_rational(rational_offset)})"
+    )
+    lean_source = f"""import Mathlib.Analysis.Real.Pi.Bounds
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute :
+  |{pi_expression} - {_lean_rational(approximation)}| ≤ {_lean_rational(error_bound)} := by
+  rw [abs_le]
+  constructor <;> linarith [Real.pi_gt_d20, Real.pi_lt_d20]
+
+#print axioms wolfram_language_compute
+"""
+    return Computation(
+        format(decimal_value, "f"),
+        lean_source,
+        numeric_precision=precision,
+        numeric_error_bound=_fraction_text(error_bound),
+    )
+
+
 def _rounding_error_bound(value: Fraction, precision: int) -> Fraction:
     if value == 0:
         return Fraction(0)
 
+    return _rounding_error_bound_at_exponent(_decimal_exponent(value), precision)
+
+
+def _decimal_exponent(value: Fraction) -> int:
     numerator = abs(value.numerator)
     denominator = value.denominator
     exponent = len(str(numerator)) - len(str(denominator))
@@ -546,7 +640,10 @@ def _rounding_error_bound(value: Fraction, precision: int) -> Fraction:
             exponent -= 1
     elif numerator * (10 ** -exponent) < denominator:
         exponent -= 1
+    return exponent
 
+
+def _rounding_error_bound_at_exponent(exponent: int, precision: int) -> Fraction:
     decimal_place = exponent - precision + 1
     if decimal_place >= 0:
         return Fraction(10 ** decimal_place, 2)
