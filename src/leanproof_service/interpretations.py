@@ -37,6 +37,19 @@ _UNIT_M_IN_EXPRESSION = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<number>{_NUMBER_PATTERN})\s*(?:\*\s*)?m(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_EXPLICIT_UNIT_ALIASES = "|".join(re.escape(alias) for alias in UNIT_ALIASES_BY_LENGTH)
+_EXPLICIT_UNIT_IN_SOURCE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<number>{_NUMBER_PATTERN})\s*(?P<unit>{_EXPLICIT_UNIT_ALIASES})(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_PHYSICAL_UNIT_NAMES = "|".join(
+    re.escape(name) for name in sorted(PHYSICAL_UNITS, key=lambda item: -len(item))
+)
+_PHYSICAL_UNIT_IN_EXPRESSION = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<number>{_NUMBER_PATTERN})\s*\*\s*"
+    rf"(?P<symbol>unit_(?:{_PHYSICAL_UNIT_NAMES}))(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
 )
@@ -1580,7 +1593,8 @@ def _compound_interpretation(
     trig_matches = list(_TRIG_IN_EXPRESSION.finditer(query))
     log_matches = list(_LOG_IN_EXPRESSION.finditer(query))
     unit_matches = list(_UNIT_M_IN_EXPRESSION.finditer(query))
-    if not trig_matches and not log_matches and not unit_matches:
+    physical_unit_matches = list(_PHYSICAL_UNIT_IN_EXPRESSION.finditer(query))
+    if not trig_matches and not log_matches and not unit_matches and not physical_unit_matches:
         return None
 
     candidates_by_type = {
@@ -1593,6 +1607,22 @@ def _compound_interpretation(
     }
     replacements: list[tuple[int, int, str]] = []
     resolved_calls: list[dict[str, Any]] = []
+    unit_bindings: dict[str, str] = {}
+
+    for match in physical_unit_matches:
+        number = match.group("number")
+        unit_symbol = match.group("symbol")
+        unit_name = unit_symbol.removeprefix("unit_")
+        unit_bindings[unit_symbol] = unit_name
+        resolved_calls.append({
+            "function": "quantity",
+            "argument": {"kind": "number", "value": number},
+            "unit": PHYSICAL_UNITS[unit_name].display,
+            "unit_display": PHYSICAL_UNITS[unit_name].display,
+            "unit_symbol": unit_symbol,
+            "wolfram_unit": PHYSICAL_UNITS[unit_name].wolfram_name,
+            "selection_source": "explicit_input",
+        })
 
     for match in trig_matches:
         function = match.group("function").lower()
@@ -1762,15 +1792,37 @@ def _compound_interpretation(
                     "function": "quantity",
                     "argument": {"kind": "number", "value": number},
                     "unit": chosen["argument_unit"],
+                    "unit_display": chosen["argument_unit"],
                     "unit_symbol": chosen["symbolic_unit"],
+                    "wolfram_unit": chosen["wolfram_unit"],
                     "selection_source": occurrence_values[index - 1]["selection_source"],
                     "occurrence_id": occurrence_id,
                 })
+                unit_bindings[chosen["symbolic_unit"]] = chosen["symbolic_unit_type"]
             replacements.append((match.start(), match.end(), replacement))
 
     expression = query
     for start, end, replacement in sorted(replacements, reverse=True):
         expression = expression[:start] + replacement + expression[end:]
+
+    display_expression = expression
+    wolfram_input_expression = expression
+    for call in resolved_calls:
+        if call.get("function") != "quantity":
+            continue
+        number = str(call["argument"]["value"])
+        unit_symbol = str(call["unit_symbol"])
+        quantity_term = f"{number}*{unit_symbol}"
+        term_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(quantity_term)}(?![A-Za-z0-9_])"
+        )
+        display_expression = term_pattern.sub(
+            f"{number}*{call['unit_display']}", display_expression
+        )
+        wolfram_input_expression = term_pattern.sub(
+            f"Quantity[{number}, {json.dumps(call['wolfram_unit'])}]",
+            wolfram_input_expression,
+        )
 
     if ambiguity_rankings:
         classifier = {
@@ -1796,16 +1848,10 @@ def _compound_interpretation(
             "resolved_expression": expression,
             "resolved_calls": resolved_calls,
             **({
-                "unit_bindings": {
-                    call["unit_symbol"]: next(
-                        item["symbolic_unit_type"]
-                        for item in candidates_by_type["Unit"]
-                        if item["symbolic_unit"] == call["unit_symbol"]
-                    )
-                    for call in resolved_calls
-                    if call.get("function") == "quantity"
-                }
-            } if any(call.get("function") == "quantity" for call in resolved_calls) else {}),
+                "display_expression": display_expression,
+                "wolfram_input_expression": wolfram_input_expression,
+            } if unit_bindings else {}),
+            **({"unit_bindings": unit_bindings} if unit_bindings else {}),
         },
         "classifier": classifier,
         "assumptions": assumption_payload,
@@ -1820,10 +1866,17 @@ def _normalize_unit(value: str | None) -> str | None:
 
 
 def _normalize_ambiguous_unit_spacing(source: str) -> str:
-    """Make numeric ``m`` unit tokens parseable while preserving other identifiers."""
+    """Convert supported unit literals to named symbols before safe math parsing."""
     if source.lstrip().startswith("<"):
         return source
-    return _UNIT_M_IN_EXPRESSION.sub(lambda match: f"{match.group('number')}*m", source)
+
+    def replace_explicit_unit(match: re.Match[str]) -> str:
+        number = match.group("number")
+        alias = match.group("unit").casefold()
+        return f"{number}*unit_{UNIT_ALIAS_TO_NAME[alias]}"
+
+    normalized = _EXPLICIT_UNIT_IN_SOURCE.sub(replace_explicit_unit, source)
+    return _UNIT_M_IN_EXPRESSION.sub(lambda match: f"{match.group('number')}*m", normalized)
 
 
 def _named_unit_bindings(typed_ast: dict[str, Any]) -> dict[str, str]:

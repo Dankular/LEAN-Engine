@@ -243,6 +243,53 @@ class AssumptionOccurrenceApiTests(unittest.TestCase):
         )
         self.assertTrue(any(pod["id"] == "Result" for pod in queryresult["pods"]))
 
+    def test_compound_explicit_units_are_bound_and_dimension_checked(self) -> None:
+        response = self.client.get(
+            "/v1/interpret",
+            params={"input": "10 m + 5 cm"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        unit = next(item for item in payload["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(len(unit["occurrences"]), 1)
+        self.assertEqual(
+            payload["interpretation"]["typed_ast"]["unit_bindings"],
+            {"unit_meter": "meter", "unit_centimeter": "centimeter"},
+        )
+
+        full_results = self.client.get(
+            "/v2/query",
+            params=[
+                ("input", "10 m + 5 cm"),
+                ("output", "json"),
+                ("format", "plaintext"),
+                ("format", "minput"),
+            ],
+            headers=self.headers,
+        )
+        self.assertEqual(full_results.status_code, 200, full_results.text)
+        queryresult = full_results.json()["queryresult"]
+        input_pod = next(pod for pod in queryresult["pods"] if pod["id"] == "Input")
+        self.assertEqual(
+            input_pod["subpods"][0]["plaintext"],
+            "10*meters + 5*centimeters",
+        )
+        self.assertEqual(
+            input_pod["subpods"][0]["minput"],
+            'Quantity[10, "Meters"] + Quantity[5, "Centimeters"]',
+        )
+
+    def test_compound_explicit_units_reject_incompatible_dimensions(self) -> None:
+        response = self.client.get(
+            "/v1/interpret",
+            params={"input": "10 m + 5 sec"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 422)
+
     def test_incompatible_per_occurrence_units_are_rejected_in_addition(self) -> None:
         response = self.client.get(
             "/v1/interpret",

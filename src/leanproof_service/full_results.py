@@ -532,7 +532,7 @@ def execute_query(
         if is_typed_list
         else typed_ast.get("display", expression)
         if is_typed_number
-        else expression
+        else typed_ast.get("display_expression", expression)
     )
     if interpreted.get("outcome") == "computed":
         symbolic = {
@@ -613,9 +613,11 @@ def execute_query(
                 input_minput = _wolfram_quantity(typed_ast)
             elif is_typed_date or is_typed_list or is_typed_number:
                 input_minput = expression
+            elif isinstance(typed_ast.get("wolfram_input_expression"), str):
+                input_minput = typed_ast["wolfram_input_expression"]
             else:
                 input_minput = _wolfram_input_for_query(
-                    expression,
+                    input_display,
                     symbolic_request,
                     is_explicit_operation=(
                         interpreted["interpretation"].get("kind") == "typed_symbolic_operation"
@@ -791,9 +793,11 @@ def execute_query(
             input_minput = _wolfram_quantity(typed_ast)
         elif is_typed_date or is_typed_list or is_typed_number:
             input_minput = expression
+        elif isinstance(typed_ast.get("wolfram_input_expression"), str):
+            input_minput = typed_ast["wolfram_input_expression"]
         else:
             input_minput = _wolfram_input_for_query(
-                expression,
+                input_display,
                 symbolic_request,
                 is_explicit_operation=(
                     interpreted["interpretation"].get("kind") == "typed_symbolic_operation"

@@ -88,6 +88,8 @@ GET /v2/query?input=10%20m%2A5%20m&assumption=unit%3Am-minutes%402&output=json
 
 The service checks unit dimensions after applying the choices; incompatible units in an addition are rejected.
 
+The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.
+
 Computation routes require the bearer token. `/healthz`, `/readyz`, and `/docs` are public. GeoNames lookups also require `GEONAMES_USERNAME`.
 
 Natural-language theorem generation requires an OpenAI-compatible model server. The dev script defaults to a local server at port 8081; override these before startup if needed:
