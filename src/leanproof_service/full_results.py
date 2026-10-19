@@ -10,7 +10,7 @@ import math
 import re
 from decimal import Decimal, InvalidOperation
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
@@ -60,6 +60,40 @@ _KNOWN_FORMATS = {
 _DECIMAL_APPROXIMATION_PRECISIONS = (50, 100, 200, 400, 500)
 _DECIMAL_MORE_STATE = "DecimalApproximation__More digits"
 _DECIMAL_FEWER_STATE = "DecimalApproximation__Fewer digits"
+
+
+class _FormatStageBudget:
+    """Track bounded per-pod formatting work and discard output over budget."""
+
+    def __init__(
+        self,
+        *,
+        format_timeout_seconds: float,
+        pod_timeout_seconds: float,
+        total_deadline: float,
+    ) -> None:
+        self.started = perf_counter()
+        self.deadline = min(
+            self.started + format_timeout_seconds,
+            total_deadline,
+        )
+        self.pod_timeout_seconds = pod_timeout_seconds
+        self.timed_out_pods: list[str] = []
+
+    def render(self, title: str, operation: Callable[[], Any]) -> Any | None:
+        started = perf_counter()
+        if started >= self.deadline:
+            self.timed_out_pods.append(title)
+            return None
+        result = operation()
+        finished = perf_counter()
+        if (
+            finished - started > self.pod_timeout_seconds
+            or finished > self.deadline
+        ):
+            self.timed_out_pods.append(title)
+            return None
+        return result
 
 
 class FullResultsRequestError(ValueError):
@@ -225,6 +259,7 @@ def async_query_payload(
     pod_title: str,
     scanner: str,
     async_url: str,
+    async_query_url: str | None = None,
     formats: list[str],
     elapsed: float,
     text_width: int = 500,
@@ -269,10 +304,13 @@ def async_query_payload(
             } if verify_requested else {}),
         },
         qualification=(
-            "The result pod is being computed asynchronously; fetch its async URL to retrieve it."
+            "The result is being computed asynchronously; use the pod async URL for the primary "
+            "pod or the query-level asyncquery URL for the complete query result."
         ),
     )
     payload["queryresult"]["input"] = input_text
+    if async_query_url is not None:
+        payload["queryresult"]["asyncquery"] = async_query_url
     return payload
 
 
@@ -314,6 +352,8 @@ def execute_query(
     scanners: list[str] | None = None,
     ignorecase: bool = False,
     parse_timeout_seconds: float = 5.0,
+    scan_timeout_seconds: float = 3.0,
+    format_timeout_seconds: float = 8.0,
     pod_timeout_seconds: float = 4.0,
     total_timeout_seconds: float = 20.0,
     text_width: int = 500,
@@ -372,6 +412,8 @@ def execute_query(
             pod_indexes=pod_indexes,
             scanners=scanners,
             deadline=deadline,
+            scan_timeout_seconds=scan_timeout_seconds,
+            format_timeout_seconds=format_timeout_seconds,
             pod_timeout_seconds=pod_timeout_seconds,
             text_width=text_width,
             plot_width=plot_width,
@@ -405,7 +447,7 @@ def execute_query(
             numeric_precision=numeric_precision,
             time_limit_seconds=remaining_seconds,
             parse_timeout_seconds=parse_timeout_seconds,
-            pod_timeout_seconds=pod_timeout_seconds,
+            pod_timeout_seconds=scan_timeout_seconds,
             deadline=deadline,
         )
     except AssumptionSelectionError:
@@ -421,6 +463,12 @@ def execute_query(
         )
     except InterpretationError as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
+
+    if interpreted.get("outcome") == "timeout":
+        if deadline - perf_counter() <= 0.001:
+            interpreted["timeout_stage"] = "total"
+        else:
+            interpreted["timeout_stage"] = "scan"
 
     parse_timing = float(interpreted["parse_timing"])
     expression = interpreted["interpretation"]["expression"]
@@ -451,7 +499,10 @@ def execute_query(
     elif interpreted.get("outcome") == "timeout":
         symbolic = {
             "timed_out": True,
-            "timeout_stage": "total" if deadline - perf_counter() <= 0.001 else "pod",
+            "timeout_stage": interpreted.get(
+                "timeout_stage",
+                "total" if deadline - perf_counter() <= 0.001 else "pod",
+            ),
             "evidence": interpreted.get("evidence"),
         }
     else:
@@ -459,14 +510,16 @@ def execute_query(
         if remaining_seconds <= 0:
             symbolic = {"timed_out": True, "timeout_stage": "total"}
         else:
-            computation_seconds = min(remaining_seconds, pod_timeout_seconds)
+            computation_seconds = min(remaining_seconds, scan_timeout_seconds)
             symbolic = run_symbolic(symbolic_request.model_copy(update={
                 "time_limit_seconds": computation_seconds,
                 **({"plot_width": plot_width} if symbolic_request.operation == "plot" else {}),
             }))
             if symbolic.get("timed_out"):
                 symbolic["timeout_stage"] = (
-                    "total" if deadline - perf_counter() <= 0.001 else "pod"
+                    "total"
+                    if deadline - perf_counter() <= 0.001
+                    else "scan"
                 )
         parse_timing += float(symbolic.get("parse_timing_seconds", 0.0))
     elapsed = perf_counter() - started
@@ -478,59 +531,105 @@ def execute_query(
         }
 
     input_mathml = interpreted.get("input_mathml") if interpreted.get("outcome") == "computed" else None
-    quantity_expression = _wolfram_quantity(typed_ast) if is_typed_quantity else None
-    if is_typed_quantity:
-        input_minput = quantity_expression
-    elif is_typed_date:
-        input_minput = expression
-    elif is_typed_list:
-        input_minput = expression
-    elif is_typed_number:
-        input_minput = expression
-    else:
-        input_minput = _wolfram_input_for_query(
-            expression,
-            symbolic_request,
-            is_explicit_operation=(
-                interpreted["interpretation"].get("kind") == "typed_symbolic_operation"
-            ),
-        )
-    pods = _initial_pods(
-        input_text,
-        input_display,
-        None,
-        formats,
-        input_mathml=input_mathml,
-        input_minput=input_minput,
-    )
-    warnings = _format_warnings(formats)
     if symbolic.get("timed_out"):
-        pod_timed_out = symbolic.get("timeout_stage") == "pod"
+        timeout_stage = symbolic.get("timeout_stage", "total")
+        timeout_message = {
+            "scan": "The mathematical scan exceeded its scan time limit.",
+            "total": "The symbolic result exceeded its total execution time limit.",
+        }.get(timeout_stage, "The symbolic computation timed out.")
+        timeout_qualification = {
+            "scan": "The mathematical scan exceeded its local scan budget; no result was produced.",
+            "total": "A timeout contains no result and is not a proof.",
+        }.get(timeout_stage, "A timeout contains no result and is not a proof.")
+        format_budget = _FormatStageBudget(
+            format_timeout_seconds=format_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            total_deadline=deadline,
+        )
+        timeout_candidates = [
+            {"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100},
+            {"title": "Result", "scanner": "Mathematical", "id": "Result", "position": 200},
+        ]
+        timeout_selected_ids = {
+            pod["id"]
+            for pod in _select_pods(
+                timeout_candidates,
+                include_pod_ids,
+                exclude_pod_ids,
+                pod_titles,
+                pod_indexes,
+                scanners,
+            )
+        }
+
+        def format_timeout_input() -> dict[str, Any]:
+            if is_typed_quantity:
+                input_minput = _wolfram_quantity(typed_ast)
+            elif is_typed_date or is_typed_list or is_typed_number:
+                input_minput = expression
+            else:
+                input_minput = _wolfram_input_for_query(
+                    expression,
+                    symbolic_request,
+                    is_explicit_operation=(
+                        interpreted["interpretation"].get("kind") == "typed_symbolic_operation"
+                    ),
+                )
+            input_image = None
+            if "image" in formats:
+                input_image = mathml_image(
+                    input_mathml,
+                    input_display,
+                    max_width=max_image_width,
+                    magnification=magnification,
+                ) or _svg_text_image(input_display, width=text_width)
+            return _input_pod(
+                input_display,
+                formats,
+                input_mathml=input_mathml,
+                input_minput=input_minput,
+                input_image=input_image,
+            )
+
+        pods = []
+        if "Input" in timeout_selected_ids:
+            timeout_input = format_budget.render(
+                "Input interpretation", format_timeout_input
+            )
+            if timeout_input is not None:
+                pods.append(timeout_input)
+        if "Result" in timeout_selected_ids:
+            timeout_result = format_budget.render(
+                "Result", lambda: _result_pod(None, formats)
+            )
+            if timeout_result is not None:
+                pods.append(timeout_result)
+        warnings = _format_warnings(
+            formats,
+            _SUPPORTED_FORMATS | ({"image"} if "image" in formats else set()),
+        )
+        if format_budget.timed_out_pods:
+            warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
         payload = _query_envelope(
             success=False,
             error=False,
             pods=pods,
-            elapsed=elapsed,
+            elapsed=perf_counter() - started,
             parse_timing=parse_timing,
             datatypes="Mathematical",
             timedout="Mathematical",
-            timedoutpods="Result",
-            warnings=[*warnings, {
-                "text": (
-                    "The result pod exceeded its per-pod execution time limit."
-                    if pod_timed_out
-                    else "The symbolic result exceeded its total execution time limit."
-                )
-            }],
+            timedoutpods=",".join(dict.fromkeys(["Result", *format_budget.timed_out_pods])),
+            warnings=[*warnings, {"text": timeout_message}],
             assumptions=interpreted["assumptions"],
             interpretation=interpreted["interpretation"],
             classification=interpreted["classification"],
-            evidence={"kind": "symbolic_timeout", "engine": "sympy", "verified": False},
-            qualification=(
-                "The result pod exceeded its local execution budget; this is not a proof."
-                if pod_timed_out
-                else "A timeout contains no result and is not a proof."
-            ),
+            evidence={
+                "kind": "symbolic_timeout",
+                "engine": "sympy",
+                "timeout_stage": timeout_stage,
+                "verified": False,
+            },
+            qualification=timeout_qualification,
         )
         payload["queryresult"]["input"] = input_text
         return filter_response_pods(
@@ -559,66 +658,145 @@ def execute_query(
             symbolic_result=symbolic.get("result"),
         )
         elapsed = perf_counter() - started
-    result_image = None
-    plot_svg = symbolic.get("plot_svg")
-    if "image" in formats and isinstance(plot_svg, str):
-        encoded_image = base64.b64encode(plot_svg.encode("utf-8")).decode("ascii")
-        result_image = {
-            "src": f"data:image/svg+xml;base64,{encoded_image}",
-            "alt": result_text,
-            "title": result_text,
-            "width": plot_width,
-            "height": round(plot_width * 2 / 3),
-        }
-    input_image = None
-    if "image" in formats:
-        input_image = mathml_image(
-            input_mathml, input_display, max_width=max_image_width,
-            magnification=magnification,
-        ) or _svg_text_image(input_display, width=text_width)
-    if "image" in formats and result_image is None:
-        result_image = mathml_image(
-            symbolic.get("result_mathml"), result_text, max_width=max_image_width,
-            magnification=magnification,
+    candidate_pods = [
+        {"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100},
+        {
+            "title": "Result",
+            "scanner": "Date" if is_typed_date else "Mathematical",
+            "id": "Result",
+            "position": 200,
+        },
+    ]
+    if numeric_approximation is not None:
+        candidate_pods.append({
+            "title": "Decimal approximation",
+            "scanner": "Numeric",
+            "id": "DecimalApproximation",
+            "position": 300,
+        })
+    selected_pod_ids = {
+        pod["id"]
+        for pod in _select_pods(
+            candidate_pods,
+            include_pod_ids,
+            exclude_pod_ids,
+            pod_titles,
+            pod_indexes,
+            scanners,
         )
-        if result_image is None:
-            result_image = _svg_text_image(result_text, width=text_width)
-    approximation_image = None
-    if "image" in formats and numeric_approximation is not None:
-        approximation_image = _svg_text_image(
-            str(numeric_approximation["value"]), width=text_width
+    }
+    format_budget = _FormatStageBudget(
+        format_timeout_seconds=format_timeout_seconds,
+        pod_timeout_seconds=pod_timeout_seconds,
+        total_deadline=deadline,
+    )
+
+    def format_input_pod() -> dict[str, Any]:
+        if is_typed_quantity:
+            input_minput = _wolfram_quantity(typed_ast)
+        elif is_typed_date or is_typed_list or is_typed_number:
+            input_minput = expression
+        else:
+            input_minput = _wolfram_input_for_query(
+                expression,
+                symbolic_request,
+                is_explicit_operation=(
+                    interpreted["interpretation"].get("kind") == "typed_symbolic_operation"
+                ),
+            )
+        input_image = None
+        if "image" in formats:
+            input_image = mathml_image(
+                input_mathml,
+                input_display,
+                max_width=max_image_width,
+                magnification=magnification,
+            ) or _svg_text_image(input_display, width=text_width)
+        return _input_pod(
+            input_display,
+            formats,
+            input_mathml=input_mathml,
+            input_minput=input_minput,
+            input_image=input_image,
         )
-    has_image_output = any((input_image, result_image, approximation_image))
+
+    def format_result_pod() -> dict[str, Any]:
+        if is_typed_quantity:
+            result_moutput = _wolfram_quantity(typed_ast)
+        elif is_typed_date or is_typed_list:
+            result_moutput = expression
+        elif symbolic_request.operation == "series":
+            result_moutput = _wolfram_series_output(symbolic.get("series_data"))
+        elif symbolic_request.operation == "plot":
+            result_moutput = _wolfram_input_for_query(
+                expression,
+                symbolic_request,
+                is_explicit_operation=True,
+            )
+        else:
+            result_moutput = _wolfram_value(symbolic.get("result"))
+        result_image = None
+        plot_svg = symbolic.get("plot_svg")
+        if "image" in formats and isinstance(plot_svg, str):
+            encoded_image = base64.b64encode(plot_svg.encode("utf-8")).decode("ascii")
+            result_image = {
+                "src": f"data:image/svg+xml;base64,{encoded_image}",
+                "alt": result_text,
+                "title": result_text,
+                "width": plot_width,
+                "height": round(plot_width * 2 / 3),
+            }
+        if "image" in formats and result_image is None:
+            result_image = mathml_image(
+                symbolic.get("result_mathml"),
+                result_text,
+                max_width=max_image_width,
+                magnification=magnification,
+            ) or _svg_text_image(result_text, width=text_width)
+        return _result_pod(
+            result_text,
+            formats,
+            result_mathml=symbolic.get("result_mathml"),
+            result_moutput=result_moutput,
+            result_image=result_image,
+            result_scanner="Date" if is_typed_date else "Mathematical",
+        )
+
+    pods = []
+    if "Input" in selected_pod_ids:
+        input_pod = format_budget.render("Input interpretation", format_input_pod)
+        if input_pod is not None:
+            pods.append(input_pod)
+    if "Result" in selected_pod_ids:
+        result_pod = format_budget.render("Result", format_result_pod)
+        if result_pod is not None:
+            pods.append(result_pod)
+    if numeric_approximation is not None and "DecimalApproximation" in selected_pod_ids:
+        def format_approximation_pod() -> dict[str, Any]:
+            approximation_image = (
+                _svg_text_image(str(numeric_approximation["value"]), width=text_width)
+                if "image" in formats
+                else None
+            )
+            return _decimal_approximation_pod(
+                numeric_approximation,
+                formats,
+                approximation_image=approximation_image,
+                decimal_state_level=decimal_state_level,
+            )
+
+        approximation_pod = format_budget.render(
+            "Decimal approximation", format_approximation_pod
+        )
+        if approximation_pod is not None:
+            pods.append(approximation_pod)
     warnings = _format_warnings(
         formats,
-        _SUPPORTED_FORMATS | ({"image"} if has_image_output else set()),
+        _SUPPORTED_FORMATS | ({"image"} if "image" in formats else set()),
     )
-    if is_typed_quantity:
-        result_moutput = quantity_expression
-    elif is_typed_date or is_typed_list:
-        result_moutput = expression
-    elif symbolic_request.operation == "series":
-        result_moutput = _wolfram_series_output(symbolic.get("series_data"))
-    elif symbolic_request.operation == "plot":
-        result_moutput = input_minput
-    else:
-        result_moutput = _wolfram_value(symbolic.get("result"))
-    pods = _initial_pods(
-        input_text,
-        input_display,
-        result_text,
-        formats,
-        input_mathml=input_mathml,
-        result_mathml=symbolic.get("result_mathml"),
-        input_minput=input_minput,
-        result_moutput=result_moutput,
-        input_image=input_image,
-        result_image=result_image,
-        approximation_image=approximation_image,
-        result_scanner="Date" if is_typed_date else "Mathematical",
-        numeric_approximation=numeric_approximation,
-        decimal_state_level=decimal_state_level,
-    )
+    if format_budget.timed_out_pods:
+        warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
+    elapsed = perf_counter() - started
     filtered = _select_pods(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
     )
@@ -649,7 +827,7 @@ def execute_query(
                 f"The symbolic result is not Lean-verified: {formal_verification['reason']}"
             )
     payload = _query_envelope(
-        success=True,
+        success=not (format_budget.timed_out_pods and not filtered),
         error=False,
         pods=filtered,
         elapsed=elapsed,
@@ -661,6 +839,7 @@ def execute_query(
         classification=interpreted["classification"],
         evidence=evidence,
         qualification=qualification,
+        timedoutpods=",".join(format_budget.timed_out_pods),
     )
     payload["queryresult"]["input"] = input_text
     return payload
@@ -1471,12 +1650,18 @@ def _execute_provider_query(
     pod_indexes: list[str] | None,
     scanners: list[str] | None,
     deadline: float,
+    scan_timeout_seconds: float,
+    format_timeout_seconds: float,
     pod_timeout_seconds: float,
     text_width: int,
     plot_width: int,
     assumptions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    provider_deadline = min(deadline, perf_counter() + pod_timeout_seconds)
+    provider_started = perf_counter()
+    provider_deadline = min(
+        deadline,
+        provider_started + scan_timeout_seconds,
+    )
     try:
         knowledge = query_knowledge(request, deadline=provider_deadline)
     except KnowledgeDeadlineExceeded:
@@ -1491,22 +1676,52 @@ def _execute_provider_query(
             "dbnomics": "Economic datasets" if request.operation == "search" else "Economic time series",
             "geonames": "Place matches",
         }
-        input_image = (
-            _svg_text_image(input_text, width=text_width) if "image" in formats else None
+        format_budget = _FormatStageBudget(
+            format_timeout_seconds=format_timeout_seconds,
+            pod_timeout_seconds=pod_timeout_seconds,
+            total_deadline=deadline,
         )
-        pods = _initial_pods(
-            input_text, input_text, None, formats, input_image=input_image
-        )[:1]
-        pod_timed_out = deadline - perf_counter() > 0.001
+
+        def format_timeout_input() -> dict[str, Any]:
+            input_image = (
+                _svg_text_image(input_text, width=text_width) if "image" in formats else None
+            )
+            return _input_pod(
+                input_text,
+                formats,
+                input_mathml=_mathml(input_text),
+                input_image=input_image,
+            )
+
+        input_selected = bool(_select_pods(
+            [{"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100}],
+            include_pod_ids,
+            exclude_pod_ids,
+            pod_titles,
+            pod_indexes,
+            scanners,
+        ))
+        timeout_input_pod = (
+            format_budget.render("Input interpretation", format_timeout_input)
+            if input_selected
+            else None
+        )
+        pods = [timeout_input_pod] if timeout_input_pod is not None else []
+        if deadline - perf_counter() <= 0.001:
+            timeout_stage = "total"
+        else:
+            timeout_stage = "scan"
+        timeout_message = {
+            "scan": "The data scan exceeded its scan time limit.",
+            "total": "The data retrieval exceeded the total query time limit.",
+        }[timeout_stage]
         timeout_warnings = _format_warnings(
             formats,
-            _SUPPORTED_FORMATS | ({"image"} if input_image is not None else set()),
+            _SUPPORTED_FORMATS | ({"image"} if "image" in formats else set()),
         )
-        timeout_warnings.append({"text": (
-            "The data result pod exceeded its per-pod execution time limit."
-            if pod_timed_out
-            else "The data retrieval exceeded the total query time limit."
-        )})
+        timeout_warnings.append({"text": timeout_message})
+        if format_budget.timed_out_pods:
+            timeout_warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
         payload = _query_envelope(
             success=False,
             error=False,
@@ -1517,19 +1732,21 @@ def _execute_provider_query(
             warnings=timeout_warnings,
             assumptions=assumptions,
             timedout="Data",
-            timedoutpods=provider_titles[request.provider],
+            timedoutpods=",".join([
+                provider_titles[request.provider], *format_budget.timed_out_pods
+            ]),
             evidence={
                 "kind": "provider_timeout", "provider": request.provider,
-                "timeout_stage": "pod" if pod_timed_out else "total", "verified": False,
+                "timeout_stage": timeout_stage, "verified": False,
             },
             qualification=(
-                "No data result was retrieved within the per-pod execution budget."
-                if pod_timed_out
-                else "No data result was retrieved before the query deadline."
+                timeout_message
             ),
         )
         payload["queryresult"]["input"] = input_text
-        return payload
+        return filter_response_pods(
+            payload, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
+        )
     except KnowledgeProviderError as exc:
         raise FullResultsBackendError(
             str(exc), status_code=exc.status_code, error_code="PROVIDER_FAILURE"
@@ -1551,45 +1768,58 @@ def _execute_provider_query(
         "geonames": ("Place matches", "PlaceSearch", "Geography"),
     }
     title, pod_id, datatype = provider_presentation[request.provider]
-    plaintext = (
-        forecast_plaintext(knowledge["data"])
-        if request.provider == "open_meteo" and request.operation == "weather_forecast"
-        else None
-    ) or _provider_plaintext(request.provider, knowledge["data"])
     selected_formats = formats or ["plaintext"]
-    input_image = (
-        _svg_text_image(input_text, width=text_width) if "image" in selected_formats else None
+    selected_pod_ids = {
+        pod["id"]
+        for pod in _select_pods(
+            [
+                {"title": "Input interpretation", "scanner": "Identity", "id": "Input", "position": 100},
+                {"title": title, "scanner": "Data", "id": pod_id, "position": 200},
+            ],
+            include_pod_ids,
+            exclude_pod_ids,
+            pod_titles,
+            pod_indexes,
+            scanners,
+        )
+    }
+    format_budget = _FormatStageBudget(
+        format_timeout_seconds=format_timeout_seconds,
+        pod_timeout_seconds=pod_timeout_seconds,
+        total_deadline=deadline,
     )
-    result_image = None
-    if "image" in selected_formats:
-        if request.provider == "open_meteo" and request.operation == "weather_forecast":
-            result_image = forecast_chart_image(knowledge["data"], width=plot_width)
-        if result_image is None:
-            result_image = _svg_text_image(plaintext, width=text_width)
-    input_subpod: dict[str, Any] = {"title": ""}
-    result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
-    if "plaintext" in selected_formats:
-        input_subpod["plaintext"] = input_text
-        result_subpod["plaintext"] = plaintext
-    if "mathml" in selected_formats:
-        input_subpod["mathml"] = _mathml(input_text)
-        result_subpod["mathml"] = _mathml(plaintext)
-    if input_image is not None:
-        input_subpod["img"] = input_image
-    if result_image is not None:
-        result_subpod["img"] = result_image
-    pods = [
-        {
-            "title": "Input interpretation",
-            "scanner": "Identity",
-            "id": "Input",
-            "position": 100,
-            "error": False,
-            "numsubpods": 1,
-            "primary": False,
-            "subpods": [input_subpod],
-        },
-        {
+
+    def format_provider_input() -> dict[str, Any]:
+        input_image = (
+            _svg_text_image(input_text, width=text_width) if "image" in selected_formats else None
+        )
+        return _input_pod(
+            input_text,
+            selected_formats,
+            input_mathml=_mathml(input_text),
+            input_image=input_image,
+        )
+
+    def format_provider_result() -> dict[str, Any]:
+        plaintext = (
+            forecast_plaintext(knowledge["data"])
+            if request.provider == "open_meteo" and request.operation == "weather_forecast"
+            else None
+        ) or _provider_plaintext(request.provider, knowledge["data"])
+        result_image = None
+        if "image" in selected_formats:
+            if request.provider == "open_meteo" and request.operation == "weather_forecast":
+                result_image = forecast_chart_image(knowledge["data"], width=plot_width)
+            if result_image is None:
+                result_image = _svg_text_image(plaintext, width=text_width)
+        result_subpod: dict[str, Any] = {"title": "", "data": knowledge["data"]}
+        if "plaintext" in selected_formats:
+            result_subpod["plaintext"] = plaintext
+        if "mathml" in selected_formats:
+            result_subpod["mathml"] = _mathml(plaintext)
+        if result_image is not None:
+            result_subpod["img"] = result_image
+        return {
             "title": title,
             "scanner": "Data",
             "id": pod_id,
@@ -1598,12 +1828,27 @@ def _execute_provider_query(
             "numsubpods": 1,
             "primary": True,
             "subpods": [result_subpod],
-        },
-    ]
+        }
+
+    pods = []
+    if "Input" in selected_pod_ids:
+        provider_input = format_budget.render("Input interpretation", format_provider_input)
+        if provider_input is not None:
+            pods.append(provider_input)
+    if pod_id in selected_pod_ids:
+        provider_result = format_budget.render(title, format_provider_result)
+        if provider_result is not None:
+            pods.append(provider_result)
     filtered = _select_pods(
         pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
     )
     elapsed = perf_counter() - started
+    warnings = _format_warnings(
+        formats,
+        {"plaintext", "mathml"} | ({"image"} if "image" in selected_formats else set()),
+    )
+    if format_budget.timed_out_pods:
+        warnings.append(_format_timeout_warning(format_budget.timed_out_pods))
     wikidata_property_id = _wikidata_property_id(request)
     wikidata_property_name = {
         "P1082": "population",
@@ -1616,16 +1861,13 @@ def _execute_provider_query(
         "P2299": "GDP per capita at purchasing-power parity",
     }.get(wikidata_property_id)
     payload = _query_envelope(
-        success=True,
+        success=not (format_budget.timed_out_pods and not filtered),
         error=False,
         pods=filtered,
         elapsed=elapsed,
         parse_timing=parse_timing,
         datatypes=datatype,
-        warnings=_format_warnings(
-            formats,
-            {"plaintext", "mathml"} | ({"image"} if input_image or result_image else set()),
-        ),
+        warnings=warnings,
         assumptions=assumptions,
         interpretation={
             "kind": "typed_data_request",
@@ -1660,7 +1902,8 @@ def _execute_provider_query(
         ),
         sources=knowledge["sources"],
         retrieved_at=knowledge["retrieved_at"],
-        data=knowledge["data"],
+        data=None if title in format_budget.timed_out_pods else knowledge["data"],
+        timedoutpods=",".join(format_budget.timed_out_pods),
     )
     payload["queryresult"]["input"] = input_text
     return payload
@@ -2630,68 +2873,119 @@ def _initial_pods(
     decimal_state_level: int = 0,
 ) -> list[dict[str, Any]]:
     selected_formats = formats or ["plaintext"]
-    subpod_input: dict[str, Any] = {"title": ""}
-    subpod_result: dict[str, Any] = {"title": ""}
-    if "plaintext" in selected_formats:
-        subpod_input["plaintext"] = expression
-        if result_text is not None:
-            subpod_result["plaintext"] = result_text
-    if "mathml" in selected_formats:
-        subpod_input["mathml"] = input_mathml or _mathml(expression)
-        if result_text is not None:
-            subpod_result["mathml"] = result_mathml or _mathml(result_text)
-    if "minput" in selected_formats and input_minput is not None:
-        subpod_input["minput"] = input_minput
-    if "moutput" in selected_formats and result_moutput is not None:
-        subpod_result["moutput"] = result_moutput
-    if "image" in selected_formats and input_image is not None:
-        subpod_input["img"] = input_image
-    if "image" in selected_formats and result_image is not None:
-        subpod_result["img"] = result_image
     pods = [
-        {
-            "title": "Input interpretation",
-            "scanner": "Identity",
-            "id": "Input",
-            "position": 100,
-            "error": False,
-            "numsubpods": 1,
-            "primary": False,
-            "subpods": [subpod_input],
-        },
-        {
-            "title": "Result",
-            "scanner": result_scanner,
-            "id": "Result",
-            "position": 200,
-            "error": False,
-            "numsubpods": 1 if result_text is not None else 0,
-            "primary": True,
-            "subpods": [subpod_result] if result_text is not None else [],
-        },
+        _input_pod(
+            expression,
+            selected_formats,
+            input_mathml=input_mathml,
+            input_minput=input_minput,
+            input_image=input_image,
+        ),
+        _result_pod(
+            result_text,
+            selected_formats,
+            result_mathml=result_mathml,
+            result_moutput=result_moutput,
+            result_image=result_image,
+            result_scanner=result_scanner,
+        ),
     ]
     if numeric_approximation is not None:
-        approximation = str(numeric_approximation["value"])
-        approximation_subpod: dict[str, Any] = {"title": ""}
-        if "plaintext" in selected_formats:
-            approximation_subpod["plaintext"] = approximation
-        if "mathml" in selected_formats:
-            approximation_subpod["mathml"] = _mathml(approximation)
-        if "image" in selected_formats and approximation_image is not None:
-            approximation_subpod["img"] = approximation_image
-        pods.append({
-            "title": "Decimal approximation",
-            "scanner": "Numeric",
-            "id": "DecimalApproximation",
-            "position": 300,
-            "error": False,
-            "numsubpods": 1,
-            "primary": False,
-            "subpods": [approximation_subpod],
-            "states": _decimal_states_for_level(decimal_state_level),
-            "precision": int(numeric_approximation.get("precision", 50)),
-        })
+        pods.append(_decimal_approximation_pod(
+            numeric_approximation,
+            selected_formats,
+            approximation_image=approximation_image,
+            decimal_state_level=decimal_state_level,
+        ))
     return pods
+
+
+def _input_pod(
+    expression: str,
+    formats: list[str],
+    *,
+    input_mathml: str | None = None,
+    input_minput: str | None = None,
+    input_image: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    subpod_input: dict[str, Any] = {"title": ""}
+    if "plaintext" in formats:
+        subpod_input["plaintext"] = expression
+    if "mathml" in formats:
+        subpod_input["mathml"] = input_mathml or _mathml(expression)
+    if "minput" in formats and input_minput is not None:
+        subpod_input["minput"] = input_minput
+    if "image" in formats and input_image is not None:
+        subpod_input["img"] = input_image
+    return {
+        "title": "Input interpretation",
+        "scanner": "Identity",
+        "id": "Input",
+        "position": 100,
+        "error": False,
+        "numsubpods": 1,
+        "primary": False,
+        "subpods": [subpod_input],
+    }
+
+
+def _result_pod(
+    result_text: str | None,
+    formats: list[str],
+    *,
+    result_mathml: str | None = None,
+    result_moutput: str | None = None,
+    result_image: dict[str, Any] | None = None,
+    result_scanner: str = "Mathematical",
+) -> dict[str, Any]:
+    subpod_result: dict[str, Any] = {"title": ""}
+    if result_text is not None and "plaintext" in formats:
+        subpod_result["plaintext"] = result_text
+    if result_text is not None and "mathml" in formats:
+        subpod_result["mathml"] = result_mathml or _mathml(result_text)
+    if "moutput" in formats and result_moutput is not None:
+        subpod_result["moutput"] = result_moutput
+    if "image" in formats and result_image is not None:
+        subpod_result["img"] = result_image
+    return {
+        "title": "Result",
+        "scanner": result_scanner,
+        "id": "Result",
+        "position": 200,
+        "error": False,
+        "numsubpods": 1 if result_text is not None else 0,
+        "primary": True,
+        "subpods": [subpod_result] if result_text is not None else [],
+    }
+
+
+def _decimal_approximation_pod(
+    numeric_approximation: dict[str, Any],
+    formats: list[str],
+    *,
+    approximation_image: dict[str, Any] | None = None,
+    decimal_state_level: int = 0,
+) -> dict[str, Any]:
+    approximation = str(numeric_approximation["value"])
+    approximation_subpod: dict[str, Any] = {"title": ""}
+    if "plaintext" in formats:
+        approximation_subpod["plaintext"] = approximation
+    if "mathml" in formats:
+        approximation_subpod["mathml"] = _mathml(approximation)
+    if "image" in formats and approximation_image is not None:
+        approximation_subpod["img"] = approximation_image
+    return {
+        "title": "Decimal approximation",
+        "scanner": "Numeric",
+        "id": "DecimalApproximation",
+        "position": 300,
+        "error": False,
+        "numsubpods": 1,
+        "primary": False,
+        "subpods": [approximation_subpod],
+        "states": _decimal_states_for_level(decimal_state_level),
+        "precision": int(numeric_approximation.get("precision", 50)),
+    }
 
 
 def _svg_text_image(text: str, *, width: int = 500) -> dict[str, Any] | None:
@@ -2786,6 +3080,15 @@ def _format_warnings(
         "text": "These requested formats are not available for this query: "
         + ", ".join(omitted)
     }]
+
+
+def _format_timeout_warning(titles: list[str]) -> dict[str, str]:
+    return {
+        "text": (
+            "Formatting exceeded its per-pod, cumulative, or total time budget; these pods were "
+            "omitted: " + ", ".join(titles)
+        )
+    }
 
 
 def _wolfram_input_for_query(

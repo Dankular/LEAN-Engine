@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 from time import monotonic
-from typing import Annotated
+from typing import Annotated, Callable
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -18,9 +18,10 @@ from pydantic import ValidationError
 
 from .async_jobs import (
     AsyncJobCapacityError,
-    discard_async_pod_job,
-    get_async_pod_job,
-    submit_async_pod,
+    discard_async_query_job,
+    get_async_query_job,
+    prepare_async_query_result,
+    submit_async_query,
 )
 from .computation import ComputeRequest, Computation, check_computation, prepare_computation
 from .full_results import (
@@ -61,6 +62,12 @@ from .natural_language import (
 )
 from .physical_units import SUPPORTED_UNIT_NAMES, UNIT_ALIAS_TO_NAME
 from .reasoner import analyze
+from .recalculation import (
+    RecalculationCapacityError,
+    create_recalculation_job,
+    finish_recalculation,
+    take_recalculation_job,
+)
 from .symbolic import SymbolicRequest, run_symbolic
 
 
@@ -331,7 +338,22 @@ def capabilities() -> dict[str, object]:
                         "default_seconds": 20,
                         "minimum_seconds": 0.1,
                         "maximum_seconds": 30,
-                        "scope": "monotonic deadline for symbolic worker execution and provider request sequences",
+                        "scope": "monotonic deadline across symbolic execution, provider retrieval, and output pod rendering; final XML/JSON serialization is outside this deadline",
+                    },
+                    "scantimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 3,
+                        "minimum_seconds": 0.1,
+                        "maximum_seconds": 30,
+                        "scope": "budget for symbolic computation and provider retrieval before result formatting",
+                    },
+                    "formattimeout": {
+                        "status": "implemented_initial_slice",
+                        "default_seconds": 8,
+                        "minimum_seconds": 0.1,
+                        "maximum_seconds": 30,
+                        "scope": "cumulative budget checked after bounded output pod rendering operations",
+                        "preempts_active_formatter": False,
                     },
                     "prooftimeout": {
                         "status": "implemented_initial_slice",
@@ -345,16 +367,28 @@ def capabilities() -> dict[str, object]:
                         "default_seconds": 4,
                         "minimum_seconds": 0.1,
                         "maximum_seconds": 30,
-                        "scope": "per-result symbolic execution or provider retrieval budget",
-                        "format_stage_equivalent": False,
+                        "scope": "per-pod formatting budget checked after bounded output rendering",
+                        "format_stage_equivalent": True,
+                        "preempts_active_formatter": False,
                     },
-                    "unsupported_stage_controls": ["scantimeout", "formattimeout"],
+                    "unsupported_stage_controls": [],
+                    "recalculate": {
+                        "status": "implemented_initial_slice",
+                        "path": "/v2/recalculate/{job_id}",
+                        "trigger": "scan timeout when either scan or total budget can increase",
+                        "continuation": "reruns the single result request with larger budgets; solver state is not reused",
+                        "maximum_active_jobs": 4,
+                        "maximum_retained_jobs": 256,
+                        "result_ttl_seconds": 1800,
+                    },
                     "async": {
                         "status": "implemented_initial_slice",
                         "modes": ["false", "true", "numeric seconds"],
                         "true_wait_seconds": 0.4,
                         "numeric_wait_range_seconds": [0, 30],
                         "poll_path": "/v2/asyncPod/{job_id}",
+                        "query_poll_path": "/v2/asyncQuery/{job_id}",
+                        "query_poll_result": "complete queryresult envelope from the same computation",
                         "worker_count": 4,
                         "maximum_active_jobs": 16,
                         "maximum_retained_jobs": 256,
@@ -694,7 +728,18 @@ def full_results_query(
     ] = False,
     prooftimeout: Annotated[float, Query(ge=1, le=180)] = 60.0,
     parsetimeout: Annotated[float, Query(ge=0.1, le=30)] = 5.0,
-    podtimeout: Annotated[float, Query(ge=0.1, le=30)] = 4.0,
+    scantimeout: Annotated[
+        float,
+        Query(ge=0.1, le=30, description="Budget for symbolic computation or provider retrieval"),
+    ] = 3.0,
+    formattimeout: Annotated[
+        float,
+        Query(ge=0.1, le=30, description="Cumulative output formatting budget"),
+    ] = 8.0,
+    podtimeout: Annotated[
+        float,
+        Query(ge=0.1, le=30, description="Per-pod output formatting budget"),
+    ] = 4.0,
     totaltimeout: Annotated[float, Query(ge=0.1, le=30)] = 20.0,
     width: Annotated[
         int,
@@ -751,7 +796,10 @@ def full_results_query(
         formats, _ = normalize_formats(format)
         async_wait_seconds = normalize_async(async_mode)
 
-        def run_query() -> dict[str, object]:
+        def run_query(
+            scan_timeout_override: float | None = None,
+            total_timeout_override: float | None = None,
+        ) -> dict[str, object]:
             result = execute_query(
                 input,
                 assumption,
@@ -767,8 +815,14 @@ def full_results_query(
                 scanners=scanner,
                 ignorecase=ignorecase,
                 parse_timeout_seconds=parsetimeout,
+                scan_timeout_seconds=(
+                    scantimeout if scan_timeout_override is None else scan_timeout_override
+                ),
+                format_timeout_seconds=formattimeout,
                 pod_timeout_seconds=podtimeout,
-                total_timeout_seconds=totaltimeout,
+                total_timeout_seconds=(
+                    totaltimeout if total_timeout_override is None else total_timeout_override
+                ),
                 text_width=width,
                 max_image_width=maxwidth,
                 magnification=mag,
@@ -779,6 +833,25 @@ def full_results_query(
             if ignorecase:
                 result["queryresult"]["ignorecase"] = True
             return result
+
+        def prepare_query_result(
+            result_request: Request,
+            payload: dict[str, object],
+        ) -> None:
+            queryresult = payload.get("queryresult")
+            if ignorecase and isinstance(queryresult, dict):
+                queryresult["ignorecase"] = True
+            _attach_recalculation_link(
+                result_request,
+                payload,
+                run_query,
+                scan_timeout_seconds=scantimeout,
+                total_timeout_seconds=totaltimeout,
+                output=selected_output,
+            )
+
+        def attach_recalculation(payload: dict[str, object]) -> None:
+            prepare_query_result(request, payload)
 
         if async_wait_seconds is not None:
             try:
@@ -809,20 +882,26 @@ def full_results_query(
                 for pod in probe["queryresult"]["pods"]
             )
             if async_visible and podstate is None:
-                job = submit_async_pod(
+                job = submit_async_query(
                     run_query,
+                    input_text=input,
                     pod_id=pod_id,
                     pod_title=pod_title,
                     scanner=pod_scanner,
                     output=selected_output,
+                    prepare_query_result=prepare_query_result,
                 )
                 async_url = str(request.url_for("full_results_async_pod", job_id=job.job_id))
+                async_query_url = str(
+                    request.url_for("full_results_async_query", job_id=job.job_id)
+                )
                 pending = async_query_payload(
                     input,
                     pod_id=pod_id,
                     pod_title=pod_title,
                     scanner=pod_scanner,
                     async_url=async_url,
+                    async_query_url=async_query_url,
                     formats=formats,
                     text_width=width,
                     elapsed=monotonic() - job.created_at,
@@ -838,19 +917,19 @@ def full_results_query(
                 except FutureTimeout:
                     return render_response(pending, selected_output)
                 except (AssumptionSelectionError, FullResultsRequestError) as exc:
-                    discard_async_pod_job(job.job_id)
+                    discard_async_query_job(job.job_id)
                     response = render_response(query_error(input, str(exc)), selected_output)
                     response.status_code = status.HTTP_400_BAD_REQUEST
                     return response
                 except FullResultsBackendError as exc:
-                    discard_async_pod_job(job.job_id)
+                    discard_async_query_job(job.job_id)
                     response = render_response(
                         query_error(input, str(exc), code=exc.error_code), selected_output
                     )
                     response.status_code = exc.status_code
                     return response
                 except Exception:
-                    discard_async_pod_job(job.job_id)
+                    discard_async_query_job(job.job_id)
                     response = render_response(
                         query_error(
                             input,
@@ -861,10 +940,13 @@ def full_results_query(
                     )
                     response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
                     return response
-                discard_async_pod_job(job.job_id)
+                prepare_async_query_result(job, request, completed)
+                discard_async_query_job(job.job_id)
                 return render_response(completed, selected_output)
 
         payload = run_query()
+        if async_wait_seconds is None:
+            attach_recalculation(payload)
     except (AssumptionSelectionError, FullResultsRequestError) as exc:
         response = render_response(query_error(input, str(exc)), selected_output)
         response.status_code = status.HTTP_400_BAD_REQUEST
@@ -886,6 +968,109 @@ def full_results_query(
 
 
 @app.get(
+    "/v2/recalculate/{job_id}",
+    dependencies=[Depends(require_api_token)],
+    name="full_results_recalculate",
+    summary="Continue a query stopped by its scan time limit",
+    description=(
+        "Use the opaque continuation URL from /v2/query with the same bearer token. Each "
+        "continuation reruns this service's single pending result computation with a larger "
+        "scan budget; it does not reuse partial solver state."
+    ),
+)
+def full_results_recalculate(
+    request: Request,
+    job_id: str,
+    output: Annotated[str | None, Query()] = None,
+) -> Response:
+    try:
+        requested_output = normalize_output(output) if output is not None else None
+    except FullResultsRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    try:
+        job = take_recalculation_job(job_id)
+    except RecalculationCapacityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recalculation token was not found or has expired",
+        )
+    try:
+        selected_output = requested_output or job.output
+        try:
+            payload = job.work(job.scan_timeout_seconds, job.total_timeout_seconds)
+        except (AssumptionSelectionError, FullResultsRequestError) as exc:
+            response = render_response(query_error(job.input_text, str(exc)), selected_output)
+            response.status_code = status.HTTP_400_BAD_REQUEST
+            return response
+        except FullResultsBackendError as exc:
+            response = render_response(
+                query_error(job.input_text, str(exc), code=exc.error_code), selected_output
+            )
+            response.status_code = exc.status_code
+            return response
+        queryresult = payload.get("queryresult")
+        if not isinstance(queryresult, dict):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Recalculation returned an invalid response",
+            )
+        queryresult["pods"] = [
+            pod for pod in queryresult.get("pods", []) if pod.get("id") != "Input"
+        ]
+        queryresult["numpods"] = len(queryresult["pods"])
+        queryresult.pop("warnings", None)
+        queryresult.pop("assumptions", None)
+        queryresult["recalculate"] = ""
+        _attach_recalculation_link(
+            request,
+            payload,
+            job.work,
+            scan_timeout_seconds=job.scan_timeout_seconds,
+            total_timeout_seconds=job.total_timeout_seconds,
+            output=selected_output,
+        )
+        return render_response(payload, selected_output)
+    finally:
+        finish_recalculation()
+
+
+def _attach_recalculation_link(
+    request: Request,
+    payload: dict[str, object],
+    work: Callable[[float, float], dict[str, object]],
+    *,
+    scan_timeout_seconds: float,
+    total_timeout_seconds: float,
+    output: str,
+) -> None:
+    queryresult = payload.get("queryresult")
+    if not isinstance(queryresult, dict):
+        return
+    evidence = queryresult.get("evidence")
+    if not isinstance(evidence, dict) or evidence.get("timeout_stage") != "scan":
+        return
+    job = create_recalculation_job(
+        work,
+        input_text=str(queryresult.get("input", "")),
+        scan_timeout_seconds=scan_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+        output=output,
+    )
+    if job is not None:
+        queryresult["recalculate"] = str(
+            request.url_for("full_results_recalculate", job_id=job.job_id)
+        )
+
+
+@app.get(
     "/v2/asyncPod/{job_id}",
     dependencies=[Depends(require_api_token)],
     name="full_results_async_pod",
@@ -899,7 +1084,7 @@ def full_results_async_pod(
     job_id: str,
     output: Annotated[str | None, Query()] = None,
 ) -> Response:
-    job = get_async_pod_job(job_id)
+    job = get_async_query_job(job_id)
     if job is None or job.expires_at <= monotonic():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -934,10 +1119,15 @@ def full_results_async_pod(
         )
     else:
         queryresult = result.get("queryresult", {})
-        pod = next(
-            (item for item in queryresult.get("pods", []) if item.get("id") == job.pod_id),
+        source_pod = next(
+            (
+                item
+                for item in queryresult.get("pods", [])
+                if isinstance(item, dict) and item.get("id") == job.pod_id
+            ),
             None,
         )
+        pod = dict(source_pod) if source_pod is not None else None
         if pod is not None and queryresult.get("evidence") is not None:
             pod["evidence"] = queryresult["evidence"]
         if pod is None:
@@ -946,8 +1136,79 @@ def full_results_async_pod(
                 tips = queryresult.get("tips", [])
                 message = tips[0].get("text") if tips else "No result pod was produced"
             pod = _async_error_pod(job.pod_id, job.pod_title, job.scanner, str(message))
-    discard_async_pod_job(job.job_id)
     return render_pod_response(pod, selected_output)
+
+
+@app.get(
+    "/v2/asyncQuery/{job_id}",
+    dependencies=[Depends(require_api_token)],
+    name="full_results_async_query",
+    summary="Fetch the complete asynchronously computed query result",
+    description=(
+        "Use the query-level asyncquery URL from /v2/query with the same bearer token. It shares "
+        "the computation behind the async pod URL, returns HTTP 202 while pending, and retains "
+        "completed results in process memory for 30 minutes."
+    ),
+)
+def full_results_async_query(
+    request: Request,
+    job_id: str,
+    output: Annotated[str | None, Query()] = None,
+) -> Response:
+    job = get_async_query_job(job_id)
+    if job is None or job.expires_at <= monotonic():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Async query result was not found",
+        )
+    try:
+        selected_output = normalize_output(output or job.output)
+    except FullResultsRequestError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not job.future.done():
+        state = "running" if job.future.running() else "pending"
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            headers={"Retry-After": "1"},
+            content={
+                "status": state,
+                "job_id": job.job_id,
+                "retry_after_seconds": 1,
+            },
+        )
+
+    try:
+        result = job.future.result()
+    except (AssumptionSelectionError, FullResultsRequestError) as exc:
+        response = render_response(query_error(job.input_text, str(exc)), selected_output)
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return response
+    except FullResultsBackendError as exc:
+        response = render_response(
+            query_error(job.input_text, str(exc), code=exc.error_code), selected_output
+        )
+        response.status_code = exc.status_code
+        return response
+    except Exception:
+        response = render_response(
+            query_error(
+                job.input_text,
+                "Asynchronous computation failed",
+                code="COMPUTATION_FAILURE",
+            ),
+            selected_output,
+        )
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return response
+
+    queryresult = result.get("queryresult")
+    if not isinstance(queryresult, dict):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Asynchronous computation returned an invalid response",
+        )
+    prepare_async_query_result(job, request, result)
+    return render_response(result, selected_output)
 
 
 def _async_error_pod(pod_id: str, title: str, scanner: str, message: str) -> dict[str, object]:
