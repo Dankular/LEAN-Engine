@@ -110,6 +110,27 @@ class WolframFreeformPromptTests(unittest.TestCase):
         self.assertEqual(body["evidence"]["formal_verification"]["status"], "unsupported")
         self.assertEqual(body["evidence"]["sources"], knowledge_result["sources"])
 
+    def test_freeform_prompt_returns_lean_checked_natural_language_calculus(self) -> None:
+        response = self.client.post(
+            "/api/cag/v1/WolframLanguageCompute",
+            json={
+                "code": (
+                    r'\[FreeformPrompt]["Find the gradient of x squared plus y squared '
+                    r'in Cartesian coordinates"]'
+                ),
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["success"], body)
+        self.assertEqual(body["result"], "Out[1]= (2*x, 2*y, 0)")
+        verification = body["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertEqual(verification["claim_type"], "coordinate_gradient")
+        self.assertTrue(verification["verified"])
+
     def test_unresolved_freeform_prompt_uses_501_tips(self) -> None:
         query_response = {
             "queryresult": {
