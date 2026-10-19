@@ -371,6 +371,12 @@ def prepare_computation(code: str, time_limit_seconds: float = 5.0) -> Computati
         exact_value = _parse_exact_rational(arguments[0])
         if exact_value is not None:
             return _prepare_rational_numeric_approximation(arguments[0], precision)
+        rational_sqrt = _prepare_rational_sqrt_numeric_approximation(
+            arguments[0],
+            precision,
+        )
+        if rational_sqrt is not None:
+            return rational_sqrt
         return _prepare_affine_pi_numeric_approximation(arguments[0], precision)
 
     exact_trig_constant = _prepare_exact_pi_trigonometric_constant(code)
@@ -618,6 +624,100 @@ theorem wolfram_language_compute :
 """
     return Computation(
         format(decimal_value, "f"),
+        lean_source,
+        numeric_precision=precision,
+        numeric_error_bound=_fraction_text(error_bound),
+    )
+
+
+def _prepare_rational_sqrt_numeric_approximation(
+    expression_source: str,
+    precision: int,
+) -> Computation | None:
+    normalized_source = _normalize_wolfram_real_functions(expression_source)
+    exact_source = _normalize_decimal_literals(normalized_source)
+    if exact_source is None:
+        return None
+    try:
+        parsed = parse_math_input(exact_source)
+        tree = ast.parse(parsed.expression, mode="eval")
+    except (MathInputError, ValueError, SyntaxError, RecursionError):
+        return None
+
+    sign = 1
+    square_root_node = tree.body
+    if isinstance(square_root_node, ast.UnaryOp):
+        if isinstance(square_root_node.op, ast.USub):
+            sign = -1
+        elif not isinstance(square_root_node.op, ast.UAdd):
+            return None
+        square_root_node = square_root_node.operand
+    if (
+        not isinstance(square_root_node, ast.Call)
+        or not isinstance(square_root_node.func, ast.Name)
+        or square_root_node.func.id != "sqrt"
+        or len(square_root_node.args) != 1
+        or square_root_node.keywords
+    ):
+        return None
+
+    radicand = _constant_fraction(square_root_node.args[0])
+    if radicand is None or radicand < 0:
+        return None
+
+    try:
+        with localcontext() as context:
+            context.prec = precision + 8
+            context.rounding = ROUND_HALF_EVEN
+            decimal_radicand = Decimal(radicand.numerator) / Decimal(radicand.denominator)
+            decimal_root = decimal_radicand.sqrt()
+        with localcontext() as context:
+            context.prec = precision
+            context.rounding = ROUND_HALF_EVEN
+            decimal_value = +decimal_root
+    except (InvalidOperation, OverflowError, ValueError):
+        return None
+
+    if sign < 0:
+        decimal_value = -decimal_value
+    approximation = Fraction(decimal_value)
+    if radicand == 0:
+        error_bound = Fraction(0)
+    else:
+        root_exponent = _decimal_exponent(radicand) // 2
+        error_bound = _rounding_error_bound_at_exponent(root_exponent, precision)
+
+    root = f"Real.sqrt ({_lean_rational(radicand)})"
+    signed_root = root if sign > 0 else f"(-{root})"
+    positive_approximation = abs(approximation)
+    lean_source = f"""import Mathlib.Analysis.SpecialFunctions.Sqrt
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.NormNum
+
+theorem wolfram_language_compute :
+  |{signed_root} - {_lean_rational(approximation)}| ≤ {_lean_rational(error_bound)} := by
+  have hroot_lower :
+      ({_lean_rational(positive_approximation)} - {_lean_rational(error_bound)}) ≤ {root} := by
+    apply Real.le_sqrt_of_sq_le
+    norm_num
+  have hroot_upper :
+      {root} ≤ ({_lean_rational(positive_approximation)} + {_lean_rational(error_bound)}) := by
+    calc
+      {root} ≤ Real.sqrt
+          (({_lean_rational(positive_approximation)} + {_lean_rational(error_bound)}) ^ 2) :=
+        Real.sqrt_le_sqrt (by norm_num)
+      _ = {_lean_rational(positive_approximation)} + {_lean_rational(error_bound)} :=
+        Real.sqrt_sq (by norm_num)
+  rw [abs_le]
+  constructor <;> linarith [hroot_lower, hroot_upper]
+
+#print axioms wolfram_language_compute
+"""
+    display_result = format(decimal_value, "f")
+    if display_result in {"-0", "-0.0"}:
+        display_result = "0"
+    return Computation(
+        display_result,
         lean_source,
         numeric_precision=precision,
         numeric_error_bound=_fraction_text(error_bound),
