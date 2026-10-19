@@ -135,6 +135,33 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
         self.assertIn("Real.pi_gt_d20", evidence["lean_source"])
         self.assertIn("Real.pi_lt_d20", evidence["lean_source"])
 
+    def test_high_precision_pi_approximations_use_generated_bounds(self) -> None:
+        cases = {
+            "N[Pi, 21]": "3.14159265358979323846",
+            "N[Pi^2, 25]": "9.869604401089358618834491",
+            "N[Sqrt[Pi] + (Pi - 4)^3, 25]": "1.139925090443108222967473",
+            "N[Pi, 100]": (
+                "3.141592653589793238462643383279502884197169399375105820974944"
+                "592307816406286208998628034825342117068"
+            ),
+        }
+        for code, expected_value in cases.items():
+            with self.subTest(code=code):
+                response = self.client.post(
+                    "/api/cag/v1/WolframLanguageCompute",
+                    json={"code": code, "timeConstraint": 60},
+                    headers=self.headers,
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                evidence = response.json()["evidence"]
+                approximation = evidence["numeric_approximation"]
+                self.assertEqual(approximation["value"], expected_value)
+                self.assertGreater(approximation["precision_significant_digits"], 20)
+                self.assertEqual(evidence["axiom_audit"]["status"], "passed")
+                self.assertIn("pi_lower_bound", evidence["lean_source"])
+                self.assertIn("pi_upper_bound", evidence["lean_source"])
+
     def test_non_affine_pi_numeric_expressions_are_interval_checked(self) -> None:
         cases = {
             "N[Pi^2, 16]": "9.869604401089359",
@@ -304,7 +331,8 @@ class CertifiedNumericApproximationTests(unittest.TestCase):
 
     def test_irrational_and_invalid_precision_inputs_are_not_claimed(self) -> None:
         for code in (
-            "N[Pi, 21]",
+            "N[Pi, 101]",
+            "N[Pi^2, 101]",
             "N[Pi - 3, 20]",
             "N[Pi^2, 20]",
             "N[(Pi - 628318530717958647693/200000000000000000000)*Sqrt[2], 3]",
