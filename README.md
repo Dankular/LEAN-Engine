@@ -87,6 +87,7 @@ GET /v2/query?input=10%20m%2A5%20m&assumption=unit%3Am-minutes%402&output=json
 ```
 
 The service checks unit dimensions after applying the choices; incompatible units in an addition are rejected.
+When a selected interpretation fails that check, `/v2/query` and `/v2/validatequery` retain the selected assumption IDs and typed interpretation with the rejection reason.
 
 The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.
 

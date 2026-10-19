@@ -508,7 +508,14 @@ def execute_query(
             input_text, started, parse_timing=exc.parse_timing_seconds
         )
     except InterpretationError as exc:
-        return _unrecognized_query(input_text, str(exc), perf_counter() - started)
+        return _unrecognized_query(
+            input_text,
+            str(exc),
+            perf_counter() - started,
+            assumptions=getattr(exc, "assumptions", []),
+            interpretation=getattr(exc, "interpretation", None),
+            classification=getattr(exc, "classification", None),
+        )
 
     if interpreted.get("outcome") == "timeout":
         if deadline - perf_counter() <= 0.001:
@@ -1691,19 +1698,21 @@ def validate_query(
         }
     except InterpretationError as exc:
         elapsed = perf_counter() - started
-        return {
-            "validatequeryresult": {
-                "success": False,
-                "error": False,
-                "timing": _seconds(elapsed),
-                "parsetiming": _seconds(elapsed),
-                "version": _API_VERSION,
-                "service": "LEAN Engine",
-                "input": input_text,
-                "assumptions": [],
-                "tips": [{"text": str(exc)}],
-            }
+        result = {
+            "success": False,
+            "error": False,
+            "timing": _seconds(elapsed),
+            "parsetiming": _seconds(elapsed),
+            "version": _API_VERSION,
+            "service": "LEAN Engine",
+            "input": input_text,
+            "assumptions": getattr(exc, "assumptions", []),
+            "tips": [{"text": str(exc)}],
         }
+        if hasattr(exc, "interpretation"):
+            result["interpretation"] = exc.interpretation
+            result["classification"] = exc.classification
+        return {"validatequeryresult": result}
     elapsed = perf_counter() - started
     return {
         "validatequeryresult": {
@@ -3402,18 +3411,33 @@ def render_response(payload: dict[str, Any], output: str) -> Response:
     return Response(content=xml, media_type="application/xml; charset=utf-8")
 
 
-def _unrecognized_query(input_text: str, message: str, elapsed: float) -> dict[str, Any]:
+def _unrecognized_query(
+    input_text: str,
+    message: str,
+    elapsed: float,
+    *,
+    assumptions: list[dict[str, Any]] | None = None,
+    interpretation: dict[str, Any] | None = None,
+    classification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     result = _query_envelope(
         success=False,
         error=False,
         pods=[],
         elapsed=elapsed,
         parse_timing=elapsed,
-        datatypes="",
+        datatypes="Mathematical" if interpretation is not None else "",
         warnings=[],
-        assumptions=[],
+        assumptions=assumptions or [],
+        interpretation=interpretation,
+        classification=classification,
         tips=[{"text": message}],
-        qualification="The input was not parsed; no result was computed.",
+        qualification=(
+            "The typed interpretation was rejected by deterministic "
+            "validation; no result was computed."
+            if interpretation is not None
+            else "The input was not parsed; no result was computed."
+        ),
     )
     result["queryresult"]["input"] = input_text
     return result

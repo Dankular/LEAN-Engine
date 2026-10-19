@@ -302,6 +302,44 @@ class AssumptionOccurrenceApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
+    def test_full_results_preserves_assumptions_when_dimensions_conflict(self) -> None:
+        params = [
+            ("input", "10 m + 5m"),
+            ("output", "json"),
+            ("assumption", "unit:m-minutes@2"),
+        ]
+        response = self.client.get("/v2/query", params=params, headers=self.headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        queryresult = response.json()["queryresult"]
+        self.assertFalse(queryresult["success"])
+        unit = next(item for item in queryresult["assumptions"] if item["type"] == "Unit")
+        self.assertEqual(
+            [item["selected"] for item in unit["occurrences"]],
+            ["unit:m-meters", "unit:m-minutes"],
+        )
+        self.assertIn("incompatible physical dimensions", queryresult["tips"][0]["text"])
+        self.assertEqual(
+            queryresult["interpretation"]["typed_ast"]["unit_bindings"],
+            {"unit_meter": "meter", "unit_minute": "minute"},
+        )
+        self.assertIn("rejected by deterministic validation", queryresult["qualification"])
+
+        validation = self.client.get(
+            "/v2/validatequery",
+            params=params,
+            headers=self.headers,
+        )
+        self.assertEqual(validation.status_code, 200, validation.text)
+        validate_result = validation.json()["validatequeryresult"]
+        validate_unit = next(
+            item for item in validate_result["assumptions"] if item["type"] == "Unit"
+        )
+        self.assertEqual(
+            [item["selected"] for item in validate_unit["occurrences"]],
+            ["unit:m-meters", "unit:m-minutes"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

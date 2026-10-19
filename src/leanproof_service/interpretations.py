@@ -91,6 +91,21 @@ class InterpretationError(ValueError):
     pass
 
 
+class InterpretationValidationError(InterpretationError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        assumptions: list[dict[str, Any]],
+        interpretation: dict[str, Any],
+        classification: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.assumptions = assumptions
+        self.interpretation = interpretation
+        self.classification = classification
+
+
 class AssumptionSelectionError(InterpretationError):
     pass
 
@@ -435,7 +450,22 @@ def query_with_interpretations(
     if parsed.get("timed_out"):
         raise InterpretationTimeout(perf_counter() - parsing_started)
     if parsed.get("error"):
-        raise InterpretationError(parsed.get("error", "input could not be parsed"))
+        raise InterpretationValidationError(
+            parsed.get("error", "input could not be parsed"),
+            assumptions=assumption_payload,
+            interpretation={
+                "kind": (
+                    "typed_quantity"
+                    if typed_ast.get("node") == "quantity"
+                    else "typed_symbolic_expression"
+                ),
+                "typed_ast": typed_ast,
+                "expression": expression,
+                "solver_route": "sympy",
+                **({"input_format": parsed_input.input_format} if parsed_input.input_format != "native" else {}),
+            },
+            classification=classifier,
+        )
     parse_timing = preparation_timing + float(parsed.get("parse_timing_seconds", 0.0))
 
     if not compute:
