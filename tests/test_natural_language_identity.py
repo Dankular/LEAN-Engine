@@ -182,6 +182,8 @@ class NaturalLanguageIdentityTests(unittest.TestCase):
         self.assertEqual(formal["status"], "unsupported")
         self.assertFalse(formal["verified"])
         self.assertEqual(formal["claim_status"], "not_established")
+        self.assertIn("not established", queryresult["qualification"])
+        self.assertIn("without a Lean proof", queryresult["qualification"])
         result = next(pod for pod in queryresult["pods"] if pod["id"] == "Result")
         self.assertEqual(result["claim_status"], "not_established")
 

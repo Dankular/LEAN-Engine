@@ -913,6 +913,15 @@ def execute_query(
         }
         if (
             symbolic_request.operation == "identity"
+            and formal_verification.get("claim_status") == "not_established"
+            and formal_verification["status"] != "checked"
+        ):
+            qualification = (
+                "The requested identity is not established. The displayed difference is a "
+                "symbolic result without a Lean proof or validated rational counterexample."
+            )
+        elif (
+            symbolic_request.operation == "identity"
             and formal_verification.get("claim_status") == "refuted"
             and isinstance(formal_verification.get("counterexample"), dict)
         ):
