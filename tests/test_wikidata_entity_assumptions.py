@@ -58,7 +58,7 @@ class WikidataEntityAssumptionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         registry = response.json()
-        self.assertEqual(registry["registry_version"], "2.8.0")
+        self.assertEqual(registry["registry_version"], "2.9.0")
         entity_scheme = next(
             item for item in registry["dynamic_assumptions"]
             if item["type"] == "WikidataEntity"

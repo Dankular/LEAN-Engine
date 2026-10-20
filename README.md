@@ -125,7 +125,13 @@ For a standalone symbolic expression, `FormulaVariable` can substitute a caller-
 GET /v2/query?input=x%5E2%2B2%2Ax%2B1&assumption=formula%3Avariable%3Ax%3D3&verify=true&output=json
 ```
 
-The result is checked by Lean when supported. This initial value-substitution slice accepts bounded mathematical expressions; named formula catalogs, unit-bearing values, and fixed-choice menus remain unsupported. English-to-formula correspondence is still unverified.
+Dimensionless results are checked by Lean when supported. Values can be bounded, variable-free math expressions or quantities using the curated physical-unit vocabulary. Compound units such as meters per second are dimension-checked before solver routing; unit-bearing results are currently outside the Lean proof fragment:
+
+```text
+GET /v2/query?input=x&assumption=formula:variable:x=6.5%20m%2Fs&verify=true&output=json
+```
+
+Named formula catalogs and fixed-choice menus remain unsupported. English-to-formula correspondence is still unverified.
 
 The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.
 

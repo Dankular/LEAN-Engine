@@ -28,7 +28,7 @@ class OperationVariableAssumptionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         registry = response.json()
-        self.assertEqual(registry["registry_version"], "2.8.0")
+        self.assertEqual(registry["registry_version"], "2.9.0")
         scheme = next(
             item for item in registry["dynamic_assumptions"]
             if item["type"] == "OperationVariable"
@@ -43,6 +43,7 @@ class OperationVariableAssumptionTests(unittest.TestCase):
             formula_variable_scheme["id_pattern"],
             "formula:variable:{identifier}={value}",
         )
+        self.assertEqual(formula_variable_scheme["entry_version"], 2)
 
         capabilities = self.client.get("/v1/capabilities", headers=self.headers)
         self.assertEqual(capabilities.status_code, 200, capabilities.text)
@@ -149,6 +150,139 @@ class OperationVariableAssumptionTests(unittest.TestCase):
         self.assertIn(
             "must not contain free variables",
             nonconstant_value.json()["queryresult"]["error_detail"]["msg"],
+        )
+
+    def test_formula_variable_accepts_compound_unit_values_and_reports_proof_limit(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x+x",
+                "assumption": "formula:variable:x=6.5 m/s",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["queryresult"]
+        self.assertTrue(result["success"], result)
+        input_pod = next(item for item in result["pods"] if item["id"] == "Input")
+        result_pod = next(item for item in result["pods"] if item["id"] == "Result")
+        self.assertEqual(
+            input_pod["subpods"][0]["plaintext"],
+            "(6.5 m/s)+(6.5 m/s)",
+        )
+        self.assertEqual(result_pod["subpods"][0]["plaintext"], "13*meters/seconds")
+        assumption = next(
+            item for item in result["assumptions"]
+            if item["type"] == "FormulaVariable"
+        )
+        self.assertEqual(
+            assumption["selected"],
+            "formula:variable:x=6.5 m/s",
+        )
+        self.assertEqual(
+            assumption["values"][0]["normalized_value"],
+            "(6.5)*(unit_meter/unit_second)",
+        )
+        verification = result["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "unsupported", verification)
+        self.assertFalse(verification["verified"])
+        self.assertIn("bounded rational polynomial", verification["reason"])
+
+    def test_formula_variable_unit_values_are_dimension_checked(self) -> None:
+        incompatible = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x+1",
+                "assumption": "formula:variable:x=6.5 m/s",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(incompatible.status_code, 200, incompatible.text)
+        result = incompatible.json()["queryresult"]
+        self.assertFalse(result["success"], result)
+        self.assertIn(
+            "incompatible physical dimensions",
+            result["tips"][0]["text"],
+        )
+
+    def test_formula_variable_rejects_unknown_unit_aliases(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x",
+                "assumption": "formula:variable:x=6.5 f/s",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn(
+            "not a supported expression",
+            response.json()["queryresult"]["error_detail"]["msg"],
+        )
+
+    def test_physical_unit_symbols_are_not_offered_as_formula_variables(self) -> None:
+        response = self.client.get(
+            "/v2/query",
+            params={"input": "x*10 meters", "output": "json"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["queryresult"]
+        self.assertTrue(result["success"], result)
+        formula_variables = [
+            item for item in result["assumptions"]
+            if item["type"] == "FormulaVariable"
+        ]
+        self.assertEqual(len(formula_variables), 1)
+        self.assertEqual(
+            formula_variables[0]["value_input_pattern"],
+            "formula:variable:x=<value>",
+        )
+
+    def test_validatequery_accepts_unit_formula_variable_values(self) -> None:
+        response = self.client.get(
+            "/v2/validatequery",
+            params={
+                "input": "x^2",
+                "assumption": "formula:variable:x=6.5 m/s",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["validatequeryresult"]
+        self.assertTrue(result["success"], result)
+        self.assertEqual(
+            result["interpretation"]["formula_variable_assignments"]["x"],
+            "(6.5)*(unit_meter/unit_second)",
+        )
+
+    def test_validatequery_accepts_exact_fraction_unit_magnitudes(self) -> None:
+        response = self.client.get(
+            "/v2/validatequery",
+            params={
+                "input": "x^2",
+                "assumption": "formula:variable:x=1/2 m/s",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["validatequeryresult"]
+        self.assertTrue(result["success"], result)
+        self.assertEqual(
+            result["interpretation"]["formula_variable_assignments"]["x"],
+            "(1/2)*(unit_meter/unit_second)",
         )
 
     def test_ambiguous_natural_language_operation_returns_variable_candidates(self) -> None:

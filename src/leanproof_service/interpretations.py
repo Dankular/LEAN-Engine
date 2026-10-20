@@ -50,6 +50,10 @@ _PHYSICAL_UNIT_IN_EXPRESSION = re.compile(
     rf"(?P<symbol>unit_(?:{_PHYSICAL_UNIT_NAMES}))(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_NAMED_UNIT_SYMBOL_IN_EXPRESSION = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<symbol>unit_(?P<name>{_PHYSICAL_UNIT_NAMES}))(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _NUMERIC_DATE = re.compile(
     r"^\s*(?P<first>\d{1,2})\s*/\s*(?P<second>\d{1,2})\s*/\s*(?P<year>\d{4})\s*$"
 )
@@ -2360,7 +2364,14 @@ def _compound_interpretation(
     log_matches = list(_LOG_IN_EXPRESSION.finditer(query))
     unit_matches = list(_UNIT_M_IN_EXPRESSION.finditer(query))
     physical_unit_matches = list(_PHYSICAL_UNIT_IN_EXPRESSION.finditer(query))
-    if not trig_matches and not log_matches and not unit_matches and not physical_unit_matches:
+    named_unit_matches = list(_NAMED_UNIT_SYMBOL_IN_EXPRESSION.finditer(query))
+    if (
+        not trig_matches
+        and not log_matches
+        and not unit_matches
+        and not physical_unit_matches
+        and not named_unit_matches
+    ):
         return None
 
     candidates_by_type = {
@@ -2389,6 +2400,10 @@ def _compound_interpretation(
             "wolfram_unit": PHYSICAL_UNITS[unit_name].wolfram_name,
             "selection_source": "explicit_input",
         })
+
+    for match in named_unit_matches:
+        unit_name = match.group("name").casefold()
+        unit_bindings[match.group("symbol")] = unit_name
 
     for match in trig_matches:
         function = match.group("function").lower()

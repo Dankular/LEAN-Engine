@@ -249,10 +249,11 @@ possible operation variables. The service returns stable
 solver until the caller selects one. It validates the selection against the expression
 symbols and preserves the selected record in the result. This is distinct from Wolfram's
 `FormulaVariable`, which supplies a value for a variable in a formula. The service's
-initial `FormulaVariable` slice accepts caller-supplied, bounded, variable-free math
-expressions for free symbols in standalone symbolic inputs; values are validated before
-substitution, and supported results can be checked by Lean. Named formula catalogs,
-unit-bearing values, and fixed-choice menus remain parity gaps.
+`FormulaVariable` slice accepts caller-supplied, bounded, variable-free math expressions
+or quantities in standalone symbolic inputs. Curated explicit units and compound unit
+expressions such as `6.5 m/s` are normalized and dimension-checked before solver routing.
+Dimensionless substituted results can be Lean-checked; unit-bearing results remain outside
+the current Lean proof fragment. Named formula catalogs and fixed-choice menus remain parity gaps.
 
 ## Recommended implementation order
 

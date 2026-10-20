@@ -57,7 +57,12 @@ from .natural_language_query import (
     plan_natural_language_operation,
 )
 from .query_language_model import generate_query_candidate
-from .physical_units import SUPPORTED_WOLFRAM_UNIT_NAMES
+from .physical_units import (
+    PHYSICAL_UNITS,
+    SUPPORTED_WOLFRAM_UNIT_NAMES,
+    UNIT_ALIASES_BY_LENGTH,
+    UNIT_ALIAS_TO_NAME,
+)
 from .symbolic import SymbolicRequest, run_symbolic
 from .weather_svg import forecast_chart_image, forecast_plaintext
 
@@ -71,6 +76,21 @@ _XML_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 _DECIMAL_APPROXIMATION_PRECISIONS = (50, 100, 200, 400, 500)
 _DECIMAL_MORE_STATE = "DecimalApproximation__More digits"
 _DECIMAL_FEWER_STATE = "DecimalApproximation__Fewer digits"
+_FORMULA_VARIABLE_NUMBER = (
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:/[+-]?(?:\d+(?:\.\d*)?|\.\d+))?"
+)
+_FORMULA_VARIABLE_UNIT_ALIASES = "|".join(
+    re.escape(alias) for alias in UNIT_ALIASES_BY_LENGTH
+)
+_FORMULA_VARIABLE_EXPLICIT_UNIT = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<number>{_FORMULA_VARIABLE_NUMBER})\s*"
+    rf"(?:\*\s*)?(?P<unit>{_FORMULA_VARIABLE_UNIT_ALIASES})(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_FORMULA_VARIABLE_UNIT_SYMBOL = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<symbol>unit_(?P<name>[A-Za-z][A-Za-z0-9_]*))(?![A-Za-z0-9_])"
+)
 
 
 class _FormatStageBudget:
@@ -720,7 +740,10 @@ def execute_query(
             "podstate is only available when the query has a non-integer numeric result"
         )
 
-    result_text = str(symbolic.get("result", ""))
+    result_text = _display_physical_unit_symbols(
+        str(symbolic.get("result", "")),
+        typed_ast.get("unit_bindings"),
+    )
     formal_verification = None
     if verify:
         proof_started = perf_counter()
@@ -1878,6 +1901,7 @@ def _split_formula_variable_values(
 def _formula_variable_value_assumption(
     variable: str,
     value: str | None,
+    normalized_value: str | None = None,
 ) -> dict[str, Any]:
     registry = assumption_registry()
     scheme = next(
@@ -1897,26 +1921,156 @@ def _formula_variable_value_assumption(
         "selected": selected_id,
         "selection_source": "caller_override" if selected_id else "awaiting_value",
         "values": (
-            [{"input": selected_id, "desc": value, "valid": True, "variable": variable}]
+            [{
+                "input": selected_id,
+                "desc": value,
+                "valid": True,
+                "variable": variable,
+                **({"normalized_value": normalized_value}
+                   if normalized_value is not None else {}),
+            }]
             if selected_id is not None
             else []
         ),
         "value_input_pattern": f"formula:variable:{variable}=<value>",
         "registry_version": registry["registry_version"],
         "entry_version": scheme["entry_version"],
-        "candidate_validation": "free_symbol_and_bounded_expression_validation_before_substitution",
+        "candidate_validation": (
+            "free_symbol_bounded_expression_and_unit_dimension_validation_before_solver_routing"
+        ),
     }
+
+
+def _normalize_formula_variable_unit_value(value: str) -> str | None:
+    """Normalize a scalar quantity such as `6.5 m/s` to named unit symbols."""
+    match = re.fullmatch(
+        rf"\s*(?P<magnitude>{_FORMULA_VARIABLE_NUMBER})\s*(?P<units>.+?)\s*",
+        value,
+    )
+    if match is None:
+        return None
+
+    units = re.sub(r"\s+", "", match.group("units"))
+    if not units:
+        return None
+    # Single-letter symbols are accepted only as part of a compound unit. A
+    # standalone `m` remains ambiguous in the service's ordinary math grammar.
+    compound_unit = "/" in units or "*" in units
+    aliases = dict(UNIT_ALIAS_TO_NAME)
+    if compound_unit:
+        aliases.update({"m": "meter", "s": "second", "g": "gram"})
+
+    factor_pattern = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9]*)(?:\^(?P<power>[+-]?\d+))?")
+    factors = re.split(r"([*/])", units)
+    if not factors or len(factors) % 2 == 0:
+        return None
+
+    normalized_factors: list[str] = []
+    bindings: set[str] = set()
+    for index, factor in enumerate(factors):
+        if index % 2:
+            if factor not in {"*", "/"}:
+                return None
+            normalized_factors.append(factor)
+            continue
+        factor_match = factor_pattern.fullmatch(factor)
+        if factor_match is None:
+            return None
+        alias = factor_match.group("name").casefold()
+        unit_name = aliases.get(alias)
+        if unit_name is None or unit_name not in PHYSICAL_UNITS:
+            return None
+        exponent = int(factor_match.group("power") or "1")
+        if abs(exponent) > 8:
+            raise AssumptionSelectionError(
+                "FormulaVariable unit exponents must be between -8 and 8"
+            )
+        unit_symbol = f"unit_{unit_name}"
+        if exponent == 0:
+            normalized_factors.append("1")
+        else:
+            bindings.add(unit_name)
+            normalized_factors.append(
+                unit_symbol if exponent == 1 else f"{unit_symbol}**{exponent}"
+            )
+
+    normalized_unit = "".join(normalized_factors)
+    if not compound_unit and len(bindings) == 1:
+        # Do not turn a lone `m` into meters without an explicit unit name.
+        only_alias = factor_pattern.fullmatch(units)
+        if only_alias and only_alias.group("name").casefold() in {"m", "s", "g"}:
+            return None
+    return f"({match.group('magnitude')})*({normalized_unit})"
+
+
+def _normalize_formula_variable_unit_literals(expression: str) -> str:
+    return _FORMULA_VARIABLE_EXPLICIT_UNIT.sub(
+        lambda match: (
+            f"{match.group('number')}*unit_"
+            f"{UNIT_ALIAS_TO_NAME[match.group('unit').casefold()]}"
+        ),
+        expression,
+    )
+
+
+def _formula_unit_bindings(expression: str) -> dict[str, str]:
+    return {
+        match.group("symbol"): match.group("name")
+        for match in _FORMULA_VARIABLE_UNIT_SYMBOL.finditer(expression)
+        if match.group("name") in PHYSICAL_UNITS
+    }
+
+
+def _display_formula_variable_expression(
+    expression: str,
+    submitted_values: dict[str, str],
+) -> str:
+    displayed = expression
+    for variable, value in submitted_values.items():
+        displayed = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(variable)}(?![A-Za-z0-9_])",
+            lambda _match, selected=value: f"({selected})",
+            displayed,
+        )
+    return displayed
+
+
+def _display_physical_unit_symbols(value: str, unit_bindings: object) -> str:
+    if not isinstance(unit_bindings, dict):
+        return value
+    displayed = value
+    for unit_type in set(unit_bindings.values()):
+        if not isinstance(unit_type, str) or unit_type not in PHYSICAL_UNITS:
+            continue
+        unit = PHYSICAL_UNITS[unit_type]
+        displayed = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(unit.sympy_name)}(?![A-Za-z0-9_])",
+            unit.display,
+            displayed,
+        )
+    return displayed
 
 
 def _apply_formula_variable_values(
     expression: str,
     assignments: dict[str, str],
-) -> tuple[str, tuple[str, ...], dict[str, str]]:
+    *,
+    parse_timeout_seconds: float = 5.0,
+    deadline: float | None = None,
+) -> tuple[str, tuple[str, ...], dict[str, str], dict[str, str]]:
+    validation_started = perf_counter()
     try:
-        parsed_expression = parse_math_input(expression)
+        parsed_expression = parse_math_input(
+            _normalize_formula_variable_unit_literals(expression)
+        )
     except MathInputError as exc:
         raise InterpretationError(str(exc)) from exc
-    variables = tuple(free_symbols(parsed_expression.expression))
+    expression_units = _formula_unit_bindings(parsed_expression.expression)
+    variables = tuple(
+        symbol
+        for symbol in free_symbols(parsed_expression.expression)
+        if symbol not in expression_units
+    )
     unknown_variables = sorted(set(assignments) - set(variables))
     if unknown_variables:
         raise AssumptionSelectionError(
@@ -1925,11 +2079,21 @@ def _apply_formula_variable_values(
         )
 
     normalized_values: dict[str, str] = {}
+    submitted_values: dict[str, str] = {}
     replacement_nodes: dict[str, ast.expr] = {}
     for variable, value in assignments.items():
         try:
-            parsed_value = parse_math_input(value)
-            if free_symbols(parsed_value.expression):
+            normalized_value = _normalize_formula_variable_unit_value(value)
+            if normalized_value is None:
+                normalized_value = _normalize_formula_variable_unit_literals(value)
+            parsed_value = parse_math_input(normalized_value)
+            value_units = _formula_unit_bindings(parsed_value.expression)
+            unresolved_symbols = [
+                symbol
+                for symbol in free_symbols(parsed_value.expression)
+                if symbol not in value_units
+            ]
+            if unresolved_symbols:
                 raise AssumptionSelectionError(
                     f"FormulaVariable value for {variable} must not contain free variables"
                 )
@@ -1944,7 +2108,38 @@ def _apply_formula_variable_values(
             raise AssumptionSelectionError(
                 f"FormulaVariable value for {variable} is not a supported expression"
             ) from exc
+        if value_units:
+            remaining_parse_seconds = parse_timeout_seconds - (
+                perf_counter() - validation_started
+            )
+            if deadline is not None:
+                remaining_parse_seconds = min(
+                    remaining_parse_seconds,
+                    deadline - perf_counter(),
+                )
+            if remaining_parse_seconds <= 0.001:
+                raise InterpretationTimeout(perf_counter() - validation_started)
+            try:
+                value_interpretation = query_with_interpretations(
+                    parsed_value.expression,
+                    [],
+                    compute=False,
+                    time_limit_seconds=remaining_parse_seconds,
+                    parse_timeout_seconds=remaining_parse_seconds,
+                    deadline=deadline,
+                )
+            except InterpretationTimeout:
+                raise
+            except InterpretationError as exc:
+                raise AssumptionSelectionError(
+                    f"FormulaVariable value for {variable} has invalid physical units: {exc}"
+                ) from exc
+            if value_interpretation.get("outcome") != "validated":
+                raise AssumptionSelectionError(
+                    f"FormulaVariable value for {variable} could not be validated"
+                )
         normalized_values[variable] = parsed_value.expression
+        submitted_values[variable] = value
 
     class _SubstituteVariables(ast.NodeTransformer):
         def visit_Name(self, node: ast.Name) -> ast.expr:
@@ -1957,7 +2152,7 @@ def _apply_formula_variable_values(
         raise InterpretationError("input could not be parsed as a mathematical expression") from exc
     substituted = _SubstituteVariables().visit(tree)
     ast.fix_missing_locations(substituted)
-    return ast.unparse(substituted.body), variables, normalized_values
+    return ast.unparse(substituted.body), variables, normalized_values, submitted_values
 
 
 def _split_operation_variable_selection(
@@ -3435,12 +3630,23 @@ def _prepare_query(
         formula_variable_symbols: tuple[str, ...] = ()
         normalized_formula_values: dict[str, str] = {}
         standalone_expression = natural_language_plan is None
+        submitted_formula_values: dict[str, str] = {}
         if standalone_expression and formula_variable_values:
+            formula_values_started = perf_counter()
             (
                 interpretation_input,
                 formula_variable_symbols,
                 normalized_formula_values,
-            ) = _apply_formula_variable_values(input_text, formula_variable_values)
+                submitted_formula_values,
+            ) = _apply_formula_variable_values(
+                input_text,
+                formula_variable_values,
+                parse_timeout_seconds=parse_timeout_seconds,
+                deadline=deadline,
+            )
+            parse_timeout_seconds -= perf_counter() - formula_values_started
+            if parse_timeout_seconds <= 0.001:
+                raise InterpretationTimeout(perf_counter() - formula_values_started)
         is_natural_language_coordinate = (
             natural_language_plan is not None
             and natural_language_plan.operation in {
@@ -3500,9 +3706,24 @@ def _prepare_query(
                 interpreted["interpretation"]["formula_variable_assignments"] = (
                     normalized_formula_values
                 )
+                if any(
+                    _formula_unit_bindings(value)
+                    for value in normalized_formula_values.values()
+                ):
+                    typed_ast = interpreted["interpretation"].get("typed_ast", {})
+                    typed_ast["display_expression"] = _display_formula_variable_expression(
+                        input_text,
+                        submitted_formula_values,
+                    )
             elif interpreted.get("interpretation", {}).get("kind") == "typed_symbolic_expression":
+                interpreted_expression = str(
+                    interpreted["interpretation"].get("expression", "")
+                )
+                interpreted_unit_symbols = _formula_unit_bindings(interpreted_expression)
                 formula_variable_symbols = tuple(
-                    free_symbols(str(interpreted["interpretation"].get("expression", "")))
+                    symbol
+                    for symbol in free_symbols(interpreted_expression)
+                    if symbol not in interpreted_unit_symbols
                 )
             if formula_variable_symbols:
                 interpreted["assumptions"] = [
@@ -3510,6 +3731,7 @@ def _prepare_query(
                     *[
                         _formula_variable_value_assumption(
                             variable,
+                            submitted_formula_values.get(variable),
                             normalized_formula_values.get(variable),
                         )
                         for variable in formula_variable_symbols
