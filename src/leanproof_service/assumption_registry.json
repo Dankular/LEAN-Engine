@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.7.0",
+  "registry_version": "2.8.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -266,13 +266,22 @@
       "scope": "Wikidata property lookups"
     },
     {
-      "type": "FormulaVariable",
-      "id_pattern": "formula:variable:{identifier}",
-      "description": "Select the differentiation, integration, solution, limit, series, summation, product, or plot variable from the symbols in a natural-language formula.",
+      "type": "OperationVariable",
+      "id_pattern": "operation:variable:{identifier}",
+      "description": "Select the differentiation, integration, solution, limit, series, summation, product, or plot variable in a natural-language symbolic operation.",
       "entry_version": 1,
       "selection_policy": "caller_override_only",
-      "scope": "ambiguous natural-language symbolic operations",
+      "scope": "ambiguous natural-language symbolic operations; this is separate from Wolfram's FormulaVariable value-substitution assumption",
       "value_pattern": "^[A-Za-z][A-Za-z0-9_]{0,31}$"
+    },
+    {
+      "type": "FormulaVariable",
+      "id_pattern": "formula:variable:{identifier}={value}",
+      "description": "Supply a bounded, variable-free mathematical expression as the value of a free variable in a submitted symbolic expression.",
+      "entry_version": 1,
+      "selection_policy": "caller_override_only",
+      "scope": "free variables in standalone symbolic expressions; this initial slice has no named formula database",
+      "value_pattern": "bounded mathematical expression with no free variables"
     }
   ]
 }

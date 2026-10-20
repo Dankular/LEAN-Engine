@@ -495,7 +495,7 @@ def _choose_variable(
     operation: str,
     variable_assumption: str | None = None,
 ) -> tuple[str, str, tuple[str, ...]]:
-    variables = tuple(_free_symbols(expression))
+    variables = tuple(free_symbols(expression))
     if variable:
         if variable_assumption is not None and variable_assumption != variable:
             raise NaturalLanguageClarification(
@@ -504,7 +504,7 @@ def _choose_variable(
             )
         if variable_assumption is not None and variable_assumption not in variables:
             raise NaturalLanguageClarification(
-                f"formula:variable:{variable_assumption} is not a variable candidate "
+                f"operation:variable:{variable_assumption} is not a variable candidate "
                 f"for this {operation} request."
             )
         return (
@@ -515,7 +515,7 @@ def _choose_variable(
     if variable_assumption is not None:
         if variable_assumption not in variables:
             raise NaturalLanguageClarification(
-                f"formula:variable:{variable_assumption} is not a variable candidate "
+                f"operation:variable:{variable_assumption} is not a variable candidate "
                 f"for this {operation} request."
             )
         if len(variables) > 32:
@@ -542,7 +542,7 @@ def _choose_variable(
     )
 
 
-def _free_symbols(expression: str) -> list[str]:
+def free_symbols(expression: str) -> list[str]:
     try:
         normalized = parse_math_input(expression).expression
         tree = ast.parse(normalized, mode="eval")

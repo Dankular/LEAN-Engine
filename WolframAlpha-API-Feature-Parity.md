@@ -242,13 +242,17 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 The version 2.6.0 registry adds the dynamic `WikidataEntity` scheme. Property queries return the current ranked entities as `entity:wikidata:Q…` options. A caller can select one by repeating `assumption`; the service accepts it only if that QID is in the current candidate set, then returns that entity's property statements. Without an override, every ranked match remains in the response. `/v2/validatequery` validates the ID shape and defers candidate membership to `/v2/query` execution.
 
-Registry version 2.7.0 adds the dynamic `FormulaVariable` family for natural-language
-symbolic operations whose parsed expression contains multiple candidate variables. The
-service returns stable `formula:variable:<identifier>` choices and does not route an
-ambiguous request to a solver until the caller selects one. It validates the selection
-against the expression symbols and preserves the selected record in the result. This
-initial slice covers the deterministic natural-language operation templates; it does
-not infer the English-to-formula correspondence.
+Registry version 2.8.0 includes the service-specific dynamic `OperationVariable` family
+for natural-language symbolic operations whose parsed expression contains multiple
+possible operation variables. The service returns stable
+`operation:variable:<identifier>` choices and does not route an ambiguous request to a
+solver until the caller selects one. It validates the selection against the expression
+symbols and preserves the selected record in the result. This is distinct from Wolfram's
+`FormulaVariable`, which supplies a value for a variable in a formula. The service's
+initial `FormulaVariable` slice accepts caller-supplied, bounded, variable-free math
+expressions for free symbols in standalone symbolic inputs; values are validated before
+substitution, and supported results can be checked by Lean. Named formula catalogs,
+unit-bearing values, and fixed-choice menus remain parity gaps.
 
 ## Recommended implementation order
 

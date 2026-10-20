@@ -295,8 +295,9 @@ def capabilities() -> dict[str, object]:
             "candidate_generator": "deterministic_templates_with_optional_model_fallback",
             "natural_language_query_model": query_interpreter_configuration(),
             "model_candidate_validation": "strict typed operation schema followed by the bounded symbolic parser; model proposals cannot set assumption IDs",
+            "formula_variable_values": "caller-supplied bounded variable-free math expressions substitute free symbols in standalone expressions; named formula databases, unit-bearing values, and fixed-choice menus are not yet supported",
             "classifier": "deterministic_lexical_baseline; optional Decima ranking via ASSUMPTION_CLASSIFIER=decima",
-            "validator": "typed registry ID and explicit-unit compatibility checks",
+            "validator": "typed registry IDs, current-expression symbol membership, bounded variable-free FormulaVariable values, and explicit-unit compatibility checks",
             "classifier_selects_assumptions": False,
         },
         "factual_sources": {

@@ -111,13 +111,21 @@ GET /v2/query?input=population%20of%20Springfield&assumption=entity%3Awikidata%3
 The selected QID must be in the current candidate set. Without a selection, the response keeps all matches and leaves `WikidataEntity.selected` unset. `/v2/validatequery` checks the selector format and defers candidate membership validation until query execution. The dynamic assumption scheme and entry version are available from `/v2/assumptions`.
 When a selected interpretation fails that check, `/v2/query` and `/v2/validatequery` retain the selected assumption IDs and typed interpretation with the rejection reason.
 
-Natural-language operations also expose a `FormulaVariable` assumption when an expression has more than one possible variable. For example, `differentiate x*y` returns `formula:variable:x` and `formula:variable:y` without running the solver. Select one explicitly:
+Natural-language operations expose a service-specific `OperationVariable` assumption when an expression has more than one possible operation variable. For example, `differentiate x*y` returns `operation:variable:x` and `operation:variable:y` without running the solver. Select one explicitly:
 
 ```text
-GET /v2/query?input=differentiate%20x%2Ay&assumption=formula%3Avariable%3Ay&verify=true&output=json
+GET /v2/query?input=differentiate%20x%2Ay&assumption=operation%3Avariable%3Ay&verify=true&output=json
 ```
 
-The service checks the selected variable against the expression symbols before routing the operation. Lean verifies the resulting formula when supported; it does not verify that the English request was formalized as intended.
+The service checks the selected variable against the expression symbols before routing the operation. This is separate from Wolfram's `FormulaVariable`, which supplies a value for a formula variable.
+
+For a standalone symbolic expression, `FormulaVariable` can substitute a caller-provided, variable-free math expression. For example, to evaluate `x^2+2*x+1` at `x=3`:
+
+```text
+GET /v2/query?input=x%5E2%2B2%2Ax%2B1&assumption=formula%3Avariable%3Ax%3D3&verify=true&output=json
+```
+
+The result is checked by Lean when supported. This initial value-substitution slice accepts bounded mathematical expressions; named formula catalogs, unit-bearing values, and fixed-choice menus remain unsupported. English-to-formula correspondence is still unverified.
 
 The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.
 

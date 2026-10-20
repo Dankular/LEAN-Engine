@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from leanproof_service.api import app
 
 
-class FormulaVariableAssumptionTests(unittest.TestCase):
+class OperationVariableAssumptionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.original_token = os.environ.get("API_BEARER_TOKEN")
@@ -23,24 +23,132 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
         else:
             os.environ["API_BEARER_TOKEN"] = cls.original_token
 
-    def test_registry_publishes_dynamic_formula_variable_selector(self) -> None:
+    def test_registry_publishes_dynamic_operation_variable_selector(self) -> None:
         response = self.client.get("/v2/assumptions", headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
         registry = response.json()
-        self.assertEqual(registry["registry_version"], "2.7.0")
+        self.assertEqual(registry["registry_version"], "2.8.0")
         scheme = next(
+            item for item in registry["dynamic_assumptions"]
+            if item["type"] == "OperationVariable"
+        )
+        self.assertEqual(scheme["id_pattern"], "operation:variable:{identifier}")
+        self.assertEqual(scheme["selection_policy"], "caller_override_only")
+        formula_variable_scheme = next(
             item for item in registry["dynamic_assumptions"]
             if item["type"] == "FormulaVariable"
         )
-        self.assertEqual(scheme["id_pattern"], "formula:variable:{identifier}")
-        self.assertEqual(scheme["selection_policy"], "caller_override_only")
+        self.assertEqual(
+            formula_variable_scheme["id_pattern"],
+            "formula:variable:{identifier}={value}",
+        )
 
         capabilities = self.client.get("/v1/capabilities", headers=self.headers)
         self.assertEqual(capabilities.status_code, 200, capabilities.text)
         self.assertIn(
+            "OperationVariable",
+            capabilities.json()["interpretations"]["assumption_types"],
+        )
+        self.assertIn(
             "FormulaVariable",
             capabilities.json()["interpretations"]["assumption_types"],
+        )
+
+    def test_formula_variable_supplies_value_to_expression_and_lean_checks_result(self) -> None:
+        unassigned = self.client.get(
+            "/v2/query",
+            params={"input": "x+y", "output": "json"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(unassigned.status_code, 200, unassigned.text)
+        unassigned_result = unassigned.json()["queryresult"]
+        variables = [
+            item for item in unassigned_result["assumptions"]
+            if item["type"] == "FormulaVariable"
+        ]
+        self.assertEqual(len(variables), 2)
+        self.assertTrue(all(item["selected"] is None for item in variables))
+        self.assertEqual(
+            {item["value_input_pattern"] for item in variables},
+            {"formula:variable:x=<value>", "formula:variable:y=<value>"},
+        )
+
+        assigned = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x^2+2*x+1",
+                "assumption": "formula:variable:x=3",
+                "verify": "true",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(assigned.status_code, 200, assigned.text)
+        result = assigned.json()["queryresult"]
+        self.assertTrue(result["success"], result)
+        assumption = next(
+            item for item in result["assumptions"]
+            if item["type"] == "FormulaVariable"
+        )
+        self.assertEqual(assumption["selected"], "formula:variable:x=3")
+        self.assertEqual(assumption["selection_source"], "caller_override")
+        verification = result["evidence"]["formal_verification"]
+        self.assertEqual(verification["status"], "checked", verification)
+        self.assertTrue(verification["verified"])
+
+    def test_validatequery_applies_formula_variable_value_without_computing(self) -> None:
+        response = self.client.get(
+            "/v2/validatequery",
+            params={
+                "input": "x^2+1",
+                "assumption": "formula:variable:x=2",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["validatequeryresult"]
+        self.assertTrue(result["success"], result)
+        assumption = next(
+            item for item in result["assumptions"]
+            if item["type"] == "FormulaVariable"
+        )
+        self.assertEqual(assumption["selected"], "formula:variable:x=2")
+        self.assertEqual(
+            result["interpretation"]["formula_variable_assignments"],
+            {"x": "2"},
+        )
+
+    def test_formula_variable_rejects_unknown_symbols_and_free_variable_values(self) -> None:
+        unknown = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x+1",
+                "assumption": "formula:variable:z=2",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(unknown.status_code, 400, unknown.text)
+        self.assertIn("not present", unknown.json()["queryresult"]["error_detail"]["msg"])
+
+        nonconstant_value = self.client.get(
+            "/v2/query",
+            params={
+                "input": "x+1",
+                "assumption": "formula:variable:x=y+1",
+                "output": "json",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(nonconstant_value.status_code, 400, nonconstant_value.text)
+        self.assertIn(
+            "must not contain free variables",
+            nonconstant_value.json()["queryresult"]["error_detail"]["msg"],
         )
 
     def test_ambiguous_natural_language_operation_returns_variable_candidates(self) -> None:
@@ -61,13 +169,13 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
         self.assertEqual(result["pods"], [])
         assumption = next(
             item for item in result["assumptions"]
-            if item["type"] == "FormulaVariable"
+            if item["type"] == "OperationVariable"
         )
         self.assertIsNone(assumption["selected"])
         self.assertEqual(assumption["selection_source"], "needs_clarification")
         self.assertEqual(
             [item["input"] for item in assumption["values"]],
-            ["formula:variable:x", "formula:variable:y"],
+            ["operation:variable:x", "operation:variable:y"],
         )
         self.assertFalse(result["classification"]["selection_authority"])
 
@@ -76,7 +184,7 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
             "/v2/query",
             params={
                 "input": "differentiate x*y",
-                "assumption": "formula:variable:y",
+                "assumption": "operation:variable:y",
                 "verify": "true",
                 "output": "json",
             },
@@ -88,9 +196,9 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
         self.assertTrue(result["success"], result)
         assumption = next(
             item for item in result["assumptions"]
-            if item["type"] == "FormulaVariable"
+            if item["type"] == "OperationVariable"
         )
-        self.assertEqual(assumption["selected"], "formula:variable:y")
+        self.assertEqual(assumption["selected"], "operation:variable:y")
         self.assertEqual(assumption["selection_source"], "caller_override")
         self.assertEqual(
             result["interpretation"]["natural_language_plan"]["variable_source"],
@@ -112,7 +220,7 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
         unresolved_result = unresolved.json()["validatequeryresult"]
         assumption = next(
             item for item in unresolved_result["assumptions"]
-            if item["type"] == "FormulaVariable"
+            if item["type"] == "OperationVariable"
         )
         self.assertIsNone(assumption["selected"])
 
@@ -120,7 +228,7 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
             "/v2/validatequery",
             params={
                 "input": "differentiate x*y",
-                "assumption": "formula:variable:y",
+                "assumption": "operation:variable:y",
                 "output": "json",
             },
             headers=self.headers,
@@ -131,9 +239,9 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
         self.assertTrue(selected_result["success"], selected_result)
         selected_assumption = next(
             item for item in selected_result["assumptions"]
-            if item["type"] == "FormulaVariable"
+            if item["type"] == "OperationVariable"
         )
-        self.assertEqual(selected_assumption["selected"], "formula:variable:y")
+        self.assertEqual(selected_assumption["selected"], "operation:variable:y")
         self.assertEqual(
             selected_result["interpretation"]["natural_language_plan"]["selected_candidate"]["variable"],
             "y",
@@ -144,7 +252,7 @@ class FormulaVariableAssumptionTests(unittest.TestCase):
             "/v2/query",
             params={
                 "input": "differentiate x*y",
-                "assumption": "formula:variable:z",
+                "assumption": "operation:variable:z",
                 "output": "json",
             },
             headers=self.headers,
