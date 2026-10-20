@@ -53,6 +53,7 @@ from .natural_language_query import (
     NaturalLanguageOperation,
     plan_natural_language_operation,
 )
+from .query_language_model import generate_query_candidate
 from .physical_units import SUPPORTED_WOLFRAM_UNIT_NAMES
 from .symbolic import SymbolicRequest, run_symbolic
 from .weather_svg import forecast_chart_image, forecast_plaintext
@@ -3103,10 +3104,29 @@ def _prepare_query(
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     natural_language_plan: NaturalLanguageOperation | None = None
+    model_candidate_elapsed = 0.0
     try:
         operation_request = _parse_operation_call(input_text)
         if operation_request is None:
             natural_language_plan = plan_natural_language_operation(input_text)
+            if natural_language_plan is None:
+                model_timeout = parse_timeout_seconds
+                if deadline is not None:
+                    model_timeout = min(model_timeout, deadline - perf_counter())
+                if model_timeout > 0.001:
+                    model_started = perf_counter()
+                    natural_language_plan = generate_query_candidate(
+                        input_text,
+                        model_timeout,
+                    )
+                    model_candidate_elapsed = perf_counter() - model_started
+            if (
+                natural_language_plan is not None
+                and natural_language_plan.candidate_generator == "language_model"
+            ):
+                if model_candidate_elapsed >= parse_timeout_seconds:
+                    raise InterpretationTimeout(model_candidate_elapsed)
+                parse_timeout_seconds -= model_candidate_elapsed
             if natural_language_plan is not None and natural_language_plan.operation not in {
                 "evaluate",
                 "coordinate_gradient",
@@ -3139,12 +3159,26 @@ def _prepare_query(
                     "operation": "evaluate",
                     "expression": natural_language_plan.expression,
                 },
-                "selection_source": "deterministic_template",
+                "selection_source": (
+                    "model_candidate"
+                    if natural_language_plan.candidate_generator == "language_model"
+                    else "deterministic_template"
+                ),
+                "candidate_generator": natural_language_plan.candidate_generator,
+                "semantic_fidelity": "english_to_formula_correspondence_unverified",
+                **({"model": natural_language_plan.model}
+                   if natural_language_plan.model is not None else {}),
             }
             interpreted["classification"]["query_intent"] = {
                 "operation": "evaluate",
-                "method": "deterministic_template_match",
+                "method": (
+                    "model_generated_candidate"
+                    if natural_language_plan.candidate_generator == "language_model"
+                    else "deterministic_template_match"
+                ),
                 "model_ranked": False,
+                "candidate_generator": natural_language_plan.candidate_generator,
+                "semantic_alignment_verified": False,
             }
             symbolic_request = SymbolicRequest(
                 operation="simplify",
@@ -3373,7 +3407,15 @@ def _prepare_query(
                         "operation": operation,
                         **typed_ast,
                     },
-                    "selection_source": "deterministic_template",
+                    "selection_source": (
+                        "model_candidate"
+                        if natural_language_plan.candidate_generator == "language_model"
+                        else "deterministic_template"
+                    ),
+                    "candidate_generator": natural_language_plan.candidate_generator,
+                    "semantic_fidelity": "english_to_formula_correspondence_unverified",
+                    **({"model": natural_language_plan.model}
+                       if natural_language_plan.model is not None else {}),
                     **({"variable_source": natural_language_plan.variable_source}
                        if natural_language_plan.variable_source else {}),
                 }
@@ -3382,9 +3424,15 @@ def _prepare_query(
         "classification": (
             {
                 "name": operation,
-                "method": "deterministic_template_match",
+                "method": (
+                    "model_generated_candidate"
+                    if natural_language_plan.candidate_generator == "language_model"
+                    else "deterministic_template_match"
+                ),
                 "candidate_count": 1,
                 "model_ranked": False,
+                "candidate_generator": natural_language_plan.candidate_generator,
+                "semantic_alignment_verified": False,
             }
             if natural_language_plan is not None
             else {

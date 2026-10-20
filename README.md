@@ -56,6 +56,17 @@ The Wolfram-compatible CAG route also accepts `FreeformPrompt["France population
 
 The CAG route renders bounded 2D `Graphics` expressions containing circles, disks, rectangles, lines, arrows, polygons, and points as service-hosted SVG image URLs. Arrow paths receive a default endpoint head. It supports a curated color/style set and plot-range sizing. It does not execute arbitrary Wolfram graphics code, and graphics are not Lean proofs.
 
+An optional OpenAI-compatible query model can propose typed symbolic operations when a math request does not match the deterministic templates. Configure it before starting the service:
+
+```powershell
+$env:QUERY_INTERPRETER_BASE_URL = 'http://127.0.0.1:8082/v1'
+$env:QUERY_INTERPRETER_MODEL = 'your-instruct-model'
+# Optional, if the model server requires authentication
+$env:QUERY_INTERPRETER_API_KEY = 'your-key'
+```
+
+The model can propose only an allowlisted operation and formula fields. The bounded parser and symbolic engine validate them before execution, and `verify=true` can ask Lean to check the resulting formula. The response identifies model-generated candidates and states that English-to-formula fidelity is unverified. The model cannot choose assumption IDs or submit arbitrary code. With these settings absent, the deterministic planner remains in use.
+
 - **Proofs and counterexamples:** typed claims and bounded arithmetic formulas, checked with Lean or searched with Z3.
 - **Symbolic computation:** a bounded expression grammar for algebra, calculus, and solving.
 - **Wolfram-compatible route:** a supported subset of `WolframLanguageCompute`, including exact arithmetic, Lean-checked additive and integer-multiple sine/cosine `TrigExpand` through 12x, selected calculus (including exact π-bound integrals of rational-frequency sine and cosine with rational `Pi` phase shifts, including ±Pi/4 bounds with Lean-checked `sqrt(2)` results and ±Pi/8, ±Pi/16, and ±Pi/32 bounds with nested radicals), rational-function limits at rational or bounded real-polynomial points, selected removable singularities with explicit or Lean-verified factorizations of bounded polynomial denominators and conditions for factors that stay nonzero at the point, finite sums/products, real polynomial solving through degree eight for polynomials that factor completely over the rationals, and bounded linear systems.

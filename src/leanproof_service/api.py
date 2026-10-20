@@ -62,6 +62,7 @@ from .natural_language import (
     generator_configuration,
     lean_statement_signature,
 )
+from .query_language_model import query_interpreter_configuration
 from .physical_units import SUPPORTED_UNIT_NAMES, UNIT_ALIAS_TO_NAME
 from .reasoner import analyze
 from .recalculation import (
@@ -288,7 +289,9 @@ def capabilities() -> dict[str, object]:
             "same_type_selection_scope": "a query-wide selection applies to every matching ambiguous call; use per-occurrence selectors to override individual calls",
             "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, unparenthesized Function log call, ambiguous m Unit token, or supported CoordinateSystem calculus call; unspecified occurrences retain the service default",
             "unit_assumption_scope": "single ambiguous m unit in a standalone numeric quantity",
-            "candidate_generator": "deterministic_allowlisted_math_parser",
+            "candidate_generator": "deterministic_templates_with_optional_model_fallback",
+            "natural_language_query_model": query_interpreter_configuration(),
+            "model_candidate_validation": "strict typed operation schema followed by the bounded symbolic parser; model proposals cannot set assumption IDs",
             "classifier": "deterministic_lexical_baseline; optional Decima ranking via ASSUMPTION_CLASSIFIER=decima",
             "validator": "typed registry ID and explicit-unit compatibility checks",
             "classifier_selects_assumptions": False,

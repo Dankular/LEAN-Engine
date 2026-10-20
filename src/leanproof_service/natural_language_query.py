@@ -40,6 +40,8 @@ class NaturalLanguageOperation:
     upper: str | None = None
     point: str | None = None
     order: int | None = None
+    candidate_generator: str = "deterministic_template"
+    model: str | None = None
 
 
 class NaturalLanguageClarification(ValueError):
