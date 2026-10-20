@@ -40,6 +40,7 @@ class NaturalLanguageOperation:
     upper: str | None = None
     point: str | None = None
     order: int | None = None
+    variable_candidates: tuple[str, ...] = ()
     candidate_generator: str = "deterministic_template"
     model: str | None = None
 
@@ -47,8 +48,25 @@ class NaturalLanguageOperation:
 class NaturalLanguageClarification(ValueError):
     """A recognized operation needs an explicit interpretation from the caller."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidate_variables: tuple[str, ...] = (),
+        operation: str | None = None,
+        expression: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.candidate_variables = candidate_variables
+        self.operation = operation
+        self.expression = expression
 
-def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | None:
+
+def plan_natural_language_operation(
+    source: str,
+    *,
+    variable_assumption: str | None = None,
+) -> NaturalLanguageOperation | None:
     """Parse a small, explicit set of English math instructions.
 
     This is a deterministic candidate generator, not a general language model. Every
@@ -166,12 +184,15 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     if derivative:
         expression, variable = _split_variable_clause(derivative.group(1))
         expression = _math_phrase(expression)
-        variable, variable_source = _choose_variable(expression, variable, "differentiate")
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, variable, "differentiate", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="differentiate",
             expression=expression,
             variable=variable,
             variable_source=variable_source,
+            variable_candidates=variable_candidates,
             rule_id="derivative_expression",
         )
 
@@ -184,12 +205,15 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     if integration:
         expression, variable, lower, upper = _split_integral(integration.group(1))
         expression = _math_phrase(expression)
-        variable, variable_source = _choose_variable(expression, variable, "integrate")
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, variable, "integrate", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="integrate",
             expression=expression,
             variable=variable,
             variable_source=variable_source,
+            variable_candidates=variable_candidates,
             lower=_math_phrase(lower) if lower is not None else None,
             upper=_math_phrase(upper) if upper is not None else None,
             rule_id="integral_expression",
@@ -208,12 +232,15 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
         normalized_left = _math_phrase(left)
         normalized_right = _math_phrase(right) if right is not None else "0"
         expression = f"({normalized_left})-({normalized_right})"
-        variable, variable_source = _choose_variable(expression, variable, "solve")
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, variable, "solve", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="solve",
             expression=expression,
             variable=variable,
             variable_source=variable_source,
+            variable_candidates=variable_candidates,
             rule_id="solve_equation",
         )
 
@@ -224,12 +251,17 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
         re.IGNORECASE,
     )
     if limit:
+        expression = _math_phrase(limit.group(1))
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, limit.group(2), "limit", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="limit",
-            expression=_math_phrase(limit.group(1)),
-            variable=limit.group(2),
+            expression=expression,
+            variable=variable,
             point=_math_phrase(limit.group(3)),
-            variable_source="caller_phrase",
+            variable_source=variable_source,
+            variable_candidates=variable_candidates,
             rule_id="limit_approaches_point",
         )
 
@@ -241,11 +273,16 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
         re.IGNORECASE,
     )
     if series:
+        expression = _math_phrase(series.group(1))
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, series.group(2), "series", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="series",
-            expression=_math_phrase(series.group(1)),
-            variable=series.group(2),
-            variable_source="caller_phrase",
+            expression=expression,
+            variable=variable,
+            variable_source=variable_source,
+            variable_candidates=variable_candidates,
             point=_math_phrase(series.group(3)),
             order=int(series.group(4)),
             rule_id="series_at_point",
@@ -261,14 +298,15 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     if aggregation:
         operation = "sum" if aggregation.group(1).lower() in {"sum", "summation"} else "product"
         expression = _math_phrase(aggregation.group(2))
-        variable, variable_source = _choose_variable(
-            expression, aggregation.group(3), operation
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, aggregation.group(3), operation, variable_assumption
         )
         return NaturalLanguageOperation(
             operation=operation,
             expression=expression,
             variable=variable,
             variable_source=variable_source,
+            variable_candidates=variable_candidates,
             lower=_math_phrase(aggregation.group(4)),
             upper=_math_phrase(aggregation.group(5)),
             rule_id=f"{operation}_finite_range",
@@ -283,12 +321,15 @@ def plan_natural_language_operation(source: str) -> NaturalLanguageOperation | N
     )
     if plot:
         expression = _math_phrase(plot.group(1))
-        variable, variable_source = _choose_variable(expression, plot.group(2), "plot")
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, plot.group(2), "plot", variable_assumption
+        )
         return NaturalLanguageOperation(
             operation="plot",
             expression=expression,
             variable=variable,
             variable_source=variable_source,
+            variable_candidates=variable_candidates,
             lower=_math_phrase(plot.group(3)),
             upper=_math_phrase(plot.group(4)),
             rule_id="plot_finite_range",
@@ -452,12 +493,41 @@ def _choose_variable(
     expression: str,
     variable: str | None,
     operation: str,
-) -> tuple[str, str]:
+    variable_assumption: str | None = None,
+) -> tuple[str, str, tuple[str, ...]]:
+    variables = tuple(_free_symbols(expression))
     if variable:
-        return variable, "caller_phrase"
-    variables = _free_symbols(expression)
+        if variable_assumption is not None and variable_assumption != variable:
+            raise NaturalLanguageClarification(
+                f"The request names variable {variable}, which conflicts with the selected "
+                f"formula variable {variable_assumption}."
+            )
+        if variable_assumption is not None and variable_assumption not in variables:
+            raise NaturalLanguageClarification(
+                f"formula:variable:{variable_assumption} is not a variable candidate "
+                f"for this {operation} request."
+            )
+        return (
+            variable,
+            "caller_assumption" if variable_assumption is not None else "caller_phrase",
+            (variable,),
+        )
+    if variable_assumption is not None:
+        if variable_assumption not in variables:
+            raise NaturalLanguageClarification(
+                f"formula:variable:{variable_assumption} is not a variable candidate "
+                f"for this {operation} request."
+            )
+        if len(variables) > 32:
+            return variable_assumption, "caller_assumption", (variable_assumption,)
+        return variable_assumption, "caller_assumption", variables
+    if len(variables) > 32:
+        raise NaturalLanguageClarification(
+            "This natural-language operation has more than 32 possible variables; "
+            "name the variable explicitly."
+        )
     if len(variables) == 1:
-        return variables[0], "unique_symbol_in_expression"
+        return variables[0], "unique_symbol_in_expression", variables
     if not variables:
         raise NaturalLanguageClarification(
             f"Specify the variable for {operation}, for example 'with respect to x'."
@@ -465,7 +535,10 @@ def _choose_variable(
     choices = ", ".join(variables[:8])
     raise NaturalLanguageClarification(
         f"Specify the variable for {operation} (possible variables: {choices}); "
-        "for example, add 'with respect to x'."
+        "for example, add 'with respect to x'.",
+        candidate_variables=variables,
+        operation=operation,
+        expression=expression,
     )
 
 

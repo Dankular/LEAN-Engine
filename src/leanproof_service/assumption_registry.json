@@ -1,5 +1,5 @@
 {
-  "registry_version": "2.6.0",
+  "registry_version": "2.7.0",
   "default_policies": {
     "TimeAMOrPM": "server_local_meridiem"
   },
@@ -264,6 +264,15 @@
       "entry_version": 1,
       "selection_policy": "caller_override_only",
       "scope": "Wikidata property lookups"
+    },
+    {
+      "type": "FormulaVariable",
+      "id_pattern": "formula:variable:{identifier}",
+      "description": "Select the differentiation, integration, solution, limit, series, summation, product, or plot variable from the symbols in a natural-language formula.",
+      "entry_version": 1,
+      "selection_policy": "caller_override_only",
+      "scope": "ambiguous natural-language symbolic operations",
+      "value_pattern": "^[A-Za-z][A-Za-z0-9_]{0,31}$"
     }
   ]
 }

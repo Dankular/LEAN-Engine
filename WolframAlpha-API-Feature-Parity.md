@@ -242,6 +242,14 @@ Keep our IDs stable and service-owned. Store a registry version and typed meanin
 
 The version 2.6.0 registry adds the dynamic `WikidataEntity` scheme. Property queries return the current ranked entities as `entity:wikidata:Q…` options. A caller can select one by repeating `assumption`; the service accepts it only if that QID is in the current candidate set, then returns that entity's property statements. Without an override, every ranked match remains in the response. `/v2/validatequery` validates the ID shape and defers candidate membership to `/v2/query` execution.
 
+Registry version 2.7.0 adds the dynamic `FormulaVariable` family for natural-language
+symbolic operations whose parsed expression contains multiple candidate variables. The
+service returns stable `formula:variable:<identifier>` choices and does not route an
+ambiguous request to a solver until the caller selects one. It validates the selection
+against the expression symbols and preserves the selected record in the result. This
+initial slice covers the deterministic natural-language operation templates; it does
+not infer the English-to-formula correspondence.
+
 ## Recommended implementation order
 
 ### P0 — establish a compatible request and response contract

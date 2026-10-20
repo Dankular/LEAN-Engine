@@ -111,6 +111,14 @@ GET /v2/query?input=population%20of%20Springfield&assumption=entity%3Awikidata%3
 The selected QID must be in the current candidate set. Without a selection, the response keeps all matches and leaves `WikidataEntity.selected` unset. `/v2/validatequery` checks the selector format and defers candidate membership validation until query execution. The dynamic assumption scheme and entry version are available from `/v2/assumptions`.
 When a selected interpretation fails that check, `/v2/query` and `/v2/validatequery` retain the selected assumption IDs and typed interpretation with the rejection reason.
 
+Natural-language operations also expose a `FormulaVariable` assumption when an expression has more than one possible variable. For example, `differentiate x*y` returns `formula:variable:x` and `formula:variable:y` without running the solver. Select one explicitly:
+
+```text
+GET /v2/query?input=differentiate%20x%2Ay&assumption=formula%3Avariable%3Ay&verify=true&output=json
+```
+
+The service checks the selected variable against the expression symbols before routing the operation. Lean verifies the resulting formula when supported; it does not verify that the English request was formalized as intended.
+
 The curated physical-unit vocabulary also works in compound expressions when spelled explicitly, for example `10 m + 5 cm` or `3 kg + 500 g`. These units are dimension-checked before computation; incompatible dimensions are rejected.
 
 Computation routes require the bearer token. `/healthz`, `/readyz`, and `/docs` are public. GeoNames lookups also require `GEONAMES_USERNAME`.

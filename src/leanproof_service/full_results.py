@@ -35,6 +35,7 @@ from .interpretations import (
     AssumptionSelectionError,
     InterpretationError,
     InterpretationTimeout,
+    InterpretationValidationError,
     assumption_registry,
     numeric_date_options,
     query_with_interpretations,
@@ -1846,6 +1847,98 @@ def validate_query(
     }
 
 
+def _split_formula_variable_selection(
+    selections: list[str],
+) -> tuple[list[str], str | None]:
+    remaining: list[str] = []
+    selected_variable: str | None = None
+    for selection in selections:
+        if not selection.startswith("formula:variable:"):
+            remaining.append(selection)
+            continue
+        match = re.fullmatch(r"formula:variable:([A-Za-z][A-Za-z0-9_]{0,31})", selection)
+        if match is None:
+            raise AssumptionSelectionError(
+                "FormulaVariable selections must use the form formula:variable:x"
+            )
+        if selected_variable is not None:
+            raise AssumptionSelectionError(
+                "select only one FormulaVariable alternative per natural-language operation"
+            )
+        selected_variable = match.group(1)
+    return remaining, selected_variable
+
+
+def _formula_variable_assumption(
+    variables: tuple[str, ...],
+    operation: str,
+    *,
+    selected_variable: str | None = None,
+) -> dict[str, Any]:
+    registry = assumption_registry()
+    scheme = next(
+        (
+            item
+            for item in registry.get("dynamic_assumptions", [])
+            if item.get("type") == "FormulaVariable"
+        ),
+        None,
+    )
+    if scheme is None:
+        raise RuntimeError("FormulaVariable dynamic assumption scheme is not registered")
+    if selected_variable is not None and selected_variable not in variables:
+        available = ", ".join(f"formula:variable:{item}" for item in variables)
+        raise AssumptionSelectionError(
+            "FormulaVariable selection is not among the candidates for this query"
+            + (f"; available candidates: {available}" if available else "")
+        )
+    selected_id = (
+        f"formula:variable:{selected_variable}" if selected_variable is not None else None
+    )
+    return {
+        "type": "FormulaVariable",
+        "description": f"Choose the variable for the natural-language {operation} request.",
+        "selected": selected_id,
+        "selection_source": "caller_override" if selected_id else "needs_clarification",
+        "values": [
+            {
+                "input": f"formula:variable:{variable}",
+                "desc": f"Treat {variable} as the {operation} variable.",
+                "variable": variable,
+            }
+            for variable in variables
+        ],
+        "registry_version": registry["registry_version"],
+        "entry_version": scheme["entry_version"],
+        "candidate_validation": "matched_against_expression_symbols_before_solver_routing",
+    }
+
+
+def _formula_variable_ambiguity(
+    exc: NaturalLanguageClarification,
+) -> InterpretationValidationError:
+    assert exc.operation is not None and exc.expression is not None
+    assumption = _formula_variable_assumption(exc.candidate_variables, exc.operation)
+    return InterpretationValidationError(
+        str(exc),
+        assumptions=[assumption],
+        interpretation={
+            "kind": "ambiguous_natural_language_operation",
+            "operation": exc.operation,
+            "expression": exc.expression,
+            "selection_required": True,
+        },
+        classification={
+            "name": "formula_variable_candidates",
+            "method": "deterministic free-variable extraction",
+            "candidate_count": len(exc.candidate_variables),
+            "model_ranked": False,
+            "ranks_candidates_only": True,
+            "selection_authority": False,
+        },
+    )
+
+
 def _provider_request(
     input_text: str,
     location: str | None,
@@ -3105,11 +3198,22 @@ def _prepare_query(
 ) -> tuple[dict[str, Any], SymbolicRequest]:
     natural_language_plan: NaturalLanguageOperation | None = None
     model_candidate_elapsed = 0.0
+    non_variable_assumptions, selected_formula_variable = _split_formula_variable_selection(
+        assumptions
+    )
     try:
         operation_request = _parse_operation_call(input_text)
         if operation_request is None:
-            natural_language_plan = plan_natural_language_operation(input_text)
+            natural_language_plan = plan_natural_language_operation(
+                input_text,
+                variable_assumption=selected_formula_variable,
+            )
             if natural_language_plan is None:
+                if selected_formula_variable is not None:
+                    raise AssumptionSelectionError(
+                        "FormulaVariable selections apply only to supported natural-language "
+                        "symbolic operations"
+                    )
                 model_timeout = parse_timeout_seconds
                 if deadline is not None:
                     model_timeout = min(model_timeout, deadline - perf_counter())
@@ -3124,6 +3228,10 @@ def _prepare_query(
                 natural_language_plan is not None
                 and natural_language_plan.candidate_generator == "language_model"
             ):
+                if selected_formula_variable is not None:
+                    raise AssumptionSelectionError(
+                        "FormulaVariable selections cannot override model-generated candidates"
+                    )
                 if model_candidate_elapsed >= parse_timeout_seconds:
                     raise InterpretationTimeout(model_candidate_elapsed)
                 parse_timeout_seconds -= model_candidate_elapsed
@@ -3136,9 +3244,22 @@ def _prepare_query(
             }:
                 operation_request = _request_from_natural_language_plan(natural_language_plan)
     except NaturalLanguageClarification as exc:
+        if selected_formula_variable is not None:
+            raise AssumptionSelectionError(str(exc)) from exc
+        if exc.candidate_variables:
+            raise _formula_variable_ambiguity(exc) from exc
         raise InterpretationError(str(exc)) from exc
     except ValidationError as exc:
         raise InterpretationError("symbolic operation arguments are invalid") from exc
+    if selected_formula_variable is not None and (
+        natural_language_plan is None
+        or natural_language_plan.variable != selected_formula_variable
+        or natural_language_plan.candidate_generator != "deterministic_template"
+    ):
+        raise AssumptionSelectionError(
+            "FormulaVariable selections apply only to a matching deterministic "
+            "natural-language operation"
+        )
     if operation_request is None:
         if natural_language_plan is not None and natural_language_plan.operation == "evaluate":
             interpreted = query_with_interpretations(
@@ -3200,6 +3321,10 @@ def _prepare_query(
         )
         if is_natural_language_coordinate:
             assert natural_language_plan is not None
+            if selected_formula_variable is not None:
+                raise AssumptionSelectionError(
+                    "FormulaVariable selections do not apply to coordinate-calculus operations"
+                )
             interpretation_input = _coordinate_query_from_natural_language_plan(
                 natural_language_plan
             )
@@ -3225,7 +3350,11 @@ def _prepare_query(
 
         interpreted = query_with_interpretations(
             interpretation_input,
-            interpretation_assumptions,
+            (
+                non_variable_assumptions
+                if selected_formula_variable is not None
+                else interpretation_assumptions
+            ),
             compute=not validate_only,
             numeric_precision=numeric_precision,
             time_limit_seconds=time_limit_seconds,
@@ -3308,7 +3437,16 @@ def _prepare_query(
         return interpreted, symbolic_request
 
     if assumptions:
-        raise AssumptionSelectionError("assumption selection is not applicable to this operation")
+        if non_variable_assumptions or selected_formula_variable is None:
+            raise AssumptionSelectionError("assumption selection is not applicable to this operation")
+        if (
+            natural_language_plan is None
+            or natural_language_plan.candidate_generator != "deterministic_template"
+            or natural_language_plan.variable != selected_formula_variable
+        ):
+            raise AssumptionSelectionError(
+                "FormulaVariable selections apply only to a matching natural-language operation"
+            )
 
     parse_started = perf_counter()
     normalized_fields: dict[str, str] = {}
@@ -3442,6 +3580,14 @@ def _prepare_query(
             }
         ),
     }
+    if selected_formula_variable is not None and natural_language_plan is not None:
+        interpreted["assumptions"] = [
+            _formula_variable_assumption(
+                natural_language_plan.variable_candidates,
+                natural_language_plan.operation,
+                selected_variable=selected_formula_variable,
+            )
+        ]
     return interpreted, operation_request
 
 

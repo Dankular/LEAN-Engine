@@ -284,7 +284,10 @@ def capabilities() -> dict[str, object]:
             "status": "implemented_initial_slice",
             "path": "/v1/interpret",
             "assumption_registry_version": registry["registry_version"],
-            "assumption_types": sorted({item["type"] for item in registry["assumptions"]}),
+            "assumption_types": sorted({
+                *(item["type"] for item in registry["assumptions"]),
+                *(item["type"] for item in registry.get("dynamic_assumptions", [])),
+            }),
             "multiple_compatible_selections": True,
             "same_type_selection_scope": "a query-wide selection applies to every matching ambiguous call; use per-occurrence selectors to override individual calls",
             "per_occurrence_selection": "append @N to an assumption ID to select the one-based Nth ambiguous AngleUnit, LogBase, unparenthesized Function log call, ambiguous m Unit token, or supported CoordinateSystem calculus call; unspecified occurrences retain the service default",
