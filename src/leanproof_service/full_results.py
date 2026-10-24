@@ -50,6 +50,7 @@ from .knowledge import (
     supported_nist_constants,
 )
 from .math_svg import mathml_image
+from .number_theory import NumberTheoryError, evaluate_number_theory
 from .natural_language_query import (
     NaturalLanguageClarification,
     NaturalLanguageOperation,
@@ -435,6 +436,21 @@ def execute_query(
         raise FullResultsRequestError("podstate must contain a supported state input")
     decimal_state_level = _decimal_state_level(requested_pod_states)
     numeric_precision = _DECIMAL_APPROXIMATION_PRECISIONS[decimal_state_level]
+    number_theory_payload = _number_theory_payload(
+        planning_input,
+        input_text,
+        assumptions,
+        formats,
+        started,
+        verify=verify,
+        include_pod_ids=include_pod_ids,
+        exclude_pod_ids=exclude_pod_ids,
+        pod_titles=pod_titles,
+        pod_indexes=pod_indexes,
+        scanners=scanners,
+    )
+    if number_theory_payload is not None:
+        return number_theory_payload
     provider_parse_started = perf_counter()
     try:
         non_entity_selections, entity_selection = _split_entity_assumption_selections(
@@ -3491,6 +3507,92 @@ def _display_wikidata_amount(value: object) -> str | None:
     if number == number.to_integral_value():
         return f"{int(number):,}"
     return format(number.normalize(), "f")
+
+
+def _number_theory_payload(
+    planning_input: str,
+    input_text: str,
+    assumptions: list[str] | None,
+    formats: list[str],
+    started: float,
+    *,
+    verify: bool,
+    include_pod_ids: list[str] | None,
+    exclude_pod_ids: list[str] | None,
+    pod_titles: list[str] | None,
+    pod_indexes: list[str] | None,
+    scanners: list[str] | None,
+) -> dict[str, Any] | None:
+    try:
+        outcome = evaluate_number_theory(planning_input)
+    except NumberTheoryError as exc:
+        return _unrecognized_query(input_text, str(exc), perf_counter() - started)
+    if outcome is None:
+        return None
+    if assumptions:
+        raise AssumptionSelectionError(
+            "assumption selections do not apply to integer number-theory queries"
+        )
+    pods = _initial_pods(
+        input_text, outcome.input_text, outcome.result_text, formats,
+        result_scanner="Integer",
+    )
+    for position, extra in enumerate(outcome.extra_pods, start=1):
+        subpod: dict[str, Any] = {"title": ""}
+        if "plaintext" in formats:
+            subpod["plaintext"] = extra.text
+        if "cell" in formats:
+            subpod["cell"] = _wolfram_cell(extra.text)
+        if "mathml" in formats:
+            subpod["mathml"] = _mathml(extra.text)
+        pods.append({
+            "title": extra.title,
+            "scanner": "Integer",
+            "id": extra.pod_id,
+            "position": 200 + position * 100,
+            "error": False,
+            "numsubpods": 1,
+            "primary": False,
+            "subpods": [subpod],
+        })
+    evidence: dict[str, Any] = {
+        "kind": "number_theory_result",
+        "engine": "sympy",
+        "operation": outcome.operation,
+        "verified": False,
+    }
+    qualification = "Exact integer computation with SymPy; it is not a Lean proof."
+    if verify:
+        evidence["formal_verification"] = {
+            "status": "unsupported",
+            "verified": False,
+            "reason": "Lean verification is not implemented for integer number-theory queries.",
+        }
+        qualification = (
+            "Exact integer computation with SymPy. Lean verification was requested but is "
+            "not implemented for number-theory queries."
+        )
+    payload = _query_envelope(
+        success=True,
+        error=False,
+        pods=_select_pods(
+            pods, include_pod_ids, exclude_pod_ids, pod_titles, pod_indexes, scanners
+        ),
+        elapsed=perf_counter() - started,
+        parse_timing=0.0,
+        datatypes="Mathematical",
+        warnings=_format_warnings(formats, _SUPPORTED_FORMATS),
+        assumptions=[],
+        interpretation={
+            "kind": "number_theory",
+            "operation": outcome.operation,
+            "arguments": [str(value) for value in outcome.arguments],
+        },
+        evidence=evidence,
+        qualification=qualification,
+    )
+    payload["queryresult"]["input"] = input_text
+    return payload
 
 
 def _prepare_query(
