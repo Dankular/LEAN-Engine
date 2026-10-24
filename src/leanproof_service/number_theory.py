@@ -47,6 +47,8 @@ class NumberTheoryResult:
     input_text: str
     result_text: str
     extra_pods: tuple[NumberTheoryPod, ...] = field(default_factory=tuple)
+    kind: str = "number_theory_result"
+    scanner: str = "Integer"
 
 
 def evaluate_number_theory(source: str) -> NumberTheoryResult | None:

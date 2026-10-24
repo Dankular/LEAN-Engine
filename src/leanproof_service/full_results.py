@@ -50,6 +50,7 @@ from .knowledge import (
     supported_nist_constants,
 )
 from .math_svg import mathml_image
+from .matrix_algebra import MatrixAlgebraError, evaluate_matrix_algebra
 from .number_theory import NumberTheoryError, evaluate_number_theory
 from .natural_language_query import (
     NaturalLanguageClarification,
@@ -3524,18 +3525,20 @@ def _number_theory_payload(
     scanners: list[str] | None,
 ) -> dict[str, Any] | None:
     try:
-        outcome = evaluate_number_theory(planning_input)
-    except NumberTheoryError as exc:
+        outcome = evaluate_number_theory(planning_input) or evaluate_matrix_algebra(
+            planning_input
+        )
+    except (NumberTheoryError, MatrixAlgebraError) as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     if outcome is None:
         return None
     if assumptions:
         raise AssumptionSelectionError(
-            "assumption selections do not apply to integer number-theory queries"
+            "assumption selections do not apply to integer number-theory or matrix queries"
         )
     pods = _initial_pods(
         input_text, outcome.input_text, outcome.result_text, formats,
-        result_scanner="Integer",
+        result_scanner=outcome.scanner,
     )
     for position, extra in enumerate(outcome.extra_pods, start=1):
         subpod: dict[str, Any] = {"title": ""}
@@ -3547,7 +3550,7 @@ def _number_theory_payload(
             subpod["mathml"] = _mathml(extra.text)
         pods.append({
             "title": extra.title,
-            "scanner": "Integer",
+            "scanner": outcome.scanner,
             "id": extra.pod_id,
             "position": 200 + position * 100,
             "error": False,
@@ -3556,21 +3559,21 @@ def _number_theory_payload(
             "subpods": [subpod],
         })
     evidence: dict[str, Any] = {
-        "kind": "number_theory_result",
+        "kind": outcome.kind,
         "engine": "sympy",
         "operation": outcome.operation,
         "verified": False,
     }
-    qualification = "Exact integer computation with SymPy; it is not a Lean proof."
+    qualification = "Exact computation with SymPy; it is not a Lean proof."
     if verify:
         evidence["formal_verification"] = {
             "status": "unsupported",
             "verified": False,
-            "reason": "Lean verification is not implemented for integer number-theory queries.",
+            "reason": "Lean verification is not implemented for number-theory or matrix queries.",
         }
         qualification = (
-            "Exact integer computation with SymPy. Lean verification was requested but is "
-            "not implemented for number-theory queries."
+            "Exact computation with SymPy. Lean verification was requested but is "
+            "not implemented for these queries."
         )
     payload = _query_envelope(
         success=True,
@@ -3584,7 +3587,7 @@ def _number_theory_payload(
         warnings=_format_warnings(formats, _SUPPORTED_FORMATS),
         assumptions=[],
         interpretation={
-            "kind": "number_theory",
+            "kind": outcome.kind.removesuffix("_result"),
             "operation": outcome.operation,
             "arguments": [str(value) for value in outcome.arguments],
         },
