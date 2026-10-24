@@ -168,7 +168,7 @@ def capabilities() -> dict[str, object]:
         "symbolic_operations": [
             "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
             "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
-            "coordinate_gradient", "coordinate_curl", "coordinate_laplacian",
+            "coordinate_gradient", "coordinate_curl", "coordinate_laplacian", "apart", "solve_system",
         ],
         "symbolic_coordinate_divergence": {
             "status": "implemented_initial_slice",
@@ -348,7 +348,8 @@ def capabilities() -> dict[str, object]:
                     "status": "bounded_initial_slice",
                     "operations": [
                         "evaluate", "identity proof", "simplify", "factor", "expand", "differentiate",
-                        "integrate", "solve", "limit", "series", "sum", "product", "plot",
+                        "integrate", "solve", "solve polynomial system", "partial fractions", "limit", "series", "sum",
+                        "product", "plot",
                         "coordinate gradient/divergence/curl/Laplacian",
                     ],
                     "parser": "deterministic allowlisted templates; no model ranking",
@@ -474,7 +475,8 @@ def capabilities() -> dict[str, object]:
                     "status": "bounded_initial_slice",
                     "operations": [
                         "evaluate", "identity proof", "simplify", "factor", "expand", "differentiate",
-                        "integrate", "solve", "limit", "series", "sum", "product", "plot",
+                        "integrate", "solve", "solve polynomial system", "partial fractions", "limit", "series", "sum",
+                        "product", "plot",
                     ],
                     "parser": "deterministic phrase templates; no free-form model generation",
                     "validation": "bounded mathematical input parser and SymPy validation",

@@ -18,6 +18,7 @@ _FUNCTIONS = {
     "abs",
     "floor", "ceiling",
 }
+_DEFAULT_SERIES_ORDER = 6
 _CONSTANTS = {"pi", "E", "I", "oo", "e"}
 _NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
@@ -41,6 +42,8 @@ class NaturalLanguageOperation:
     point: str | None = None
     order: int | None = None
     variable_candidates: tuple[str, ...] = ()
+    equations: tuple[str, ...] | None = None
+    variables: tuple[str, ...] = ()
     candidate_generator: str = "deterministic_template"
     model: str | None = None
 
@@ -219,6 +222,37 @@ def plan_natural_language_operation(
             rule_id="integral_expression",
         )
 
+    apart = re.fullmatch(
+        r"(?:(?:please\s+)?(?:find|compute|calculate|give|show)\s+)?(?:the\s+)?"
+        r"(?:partial\s+fractions?(?:\s+(?:decomposition|expansion))?|apart)\s+(?:of\s+)?(.+)",
+        query,
+        re.IGNORECASE,
+    )
+    if apart:
+        body, variable = _split_variable_clause(apart.group(1))
+        expression = _math_phrase(body)
+        variable, variable_source, variable_candidates = _choose_variable(
+            expression, variable, "apart", variable_assumption
+        )
+        return NaturalLanguageOperation(
+            operation="apart",
+            expression=expression,
+            variable=variable,
+            variable_source=variable_source,
+            variable_candidates=variable_candidates,
+            rule_id="partial_fractions",
+        )
+
+    system = re.fullmatch(
+        r"(?:(?:please\s+)?solve|find\s+the\s+solutions\s+of)\s+(?:the\s+system\s+)?(.+)",
+        query,
+        re.IGNORECASE,
+    )
+    if system:
+        planned = _plan_equation_system(system.group(1))
+        if planned is not None:
+            return planned
+
     solve = re.fullmatch(
         r"(?:(?:please\s+)?solve|find\s+the\s+(?:roots|solutions)\s+of|"
         r"what\s+are\s+the\s+(?:roots|solutions)\s+of)\s+(.+)",
@@ -266,9 +300,10 @@ def plan_natural_language_operation(
         )
 
     series = re.fullmatch(
-        rf"(?:(?:find|compute|calculate)\s+)?(?:the\s+)?(?:Taylor\s+)?series\s+"
-        rf"(?:of\s+)?(.+?)\s+(?:around|about|near)\s+({_IDENTIFIER})\s*=\s*(.+?)\s+"
-        rf"(?:to\s+)?order\s+(\d+)",
+        rf"(?:(?:find|compute|calculate|give)\s+)?(?:the\s+)?(?:Taylor\s+|Maclaurin\s+)?"
+        rf"series(?:\s+(?:expansion|representation))?\s+(?:of\s+)?(.+?)"
+        rf"(?:\s+(?:around|about|near|at)\s+(?:({_IDENTIFIER})\s*=\s*)?(.+?))?"
+        rf"(?:\s+(?:to\s+)?order\s+(\d+))?",
         query,
         re.IGNORECASE,
     )
@@ -277,15 +312,16 @@ def plan_natural_language_operation(
         variable, variable_source, variable_candidates = _choose_variable(
             expression, series.group(2), "series", variable_assumption
         )
+        order = int(series.group(4)) if series.group(4) else _DEFAULT_SERIES_ORDER
         return NaturalLanguageOperation(
             operation="series",
             expression=expression,
             variable=variable,
             variable_source=variable_source,
             variable_candidates=variable_candidates,
-            point=_math_phrase(series.group(3)),
-            order=int(series.group(4)),
-            rule_id="series_at_point",
+            point=_math_phrase(series.group(3)) if series.group(3) else "0",
+            order=order,
+            rule_id="series_at_point" if series.group(3) and series.group(4) else "series_defaults",
         )
 
     aggregation = re.fullmatch(
@@ -437,6 +473,72 @@ def _split_coordinate_components(source: str) -> tuple[str, str, str]:
             "'find the divergence of (x, y, z)'."
         )
     return parts[0], parts[1], parts[2]
+
+
+def _split_top_level(source: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and (
+            char in ",;"
+            or re.match(r"\s+and\s+", source[index:], re.IGNORECASE)
+        ):
+            parts.append(source[start:index].strip())
+            if char in ",;":
+                index += 1
+            else:
+                index += re.match(r"\s+and\s+", source[index:], re.IGNORECASE).end()
+            start = index
+            continue
+        index += 1
+    parts.append(source[start:].strip())
+    return parts
+
+
+def _plan_equation_system(body: str) -> NaturalLanguageOperation | None:
+    variable_clause = re.fullmatch(
+        r"(.+?)\s+for\s+((?:" + _IDENTIFIER + r")(?:\s*(?:,|and)\s*(?:" + _IDENTIFIER + r"))+)",
+        body.strip(),
+        re.IGNORECASE,
+    )
+    named: tuple[str, ...] = ()
+    if variable_clause:
+        body = variable_clause.group(1)
+        named = tuple(re.split(r"\s*(?:,|\band\b)\s*", variable_clause.group(2).strip()))
+    parts = [part for part in _split_top_level(body) if part]
+    if len(parts) < 2 or not all(
+        len(re.findall(r"(?<![<>=])=(?!=)", part)) == 1 for part in parts
+    ):
+        return None
+    if len(parts) > 4:
+        raise NaturalLanguageClarification("Systems are limited to four equations.")
+    equations = []
+    for part in parts:
+        left, right = _split_equation(part)
+        equations.append(f"({_math_phrase(left)})-({_math_phrase(right or '0')})")
+    inferred = tuple(sorted({
+        symbol for equation in equations for symbol in free_symbols(equation)
+    }))
+    variables = named or inferred
+    if not 2 <= len(variables) <= 4 or len(set(variables)) != len(variables):
+        raise NaturalLanguageClarification(
+            "Name two to four distinct variables, for example "
+            "'solve x^2+y^2=1, x+y=1 for x, y'."
+        )
+    return NaturalLanguageOperation(
+        operation="solve_system",
+        expression="; ".join(equations),
+        equations=tuple(equations),
+        variables=variables,
+        rule_id="solve_polynomial_system",
+    )
 
 
 def _split_variable_clause(

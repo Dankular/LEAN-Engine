@@ -38,7 +38,7 @@ _MAX_DECIMAL_BITS = 256
 SymbolicOperation = Literal[
     "validate", "simplify", "factor", "expand", "trigexpand", "numeric", "differentiate", "integrate",
     "limit", "series", "sum", "product", "solve", "identity", "plot", "coordinate_divergence",
-    "coordinate_gradient", "coordinate_curl", "coordinate_laplacian",
+    "coordinate_gradient", "coordinate_curl", "coordinate_laplacian", "apart", "solve_system",
 ]
 
 
@@ -56,6 +56,8 @@ class SymbolicRequest(StrictModel):
     assumptions: dict[SymbolName, list[AssumptionName]] = Field(default_factory=dict, max_length=64)
     named_units: dict[SymbolName, UnitName] = Field(default_factory=dict, max_length=16)
     components: list[str] | None = Field(default=None, min_length=3, max_length=3)
+    equations: list[str] | None = Field(default=None, min_length=2, max_length=4)
+    variables: list[SymbolName] | None = Field(default=None, min_length=2, max_length=4)
     coordinate_system: Literal["Cartesian3D", "Cylindrical3D", "Spherical3D"] | None = None
     time_limit_seconds: float = Field(default=5.0, ge=0.001, le=60.0)
     numeric_precision: int = Field(default=50, ge=1, le=500)
@@ -138,6 +140,29 @@ class SymbolicRequest(StrictModel):
                     "coordinate_divergence requires three components and a coordinate system only"
                 )
             return self
+        if self.operation == "solve_system":
+            if (
+                self.equations is None
+                or self.variables is None
+                or len(set(self.variables)) != len(self.variables)
+                or self.components is not None
+                or self.coordinate_system is not None
+                or self.expression is not None
+                or self.lhs is not None
+                or self.rhs is not None
+                or self.variable is not None
+                or self.lower is not None
+                or self.upper is not None
+                or self.point is not None
+                or self.order is not None
+                or self.named_units
+            ):
+                raise ValueError(
+                    "solve_system requires two to four equations and distinct variables only"
+                )
+            return self
+        if self.equations is not None or self.variables is not None:
+            raise ValueError("equations and variables are only used by solve_system")
         if self.components is not None or self.coordinate_system is not None:
             raise ValueError("components and coordinate_system are only used by coordinate_divergence")
         if self.operation == "identity":
@@ -154,7 +179,8 @@ class SymbolicRequest(StrictModel):
             if self.assumptions:
                 raise ValueError("validate does not accept symbolic assumptions")
         variable_operations = {
-            "differentiate", "integrate", "limit", "series", "sum", "product", "solve", "plot"
+            "differentiate", "integrate", "limit", "series", "sum", "product", "solve", "plot",
+            "apart",
         }
         if self.operation in variable_operations and self.variable is None:
             raise ValueError(f"{self.operation} requires variable")
@@ -250,6 +276,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         return _execute_coordinate_laplacian(request, sp, parser)
     if request.operation == "coordinate_curl":
         return _execute_coordinate_curl(request, sp, parser)
+    if request.operation == "solve_system":
+        return _execute_solve_system(request, sp, parser)
     if request.operation == "identity":
         parsing_started = perf_counter()
         lhs = parser.parse(request.lhs or "")
@@ -305,6 +333,8 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
         result = sp.expand(expression)
     elif request.operation == "trigexpand":
         result = sp.expand_trig(expression)
+    elif request.operation == "apart":
+        result = sp.apart(expression, variable)
     elif request.operation == "differentiate":
         result = sp.diff(expression, variable)
     elif request.operation == "limit":
@@ -455,6 +485,52 @@ def _execute(request: SymbolicRequest) -> dict[str, object]:
     if request.operation == "plot":
         response["plot_svg"] = plot_svg
     return response
+
+
+_MAX_SYSTEM_DEGREE = 8
+
+
+def _execute_solve_system(request: SymbolicRequest, sp: object, parser: object) -> dict[str, object]:
+    """Solve a bounded polynomial system, keeping only solutions that are not non-real."""
+    parsing_started = perf_counter()
+    names = list(request.variables or [])
+    unknowns = [_get_symbol(sp, {}, name) for name in names]
+    equations = [parser.parse(source) for source in request.equations or []]
+    parse_timing = perf_counter() - parsing_started
+    for equation in equations:
+        if not equation.is_polynomial(*unknowns):
+            raise SymbolicInputError("system solving supports polynomial equations only")
+        if sp.Poly(equation, *unknowns).total_degree() > _MAX_SYSTEM_DEGREE:
+            raise SymbolicInputError(
+                f"system equations are limited to total degree {_MAX_SYSTEM_DEGREE}"
+            )
+        if equation.free_symbols - set(unknowns):
+            raise SymbolicInputError("equations may contain only the listed variables")
+    solutions = sp.solve(equations, unknowns, dict=True)
+    real_solutions = [
+        solution for solution in solutions
+        if all(value.is_real is not False for value in solution.values())
+    ]
+    rendered = sorted(
+        "{" + ", ".join(f"{name} = {sp.sstr(solution.get(symbol, symbol))}"
+                        for name, symbol in zip(names, unknowns)) + "}"
+        for solution in real_solutions
+    )
+    result = ", ".join(rendered) if rendered else "no real solutions"
+    return {
+        "operation": "solve_system",
+        "result": result,
+        "numeric_approximation": None,
+        "parse_timing_seconds": parse_timing,
+        "input_mathml": None,
+        "result_mathml": None,
+        "assumptions": _assumptions_payload(request),
+        "evidence": _symbolic_evidence(sp),
+        "qualification": (
+            "Real solutions of the polynomial system computed by SymPy; this result is not a "
+            "Lean proof."
+        ),
+    }
 
 
 def _execute_coordinate_divergence(

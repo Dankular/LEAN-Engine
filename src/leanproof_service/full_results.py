@@ -50,8 +50,10 @@ from .knowledge import (
     supported_nist_constants,
 )
 from .math_svg import mathml_image
+from .descriptive_statistics import StatisticsError, evaluate_statistics
 from .matrix_algebra import MatrixAlgebraError, evaluate_matrix_algebra
 from .number_theory import NumberTheoryError, evaluate_number_theory
+from .unit_conversion import UnitConversionError, evaluate_unit_conversion
 from .natural_language_query import (
     NaturalLanguageClarification,
     NaturalLanguageOperation,
@@ -3510,6 +3512,17 @@ def _display_wikidata_amount(value: object) -> str | None:
     return format(number.normalize(), "f")
 
 
+_EXACT_QUERY_EVALUATORS = (
+    evaluate_number_theory,
+    evaluate_matrix_algebra,
+    evaluate_unit_conversion,
+    evaluate_statistics,
+)
+_EXACT_QUERY_ERRORS = (
+    NumberTheoryError, MatrixAlgebraError, UnitConversionError, StatisticsError,
+)
+
+
 def _number_theory_payload(
     planning_input: str,
     input_text: str,
@@ -3525,16 +3538,21 @@ def _number_theory_payload(
     scanners: list[str] | None,
 ) -> dict[str, Any] | None:
     try:
-        outcome = evaluate_number_theory(planning_input) or evaluate_matrix_algebra(
-            planning_input
+        outcome = next(
+            (
+                found for found in (
+                    evaluator(planning_input) for evaluator in _EXACT_QUERY_EVALUATORS
+                ) if found is not None
+            ),
+            None,
         )
-    except (NumberTheoryError, MatrixAlgebraError) as exc:
+    except _EXACT_QUERY_ERRORS as exc:
         return _unrecognized_query(input_text, str(exc), perf_counter() - started)
     if outcome is None:
         return None
     if assumptions:
         raise AssumptionSelectionError(
-            "assumption selections do not apply to integer number-theory or matrix queries"
+            "assumption selections do not apply to exact number-theory, matrix, unit-conversion, and statistics queries"
         )
     pods = _initial_pods(
         input_text, outcome.input_text, outcome.result_text, formats,
@@ -3569,7 +3587,7 @@ def _number_theory_payload(
         evidence["formal_verification"] = {
             "status": "unsupported",
             "verified": False,
-            "reason": "Lean verification is not implemented for number-theory or matrix queries.",
+            "reason": "Lean verification is not implemented for number-theory, matrix, unit-conversion, or statistics queries.",
         }
         qualification = (
             "Exact computation with SymPy. Lean verification was requested but is "
@@ -3946,6 +3964,16 @@ def _prepare_query(
             raise InterpretationError(str(exc)) from exc
         normalized_fields[field] = parsed_input.expression
         input_formats.add(parsed_input.input_format)
+    if operation_request.equations is not None:
+        normalized_equations = []
+        for value in operation_request.equations:
+            try:
+                parsed_equation = parse_math_input(value)
+            except MathInputError as exc:
+                raise InterpretationError(str(exc)) from exc
+            normalized_equations.append(parsed_equation.expression)
+            input_formats.add(parsed_equation.input_format)
+        normalized_fields["equations"] = normalized_equations
     operation_request = operation_request.model_copy(update={
         **normalized_fields,
         **(
@@ -3966,6 +3994,7 @@ def _prepare_query(
             operation_request.point,
         ) if value is not None
     ]
+    expressions.extend(operation_request.equations or [])
     parse_timing = perf_counter() - parse_started
     if expressions:
         combined_expression = " + ".join(f"({value})" for value in expressions)
@@ -3992,6 +4021,9 @@ def _prepare_query(
         "expression": operation_request.expression,
         "variable": operation_request.variable,
     }
+    if operation_request.equations is not None:
+        typed_ast["equations"] = operation_request.equations
+        typed_ast["variables"] = operation_request.variables
     if operation_request.lhs is not None:
         typed_ast["lhs"] = operation_request.lhs
         typed_ast["rhs"] = operation_request.rhs
@@ -4082,8 +4114,18 @@ def _request_from_natural_language_plan(
             raise InterpretationError("natural-language identity did not produce a supported query")
         return request
 
+    if plan.operation == "solve_system":
+        if plan.equations is None or not plan.variables:
+            raise InterpretationError("system solving requires equations and variables")
+        return SymbolicRequest(
+            operation="solve_system",
+            equations=list(plan.equations),
+            variables=list(plan.variables),
+            time_limit_seconds=5,
+        )
+
     arguments = [plan.expression]
-    if plan.operation in {"differentiate", "solve", "integrate", "limit", "series", "sum", "product", "plot"}:
+    if plan.operation in {"differentiate", "solve", "apart", "integrate", "limit", "series", "sum", "product", "plot"}:
         if plan.variable is None:
             raise InterpretationError(f"{plan.operation} requires an explicit variable")
         arguments.append(plan.variable)
@@ -4159,6 +4201,7 @@ def _parse_operation_call(query: str) -> SymbolicRequest | None:
         "product": "product",
         "prod": "product",
         "solve": "solve",
+        "apart": "apart",
         "identity": "identity",
         "plot": "plot",
     }
@@ -4185,6 +4228,7 @@ def _operation_request(
         "integrate": "integrate", "integral": "integrate", "limit": "limit", "series": "series",
         "sum": "sum", "summation": "sum", "product": "product", "prod": "product",
         "solve": "solve",
+        "apart": "apart",
         "identity": "identity",
         "plot": "plot",
     }
@@ -4213,7 +4257,15 @@ def _operation_request(
         return SymbolicRequest(
             operation="identity", lhs=arguments[0], rhs=arguments[1], time_limit_seconds=5
         )
-    if operation in {"differentiate", "solve"}:
+    if operation == "apart" and len(arguments) == 1:
+        symbols = free_symbols(arguments[0])
+        if len(symbols) != 1:
+            raise InterpretationError("apart with one argument needs exactly one variable")
+        return SymbolicRequest(
+            operation="apart", expression=arguments[0], variable=symbols[0],
+            time_limit_seconds=5,
+        )
+    if operation in {"differentiate", "solve", "apart"}:
         if len(arguments) != 2 or variable is None or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", variable):
             raise InterpretationError(f"{operation_name} requires an expression and a variable name")
         return SymbolicRequest(
@@ -4964,6 +5016,13 @@ def _wolfram_input_for_query(
         return f"D[{rendered_expression}, {variable}]"
     if request.operation == "solve" and rendered_expression is not None and variable:
         return f"Solve[{rendered_expression} == 0, {variable}]"
+    if request.operation == "apart" and rendered_expression is not None and variable:
+        return f"Apart[{rendered_expression}, {variable}]"
+    if request.operation == "solve_system" and request.equations and request.variables:
+        rendered = [_wolfram_expression(equation) for equation in request.equations]
+        if all(item is not None for item in rendered):
+            names = ", ".join(_wolfram_symbol(name) for name in request.variables)
+            return f"Solve[{{{', '.join(f'{item} == 0' for item in rendered)}}}, {{{names}}}]"
     if request.operation == "integrate" and rendered_expression is not None and variable:
         if request.lower is None or request.upper is None:
             return f"Integrate[{rendered_expression}, {variable}]"
